@@ -60,7 +60,9 @@ reporter-registry  ◀── role_of ──  coverage-ledger  ◀── is_cover
                                          └── name() ──▶ Stellar Asset Contract
 ```
 
-The full function-by-function specification is in [docs/SPEC.md](docs/SPEC.md).
+The full function-by-function specification is in [docs/SPEC.md](docs/SPEC.md),
+and the event topic and data layouts every off-chain reader depends on are in
+[docs/EVENTS.md](docs/EVENTS.md).
 
 ### Why it is Stellar-specific
 

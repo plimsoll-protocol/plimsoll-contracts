@@ -94,7 +94,8 @@ Records what was said, and answers coverage questions.
 | `Supply(Address)` | persistent | `SupplySnapshot` (latest only) |
 | `Report(Address, Tier)` | persistent | `ReserveReport` (latest per tier) |
 
-History lives in events. The indexer keeps the full series.
+History lives in events. The indexer keeps the full series. Their topic and
+data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 
 **Functions**
 
