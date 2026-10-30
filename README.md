@@ -96,9 +96,15 @@ Requirements: Rust stable with the `wasm32v1-none` target, and
 git clone https://github.com/plimsoll-protocol/plimsoll-contracts
 cd plimsoll-contracts
 
-cargo test                 # 53 tests across all crates
+cargo test                 # 58 tests across all crates
 stellar contract build     # wasm in target/wasm32v1-none/release/
+
+python3 scripts/check_wasm_sizes.py   # each wasm against its size budget
 ```
+
+The size budgets live in [size-budgets.json](size-budgets.json) and CI enforces
+them, so a contract cannot quietly grow towards the install limit. Raising one
+is fine; doing it in the commit that needs the room is the point.
 
 Deploy your own copy to testnet (creates and funds the identities it needs):
 

@@ -29,5 +29,5 @@ jobs:
       # soroban-sdk 28 only builds contract wasm under `stellar contract build`.
       - name: Build wasm
         run: stellar contract build
-      - name: Report wasm sizes
-        run: ls -l target/wasm32v1-none/release/*.wasm
+      - name: Check wasm size budgets
+        run: python3 scripts/check_wasm_sizes.py
