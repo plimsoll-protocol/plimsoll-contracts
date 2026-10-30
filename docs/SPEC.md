@@ -107,6 +107,7 @@ History lives in events. The indexer keeps the full series.
 | `get_asset(sac)` | — | `Option<AssetRecord>` | — | — |
 | `get_supply(sac)` | — | `Option<SupplySnapshot>` | — | — |
 | `get_report(sac, tier: Tier)` | — | `Option<ReserveReport>` | — | — |
+| `get_reports(sac)` | — | `Vec<ReserveReport>` (latest per tier, strongest first, missing tiers skipped) | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | — | — |
 | `registry()` / `admin()` | — | `Address` | — | — |
@@ -166,7 +167,7 @@ Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
 | Volunteer copies a figure from a PDF report | `coverage-ledger.post_reserve` (transcriber) |
 | Maintainer onboards an auditor / transcriber / poster | `reporter-registry.set_reporter` |
 | Maintainer removes a bad actor | `reporter-registry.revoke` |
-| Dashboard shows ratio and freshness | `coverage-ledger.coverage`, `get_supply`, `get_report` |
+| Dashboard shows ratio and freshness | `coverage-ledger.coverage`, `get_supply`, `get_reports` |
 | Lending pool refuses an under-backed asset | `coverage-ledger.is_covered` (see `covered-vault`) |
 
 ## Out of scope for v0.1

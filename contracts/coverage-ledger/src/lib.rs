@@ -9,7 +9,7 @@ use plimsoll_types::{
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
-    Address, BytesN, ContractExecutable, Env, Executable, String,
+    Address, BytesN, ContractExecutable, Env, Executable, String, Vec,
 };
 
 const MAX_URI_LEN: u32 = 256;
@@ -342,6 +342,20 @@ impl CoverageLedger {
 
     pub fn get_report(env: Env, sac: Address, tier: Tier) -> Option<ReserveReport> {
         read_persistent(&env, &DataKey::Report(sac, tier))
+    }
+
+    /// Every tier's latest report, strongest first, skipping tiers with none.
+    /// Showing all of them took three calls; this takes one.
+    pub fn get_reports(env: Env, sac: Address) -> Vec<ReserveReport> {
+        let mut out = Vec::new(&env);
+        for tier in Tier::ALL_DESC {
+            if let Some(report) =
+                read_persistent::<ReserveReport>(&env, &DataKey::Report(sac.clone(), tier))
+            {
+                out.push_back(report);
+            }
+        }
+        out
     }
 
     /// Latest supply against the freshest report at `min_tier` or stronger.

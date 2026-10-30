@@ -356,6 +356,100 @@ fn report_rejects_negative_amount() {
     assert_eq!(res, Err(Ok(LedgerError::InvalidAmount.into())));
 }
 
+// ---- get_reports ----------------------------------------------------------
+
+#[test]
+fn get_reports_is_empty_when_nothing_is_posted() {
+    let f = listed();
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 0);
+}
+
+#[test]
+fn get_reports_returns_the_one_posted_tier() {
+    let f = listed();
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(1_000 * UNIT),
+        &(T0 - 60),
+        &hash(&f.env, 9),
+        &uri(&f.env),
+    );
+    let reports = f.ledger.get_reports(&f.sac);
+    assert_eq!(reports.len(), 1);
+    let only = reports.get(0).unwrap();
+    assert_eq!(only.tier, Tier::IssuerSigned);
+    assert_eq!(only.amount, 1_000 * UNIT);
+}
+
+#[test]
+fn get_reports_returns_every_tier_strongest_first() {
+    let f = listed();
+    f.ledger.post_reserve(
+        &f.transcriber,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 1),
+        &uri(&f.env),
+    );
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(2 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    f.ledger.post_reserve(
+        &f.auditor,
+        &f.sac,
+        &(3 * UNIT),
+        &T0,
+        &hash(&f.env, 3),
+        &uri(&f.env),
+    );
+    let reports = f.ledger.get_reports(&f.sac);
+    assert_eq!(reports.len(), 3);
+    assert_eq!(reports.get(0).unwrap().tier, Tier::AuditorSigned);
+    assert_eq!(reports.get(1).unwrap().tier, Tier::IssuerSigned);
+    assert_eq!(reports.get(2).unwrap().tier, Tier::Transcribed);
+    // Same order as calling get_report once per tier.
+    for report in reports.iter() {
+        assert_eq!(f.ledger.get_report(&f.sac, &report.tier), Some(report));
+    }
+}
+
+#[test]
+fn get_reports_keeps_the_latest_per_tier() {
+    let f = listed();
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &UNIT,
+        &(T0 - 600),
+        &hash(&f.env, 1),
+        &uri(&f.env),
+    );
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(5 * UNIT),
+        &(T0 - 60),
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    let reports = f.ledger.get_reports(&f.sac);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports.get(0).unwrap().amount, 5 * UNIT);
+}
+
+#[test]
+fn get_reports_on_an_unlisted_asset_is_empty() {
+    let f = setup();
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 0);
+}
+
 // ---- coverage / is_covered ------------------------------------------------
 
 #[test]
