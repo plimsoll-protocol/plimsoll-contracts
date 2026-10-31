@@ -1,0 +1,106 @@
+name: Demo coverage
+
+# The demo's reserve reports expire. The PUSD vault asks for one at most 7 days
+# old, and the hand-written statements it used to rely on were dated
+# 2026-10-07, so from 2026-10-14 the coverage check answered false for an asset
+# backed at 102% and both demo vaults refused deposits. Nothing noticed: CI was
+# green, the indexer was healthy, and the only broken thing was the answer the
+# demo exists to give.
+#
+# So `verify` asks the contract itself, every day, whether the demo still says
+# what it claims, and `restate` keeps the reports fresh so the answer stays
+# right. `verify` runs whether or not `restate` is configured, because a
+# monitor that stays quiet when it cannot act is how the last outage lasted
+# sixteen days.
+on:
+  schedule:
+    - cron: "41 5,17 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # A standing statement lives at a stable path, so editing one invalidates
+    # the doc_hash already on chain and needs an immediate restatement.
+    paths:
+      - docs/demo/pusd-reserves.md
+      - docs/demo/qusd-reserves.md
+      - scripts/refresh-demo-reserves.sh
+      - deployments/testnet.json
+      - .github/workflows/demo.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-coverage
+  cancel-in-progress: false
+
+jobs:
+  restate:
+    name: restate reserves
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ISSUER_SECRET: ${{ secrets.DEMO_ISSUER_SECRET }}
+      AUDITOR_SECRET: ${{ secrets.DEMO_AUDITOR_SECRET }}
+      TRANSCRIBER_SECRET: ${{ secrets.DEMO_TRANSCRIBER_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Secrets are not available to a job-level `if`, so the gate is a step.
+      - name: Are the demo reporter keys configured?
+        id: keys
+        run: |
+          if [ -n "$ISSUER_SECRET" ] && [ -n "$AUDITOR_SECRET" ] && [ -n "$TRANSCRIBER_SECRET" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Restating is not configured, so the reports will expire on their own. Add the repository secrets DEMO_ISSUER_SECRET, DEMO_AUDITOR_SECRET and DEMO_TRANSCRIBER_SECRET (the S-keys of the demo reporters) to let this job keep them fresh. The verify job below is what will go red when they do expire."
+          fi
+
+      - name: Install Stellar CLI
+        if: steps.keys.outputs.configured == 'true'
+        run: |
+          curl -sSfL https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C /usr/local/bin stellar
+          stellar --version
+
+      - name: Does anything need restating?
+        id: due
+        if: steps.keys.outputs.configured == 'true'
+        run: |
+          if ./scripts/refresh-demo-reserves.sh due; then
+            echo "due=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "due=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Load the demo reporter keys
+        if: steps.due.outputs.due == 'true'
+        run: |
+          load() { printf '%s\n' "$2" | stellar keys add "$1" --secret-key; }
+          load plimsoll-issuer "$ISSUER_SECRET"
+          load plimsoll-auditor "$AUDITOR_SECRET"
+          load plimsoll-transcriber "$TRANSCRIBER_SECRET"
+
+      - name: Restate the reserves
+        if: steps.due.outputs.due == 'true'
+        run: ./scripts/refresh-demo-reserves.sh post
+
+  verify:
+    name: verify the demo's answers
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: restate
+    # Runs even when restating was skipped or failed: its whole job is to say
+    # whether the demo is currently right.
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Stellar CLI
+        run: |
+          curl -sSfL https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C /usr/local/bin stellar
+          stellar --version
+      # Reads are simulated against an account whose keys nobody needs.
+      - name: Check coverage answers and document hashes
+        run: ./scripts/refresh-demo-reserves.sh verify

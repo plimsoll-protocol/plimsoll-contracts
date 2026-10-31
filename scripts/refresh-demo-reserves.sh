@@ -3,7 +3,7 @@
 # answers what it claims to answer.
 #
 #   ./scripts/refresh-demo-reserves.sh verify   # is the demo intact?
-#   ./scripts/refresh-demo-reserves.sh due      # are the reports ageing out?
+#   ./scripts/refresh-demo-reserves.sh due      # does anything need restating?
 #   ./scripts/refresh-demo-reserves.sh post     # restate the reserves on chain
 #
 # The demo's supply side is posted by the indexer every 15 minutes, but its
@@ -38,12 +38,11 @@ cd "$(dirname "$0")/.."
 NETWORK=${NETWORK:-testnet}
 DEP=deployments/testnet.json
 RAW=https://raw.githubusercontent.com/plimsoll-protocol/plimsoll-contracts/main
-TODAY=$(date -u +%F)
-AS_OF=$(date -u -d "$TODAY 00:00:00" +%s)
 NOW=$(date -u +%s)
 # Restate while the reports still have days of life left, so a few missed
 # scheduled runs cannot expire the demo.
 REFRESH_AFTER_DAYS=${REFRESH_AFTER_DAYS:-3}
+MAX_AGE=$((REFRESH_AFTER_DAYS * 86400))
 
 # code | reserves in stroops | signing identity | tier the contract will assign
 REPORTS="
@@ -62,7 +61,18 @@ PUSD|10000|604800|2|true
 QUSD|10000|2678400|1|false
 "
 
-json() { python -c "import json,sys;d=json.load(open('$DEP'));print(eval(sys.argv[1]))" "$1"; }
+# Linux CI has python3 and no python; Windows has a python3 that is a Microsoft
+# Store stub resolving on PATH and exiting 49. Run the probe, not `command -v`.
+PY=""
+for candidate in python3 python; do
+  if "$candidate" -c "" > /dev/null 2>&1; then
+    PY=$candidate
+    break
+  fi
+done
+[ -n "$PY" ] || { echo "no working python interpreter on PATH" >&2; exit 1; }
+
+json() { "$PY" -c "import json,sys;d=json.load(open('$DEP'));print(eval(sys.argv[1]))" "$1"; }
 LEDGER=$(json "d['contracts']['coverageLedger']")
 # Any account works as the source of a read-only simulation, and none of its
 # keys are needed.
@@ -74,15 +84,29 @@ read_call() {
 }
 sac_of() { json "d['assets']['$1']['sac']"; }
 doc_path() { echo "docs/demo/$(echo "$1" | tr '[:upper:]' '[:lower:]')-reserves.md"; }
+hash_of() { sha256sum < "$1" | cut -c1-64; }
 
-# Prints the age in seconds of the report at a tier, or -1 if there is none.
-report_age() {
-  local report
-  report=$(read_call get_report --sac "$(sac_of "$1")" --tier "$2")
-  REPORT_JSON="$report" AT="$NOW" python -c "
+# Why the report at a tier needs restating, or nothing if it does not.
+#
+# Age is one reason. A doc_hash that no longer matches the document is the
+# other: these statements live at a stable path, so editing one invalidates the
+# hash already on chain and has to be followed by a restatement rather than
+# waiting for the next due date.
+restate_reason() {
+  local code=$1 tier=$2 report want
+  report=$(read_call get_report --sac "$(sac_of "$code")" --tier "$tier")
+  want=$(hash_of "$(doc_path "$code")")
+  REPORT_JSON="$report" AT="$NOW" MAX_AGE="$MAX_AGE" WANT="$want" "$PY" -c "
 import json, os
 r = json.loads(os.environ['REPORT_JSON'] or 'null')
-print(-1 if not r else int(os.environ['AT']) - r['as_of'])
+if not r:
+    print('no report at all')
+    raise SystemExit
+age = int(os.environ['AT']) - r['as_of']
+if age > int(os.environ['MAX_AGE']):
+    print(f\"stated {age // 86400}d {age % 86400 // 3600}h ago\")
+elif r['doc_hash'] != os.environ['WANT']:
+    print(f\"doc_hash {r['doc_hash'][:12]}... no longer matches the document\")
 "
 }
 
@@ -90,82 +114,107 @@ case "$MODE" in
 
 verify)
   failed=0
-  while IFS='|' read -r CODE MIN_BPS MAX_AGE MIN_TIER WANT; do
+
+  while IFS='|' read -r CODE MIN_BPS AGE_LIMIT MIN_TIER WANT; do
     [ -n "$CODE" ] || continue
     SAC=$(sac_of "$CODE")
-    GOT=$(read_call is_covered --sac "$SAC" --min_bps "$MIN_BPS" --max_age "$MAX_AGE" --min_tier "$MIN_TIER")
+    GOT=$(read_call is_covered --sac "$SAC" --min_bps "$MIN_BPS" --max_age "$AGE_LIMIT" --min_tier "$MIN_TIER")
     if [ "$GOT" = "$WANT" ]; then
-      echo "ok   $CODE is_covered($MIN_BPS, $MAX_AGE, $MIN_TIER) = $GOT"
+      echo "ok   $CODE is_covered($MIN_BPS, $AGE_LIMIT, $MIN_TIER) = $GOT"
       continue
     fi
-    echo "FAIL $CODE is_covered($MIN_BPS, $MAX_AGE, $MIN_TIER) = ${GOT:-<no answer>}, expected $WANT"
+    echo "FAIL $CODE is_covered($MIN_BPS, $AGE_LIMIT, $MIN_TIER) = ${GOT:-<no answer>}, expected $WANT"
     echo "     coverage: $(read_call coverage --sac "$SAC" --min_tier "$MIN_TIER")"
     echo "     now:      $NOW ($(date -u +%FT%TZ))"
     failed=1
   done <<< "$CLAIMS"
+
+  # Plimsoll's promise is that anyone can download the document a report names
+  # and reproduce its hash. Check it rather than assume it.
+  while IFS='|' read -r CODE _RESERVES _SIGNER TIER; do
+    [ -n "$CODE" ] || continue
+    REPORT=$(read_call get_report --sac "$(sac_of "$CODE")" --tier "$TIER")
+    if [ -z "$REPORT" ] || [ "$REPORT" = null ]; then
+      echo "FAIL $CODE tier $TIER has no report"
+      failed=1
+      continue
+    fi
+    URI=$(REPORT_JSON="$REPORT" "$PY" -c "import json,os;print(json.loads(os.environ['REPORT_JSON'])['doc_uri'])")
+    ON_CHAIN=$(REPORT_JSON="$REPORT" "$PY" -c "import json,os;print(json.loads(os.environ['REPORT_JSON'])['doc_hash'])")
+    SERVED=$(curl -sfL --max-time 60 --retry 3 --retry-delay 5 "$URI" | sha256sum | cut -c1-64)
+    if [ "$SERVED" = "$ON_CHAIN" ]; then
+      echo "ok   $CODE tier $TIER doc_hash matches $URI"
+    else
+      echo "FAIL $CODE tier $TIER doc_hash is $ON_CHAIN but $URI hashes to ${SERVED:-<unreachable>}"
+      failed=1
+    fi
+  done <<< "$REPORTS"
+
   if [ "$failed" != 0 ]; then
     echo
-    echo "The demo is not showing what it claims. If a report aged out, restate"
-    echo "the reserves with: $0 post"
+    echo "The demo is not showing what it claims. Restate the reserves with:"
+    echo "  $0 post"
     exit 1
   fi
-  echo "The demo's coverage answers are intact."
+  echo "The demo's coverage answers are intact and every document verifies."
   ;;
 
 due)
-  oldest=0
-  limit=$((REFRESH_AFTER_DAYS * 86400))
+  due=1
   while IFS='|' read -r CODE _RESERVES _SIGNER TIER; do
     [ -n "$CODE" ] || continue
-    age=$(report_age "$CODE" "$TIER")
-    if [ "$age" -lt 0 ]; then
-      echo "$CODE tier $TIER has no report at all"
-      oldest=$((limit + 1))
-      continue
+    REASON=$(restate_reason "$CODE" "$TIER")
+    if [ -n "$REASON" ]; then
+      echo "$CODE tier $TIER needs restating: $REASON"
+      due=0
+    else
+      echo "$CODE tier $TIER is current"
     fi
-    echo "$CODE tier $TIER was stated $((age / 86400))d $(((age % 86400) / 3600))h ago"
-    [ "$age" -gt "$oldest" ] && oldest=$age
   done <<< "$REPORTS"
-  if [ "$oldest" -gt "$limit" ]; then
-    echo "due: a report is older than $REFRESH_AFTER_DAYS days"
-    exit 0
-  fi
-  echo "not due: every report is within $REFRESH_AFTER_DAYS days"
-  exit 1
+  [ "$due" = 0 ] && echo "due" || echo "not due: every report is within $REFRESH_AFTER_DAYS days"
+  exit "$due"
   ;;
 
 post)
   # The hash we record has to be the hash of the document GitHub serves, or the
   # report points at something nobody else can verify.
-  for DOC in $(awk -F'|' 'NF{print $1}' <<< "$REPORTS" | awk '!seen[$0]++' | while read -r c; do doc_path "$c"; done); do
+  for CODE in $(awk -F'|' 'NF{print $1}' <<< "$REPORTS" | awk '!seen[$0]++'); do
+    DOC=$(doc_path "$CODE")
     [ -f "$DOC" ] || { echo "$DOC is missing from the working tree" >&2; exit 1; }
-    WANT=$(sha256sum < "$DOC" | cut -c1-64)
-    GOT=$(curl -sfL --retry 3 --retry-delay 5 "$RAW/$DOC" | sha256sum | cut -c1-64)
-    if [ "$GOT" != "$WANT" ]; then
-      echo "$RAW/$DOC does not match the local file; commit and push it first" >&2
-      exit 1
-    fi
+    WANT=$(hash_of "$DOC")
+    # Right after a push, raw.githubusercontent.com can serve the previous
+    # content for a short while, so a mismatch is worth waiting out before
+    # calling it an unpushed edit.
+    for attempt in $(seq 1 10); do
+      SERVED=$(curl -sfL --max-time 60 --retry 2 --retry-delay 5 "$RAW/$DOC" | sha256sum | cut -c1-64)
+      [ "$SERVED" = "$WANT" ] && break
+      if [ "$attempt" = 10 ]; then
+        echo "$RAW/$DOC hashes to ${SERVED:-<unreachable>}, not $WANT." >&2
+        echo "Commit and push the document before recording its hash on chain." >&2
+        exit 1
+      fi
+      echo "waiting for GitHub to serve the current $DOC (attempt $attempt)"
+      sleep 20
+    done
   done
 
   while IFS='|' read -r CODE RESERVES SIGNER TIER; do
     [ -n "$CODE" ] || continue
-    DOC=$(doc_path "$CODE")
-    age=$(report_age "$CODE" "$TIER")
-    # post_reserve requires a strictly newer as_of, and refuses one in the
-    # future, so there is exactly one restatement per tier per day.
-    if [ "$age" -ge 0 ] && [ "$age" -le $((NOW - AS_OF)) ]; then
-      echo "$CODE tier $TIER: already restated today"
+    REASON=$(restate_reason "$CODE" "$TIER")
+    if [ -z "$REASON" ]; then
+      echo "$CODE tier $TIER: current, leaving it alone"
       continue
     fi
-    echo "$CODE tier $TIER: restating $RESERVES as of $TODAY, signed by $SIGNER"
+    DOC=$(doc_path "$CODE")
+    echo "$CODE tier $TIER: restating $RESERVES ($REASON), signed by $SIGNER"
     stellar contract invoke --network "$NETWORK" --source "$SIGNER" --id "$LEDGER" -- \
       post_reserve --reporter "$(stellar keys address "$SIGNER" | tr -d '\r')" \
-      --sac "$(sac_of "$CODE")" --amount "$RESERVES" --as_of "$AS_OF" \
-      --doc_hash "$(sha256sum < "$DOC" | cut -c1-64)" --doc_uri "$RAW/$DOC" > /dev/null
+      --sac "$(sac_of "$CODE")" --amount "$RESERVES" --as_of "$NOW" \
+      --doc_hash "$(hash_of "$DOC")" --doc_uri "$RAW/$DOC" > /dev/null
   done <<< "$REPORTS"
 
   echo
-  echo "Reserve reports are current as of $TODAY. The indexer picks the"
-  echo "reserve_posted events up within ~15 minutes."
+  echo "Reserve reports are current. The indexer picks the reserve_posted"
+  echo "events up within ~15 minutes."
   ;;
 esac
