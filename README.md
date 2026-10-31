@@ -122,6 +122,26 @@ stellar contract invoke --network testnet --send=no \
   coverage --sac CCHPT4TEJDPZQDSUVW3NP6A35ROGV4WEFZKT45SKWYCFZSUB7R5HIM7S --min_tier 1
 ```
 
+### Keeping the demo honest
+
+A reserve report expires. The PUSD vault asks for one at most 7 days old, so
+the demo needs its reserves restated or it quietly stops demonstrating
+anything — `is_covered` starts answering false for a well-backed asset, and
+both demo vaults refuse deposits for different reasons that look identical
+from outside.
+
+```bash
+./scripts/refresh-demo-reserves.sh verify   # does the demo still say what it claims?
+./scripts/refresh-demo-reserves.sh post     # restate the reserves (needs the reporter keys)
+```
+
+`verify` needs no keys: it asks the contract whether PUSD is covered and QUSD
+is refused, and checks that every report's `doc_hash` still matches the
+document it points at. The [Demo coverage](.github/workflows/demo.yml) workflow
+runs it twice a day and restates the reserves when they are more than three
+days old, which keeps the standing statements in
+[docs/demo](docs/demo) matching what is on chain.
+
 ## Contributing
 
 Issues labelled [`good first issue`](https://github.com/plimsoll-protocol/plimsoll-contracts/labels/good%20first%20issue)
