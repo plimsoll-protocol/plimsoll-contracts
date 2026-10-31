@@ -21,7 +21,8 @@
 # transaction per tier and no commit.
 #
 # Reads need no key. `post` needs the demo reporter identities
-# (plimsoll-issuer, plimsoll-auditor, plimsoll-transcriber).
+# (plimsoll-issuer, plimsoll-auditor, plimsoll-transcriber), and restates only
+# what needs it unless FORCE=true.
 set -euo pipefail
 
 MODE=${1:-}
@@ -78,9 +79,23 @@ LEDGER=$(json "d['contracts']['coverageLedger']")
 # keys are needed.
 READ_SOURCE=${READ_SOURCE:-$(json "d['accounts']['admin']")}
 
+# A read that fails is not a read that returned nothing. Conflating the two
+# once reported a tier as having no report at all while it had a valid one, and
+# in `verify` that conflation is a false alarm rather than a spurious write, so
+# a read retries and then gives up loudly. A contract returning `null` exits 0
+# and is passed through as "null".
 read_call() {
-  stellar contract invoke --network "$NETWORK" --source-account "$READ_SOURCE" \
-    --send=no --id "$LEDGER" -- "$@" 2>/dev/null | tail -1 | tr -d '\r'
+  local out attempt
+  for attempt in 1 2 3; do
+    if out=$(stellar contract invoke --network "$NETWORK" --source-account "$READ_SOURCE" \
+      --send=no --id "$LEDGER" -- "$@" 2> /dev/null); then
+      printf '%s\n' "$out" | tail -1 | tr -d '\r'
+      return 0
+    fi
+    sleep $((attempt * 3))
+  done
+  echo "read failed after 3 attempts: $*" >&2
+  return 1
 }
 sac_of() { json "d['assets']['$1']['sac']"; }
 doc_path() { echo "docs/demo/$(echo "$1" | tr '[:upper:]' '[:lower:]')-reserves.md"; }
@@ -201,6 +216,9 @@ post)
   while IFS='|' read -r CODE RESERVES SIGNER TIER; do
     [ -n "$CODE" ] || continue
     REASON=$(restate_reason "$CODE" "$TIER")
+    if [ -z "$REASON" ] && [ "${FORCE:-}" = true ]; then
+      REASON="forced"
+    fi
     if [ -z "$REASON" ]; then
       echo "$CODE tier $TIER: current, leaving it alone"
       continue
