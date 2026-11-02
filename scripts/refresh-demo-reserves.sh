@@ -40,6 +40,14 @@ NETWORK=${NETWORK:-testnet}
 DEP=deployments/testnet.json
 RAW=https://raw.githubusercontent.com/plimsoll-protocol/plimsoll-contracts/main
 NOW=$(date -u +%s)
+# post_reserve refuses an as_of after env.ledger().timestamp(), which is the
+# last *closed* ledger and so trails wall-clock by a few seconds. Dating a
+# restatement at this moment is therefore a race against ledger close that
+# loses with error #9 FutureTimestamp; it lost the first time this ran in CI.
+# Freshness is judged in days, so standing a couple of minutes back costs
+# nothing and settles it.
+AS_OF_LAG=${AS_OF_LAG:-120}
+AS_OF=$((NOW - AS_OF_LAG))
 # Restate while the reports still have days of life left, so a few missed
 # scheduled runs cannot expire the demo.
 REFRESH_AFTER_DAYS=${REFRESH_AFTER_DAYS:-3}
@@ -107,6 +115,9 @@ hash_of() { sha256sum < "$1" | cut -c1-64; }
 # other: these statements live at a stable path, so editing one invalidates the
 # hash already on chain and has to be followed by a restatement rather than
 # waiting for the next due date.
+# Prints "<age in seconds><tab><reason>": the age of the report at a tier, -1
+# if there is none, and why it needs restating, empty if it does not. Both come
+# from one read.
 restate_reason() {
   local code=$1 tier=$2 report want
   report=$(read_call get_report --sac "$(sac_of "$code")" --tier "$tier")
@@ -115,14 +126,25 @@ restate_reason() {
 import json, os
 r = json.loads(os.environ['REPORT_JSON'] or 'null')
 if not r:
-    print('no report at all')
+    print('-1\tno report at all')
     raise SystemExit
 age = int(os.environ['AT']) - r['as_of']
 if age > int(os.environ['MAX_AGE']):
-    print(f\"stated {age // 86400}d {age % 86400 // 3600}h ago\")
+    reason = f'stated {age // 86400}d {age % 86400 // 3600}h ago'
 elif r['doc_hash'] != os.environ['WANT']:
-    print(f\"doc_hash {r['doc_hash'][:12]}... no longer matches the document\")
+    reason = f'doc_hash {r[\"doc_hash\"][:12]}... no longer matches the document'
+else:
+    reason = ''
+print(f'{age}\t{reason}')
 "
+}
+
+# Splits what restate_reason printed into AGE and REASON.
+read_reason() {
+  local line
+  line=$(restate_reason "$1" "$2")
+  AGE=${line%%$'\t'*}
+  REASON=${line#*$'\t'}
 }
 
 case "$MODE" in
@@ -178,7 +200,7 @@ due)
   due=1
   while IFS='|' read -r CODE _RESERVES _SIGNER TIER; do
     [ -n "$CODE" ] || continue
-    REASON=$(restate_reason "$CODE" "$TIER")
+    read_reason "$CODE" "$TIER"
     if [ -n "$REASON" ]; then
       echo "$CODE tier $TIER needs restating: $REASON"
       due=0
@@ -215,7 +237,7 @@ post)
 
   while IFS='|' read -r CODE RESERVES SIGNER TIER; do
     [ -n "$CODE" ] || continue
-    REASON=$(restate_reason "$CODE" "$TIER")
+    read_reason "$CODE" "$TIER"
     if [ -z "$REASON" ] && [ "${FORCE:-}" = true ]; then
       REASON="forced"
     fi
@@ -223,11 +245,18 @@ post)
       echo "$CODE tier $TIER: current, leaving it alone"
       continue
     fi
+    # post_reserve also refuses an as_of that is not strictly newer than the one
+    # on chain, so a restatement within the lag window has no date left to take.
+    # Only a forced run gets here, and there is nothing it needs to fix.
+    if [ "$AGE" -ge 0 ] && [ "$AGE" -le "$AS_OF_LAG" ]; then
+      echo "$CODE tier $TIER: restated ${AGE}s ago, which is as current as it can be"
+      continue
+    fi
     DOC=$(doc_path "$CODE")
     echo "$CODE tier $TIER: restating $RESERVES ($REASON), signed by $SIGNER"
     stellar contract invoke --network "$NETWORK" --source "$SIGNER" --id "$LEDGER" -- \
       post_reserve --reporter "$(stellar keys address "$SIGNER" | tr -d '\r')" \
-      --sac "$(sac_of "$CODE")" --amount "$RESERVES" --as_of "$NOW" \
+      --sac "$(sac_of "$CODE")" --amount "$RESERVES" --as_of "$AS_OF" \
       --doc_hash "$(hash_of "$DOC")" --doc_uri "$RAW/$DOC" > /dev/null
   done <<< "$REPORTS"
 
