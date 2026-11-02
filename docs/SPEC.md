@@ -104,7 +104,7 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `__constructor(admin: Address, registry: Address)` | — | — | — | — |
 | `list_asset(sac: Address)` | none (permissionless) | `AssetRecord` | `NotAStellarAsset`, `AlreadyListed` | `asset_listed {sac} code, issuer` |
 | `post_supply(poster: Address, sac: Address, amount: i128, ledger: u32, breakdown_hash: BytesN<32>)` | poster | `()` | `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` | `supply_posted {sac} amount, ledger, breakdown_hash, poster` |
-| `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
+| `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `ImplausibleAmount` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
 | `get_asset(sac)` | — | `Option<AssetRecord>` | — | — |
 | `get_supply(sac)` | — | `Option<SupplySnapshot>` | — | — |
 | `get_report(sac, tier: Tier)` | — | `Option<ReserveReport>` | — | — |
@@ -130,6 +130,17 @@ Rules:
 - Supply snapshots must move forward: `ledger` strictly greater than the stored
   one and not greater than the current ledger. Reports per tier must move
   forward: `as_of` strictly greater than the stored one and not in the future.
+- `post_reserve` rejects a figure whose coverage against the stored supply
+  would fall outside `MIN_PLAUSIBLE_BPS = 1` (0.01%) to
+  `MAX_PLAUSIBLE_BPS = 1_000_000` (10,000%), with `ImplausibleAmount`. Amounts
+  are in the asset's smallest unit, so a reporter who types whole units posts a
+  figure 10,000,000 times too small and the asset reads as uncovered; that is
+  indistinguishable from a real collapse, which makes it worth refusing rather
+  than publishing. The check is skipped when there is no supply snapshot to
+  judge against, or when the stored supply is zero.
+  `amount == 0` is always allowed: no reserves at all is a statement the
+  protocol exists to be able to carry, and unlike a small non-zero figure it
+  cannot be the result of a unit slip.
 - `coverage(sac, min_tier)` picks, among tiers `>= min_tier` that have a
   report, the one with the latest `as_of` (ties go to the higher tier). It
   returns `None` if there is no supply snapshot or no qualifying report.
@@ -139,7 +150,8 @@ Rules:
 Errors (`LedgerError`): `NotAStellarAsset = 1`, `AlreadyListed = 2`,
 `AssetNotListed = 3`, `NotSupplyPoster = 4`, `NotReporter = 5`,
 `InvalidAmount = 6`, `FutureLedger = 7`, `StaleLedger = 8`,
-`FutureTimestamp = 9`, `StaleReport = 10`, `InvalidUri = 11`.
+`FutureTimestamp = 9`, `StaleReport = 10`, `InvalidUri = 11`,
+`ImplausibleAmount = 12`.
 
 ## covered-vault (reference consumer)
 
