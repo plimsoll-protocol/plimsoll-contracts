@@ -17,6 +17,20 @@ pub const INSTANCE_EXTEND_TO: u32 = 90 * DAY_IN_LEDGERS;
 /// Basis-point denominator: 10_000 bps = 100%.
 pub const BPS_DENOMINATOR: i128 = 10_000;
 
+/// Narrowest coverage a reserve report may claim: 1 bps, or 0.01%.
+///
+/// Amounts are in the asset's smallest unit, so a reporter who types whole
+/// units states a figure 10,000,000 times too small. The asset then reads as
+/// uncovered, which is indistinguishable from backing that has actually gone.
+pub const MIN_PLAUSIBLE_BPS: u32 = 1;
+
+/// Widest coverage a reserve report may claim: 1_000_000 bps, or 10,000%.
+///
+/// The mirror of the slip above, for a figure typed in units too small, and a
+/// ceiling on how over-backed an asset can be claimed to be before the claim
+/// says more about the reporter than the reserves.
+pub const MAX_PLAUSIBLE_BPS: u32 = 1_000_000;
+
 /// What a registered address is allowed to say.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

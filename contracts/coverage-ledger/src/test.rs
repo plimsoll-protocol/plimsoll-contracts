@@ -356,6 +356,95 @@ fn report_rejects_negative_amount() {
     assert_eq!(res, Err(Ok(LedgerError::InvalidAmount.into())));
 }
 
+/// Posts `amount` as an auditor report against a supply of `supply`, returning
+/// what `try_post_reserve` gave back so a caller can assert on the error.
+type TryReserve = Result<
+    Result<Tier, soroban_sdk::ConversionError>,
+    Result<soroban_sdk::Error, soroban_sdk::InvokeError>,
+>;
+
+fn report_against_supply(f: &Fixture, supply: i128, amount: i128) -> TryReserve {
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &supply, &990, &hash(&f.env, 1));
+    f.ledger.try_post_reserve(
+        &f.auditor,
+        &f.sac,
+        &amount,
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    )
+}
+
+// The slip this guards against: 1,020 reserves typed in whole units rather
+// than the 7-decimal units the contract counts in. The asset would read as
+// 0.00% covered, which is what a collapse of backing looks like too.
+#[test]
+fn report_rejects_a_figure_typed_in_whole_units() {
+    let f = listed();
+    let res = report_against_supply(&f, 1_000 * UNIT, 1_020);
+    assert_eq!(res, Err(Ok(LedgerError::ImplausibleAmount.into())));
+}
+
+#[test]
+fn report_accepts_the_narrowest_plausible_coverage() {
+    let f = listed();
+    // 1 unit of reserves against 10,000 of supply is exactly 1 bps.
+    assert!(report_against_supply(&f, 10_000 * UNIT, UNIT).is_ok());
+}
+
+#[test]
+fn report_rejects_coverage_below_the_narrowest() {
+    let f = listed();
+    // One stroop less rounds to 0 bps.
+    let res = report_against_supply(&f, 10_000 * UNIT, UNIT - 1);
+    assert_eq!(res, Err(Ok(LedgerError::ImplausibleAmount.into())));
+}
+
+#[test]
+fn report_accepts_the_widest_plausible_coverage() {
+    let f = listed();
+    // 100 units against 1 is 1,000,000 bps, or 10,000%.
+    assert!(report_against_supply(&f, UNIT, 100 * UNIT).is_ok());
+}
+
+#[test]
+fn report_rejects_coverage_above_the_widest() {
+    let f = listed();
+    // 1,000,001 bps: the smallest figure over the ceiling.
+    let res = report_against_supply(&f, UNIT, 100 * UNIT + 1_000);
+    assert_eq!(res, Err(Ok(LedgerError::ImplausibleAmount.into())));
+}
+
+// With no snapshot there is nothing to judge a figure against, and refusing
+// reports until someone posts supply would stop an asset being described at
+// all.
+#[test]
+fn report_skips_the_plausibility_check_when_no_supply_is_posted() {
+    let f = listed();
+    f.ledger
+        .post_reserve(&f.auditor, &f.sac, &1, &T0, &hash(&f.env, 1), &uri(&f.env));
+    assert_eq!(
+        f.ledger
+            .get_report(&f.sac, &Tier::AuditorSigned)
+            .unwrap()
+            .amount,
+        1
+    );
+}
+
+// No reserves at all is a statement the protocol exists to carry, and unlike a
+// small non-zero figure it cannot be a unit slip.
+#[test]
+fn report_accepts_zero_reserves() {
+    let f = listed();
+    assert!(report_against_supply(&f, 1_000 * UNIT, 0).is_ok());
+    assert_eq!(
+        f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap().bps,
+        0
+    );
+}
+
 // ---- get_reports ----------------------------------------------------------
 
 #[test]

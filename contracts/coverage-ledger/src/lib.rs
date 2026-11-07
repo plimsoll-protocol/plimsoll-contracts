@@ -5,7 +5,8 @@
 
 use plimsoll_types::{
     coverage_bps, AssetRecord, Coverage, RegistryClient, ReserveReport, Role, SupplySnapshot, Tier,
-    INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
+    INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, MAX_PLAUSIBLE_BPS, MIN_PLAUSIBLE_BPS,
+    PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
@@ -43,6 +44,7 @@ pub enum LedgerError {
     FutureTimestamp = 9,
     StaleReport = 10,
     InvalidUri = 11,
+    ImplausibleAmount = 12,
 }
 
 #[contractevent]
@@ -302,6 +304,26 @@ impl CoverageLedger {
         if as_of > now {
             panic_with_error!(&env, LedgerError::FutureTimestamp);
         }
+        // A figure typed in whole units instead of the asset's smallest unit is
+        // 10,000,000 times too small, and the asset then reads as uncovered --
+        // the same reading as backing that has genuinely gone. Refuse rather
+        // than publish an ambiguity like that. Zero is exempt: no reserves at
+        // all is a real statement and cannot come from a unit slip.
+        if amount != 0 {
+            if let Some(supply) =
+                read_persistent::<SupplySnapshot>(&env, &DataKey::Supply(sac.clone()))
+            {
+                // With no supply there is nothing to judge the figure against,
+                // and coverage_bps reports u32::MAX for it.
+                if supply.amount > 0 {
+                    let bps = coverage_bps(amount, supply.amount);
+                    if !(MIN_PLAUSIBLE_BPS..=MAX_PLAUSIBLE_BPS).contains(&bps) {
+                        panic_with_error!(&env, LedgerError::ImplausibleAmount);
+                    }
+                }
+            }
+        }
+
         let key = DataKey::Report(sac.clone(), tier);
         if let Some(previous) = read_persistent::<ReserveReport>(&env, &key) {
             if as_of <= previous.as_of {
