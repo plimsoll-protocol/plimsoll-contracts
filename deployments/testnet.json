@@ -9,6 +9,10 @@
     "coveredVault": "CC3SUECAJSAC4PBV4QLUII7X5Y4WNVL5YGTBAQ4CHCAH6R3QLRYJUZHQ",
     "coveredVaultQusd": "CBURLBHWLWOTKJ5NVF574NAYFM7Y25JB366ZDO7WGJXCVC4C72UVKTO5"
   },
+  "liveWasm": {
+    "_comment": "sha256 of the wasm currently installed for each contract, recorded when upgraded past its original deployment so the repo says what is live. Registry and vault are unchanged since first deploy and not tracked here.",
+    "coverageLedger": "fa78245f97492c9640bee8a43f5eb1812ac904fae7bb4d055f182e7ad936eb76"
+  },
   "assets": {
     "PUSD": {
       "code": "PUSD",
