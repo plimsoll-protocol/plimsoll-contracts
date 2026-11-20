@@ -151,8 +151,14 @@ Testnet: the indexer's supply poster was registered in
 | topic 0 | `reporter_revoked` | `Symbol` |
 | topic 1 | `reporter` | `Address` (account) |
 
-No data map. Revocation does not delete the reports a reporter already posted;
-the indexer marks the reporter inactive and leaves the history in place. No
+No data map. Revocation does not delete the reports a reporter already posted,
+but from that transaction on the coverage ledger stops counting them:
+`coverage`, `is_covered`, `get_report` and `get_reports` skip an auditor or
+transcriber report whose reporter no longer holds the matching role (see
+SPEC.md). No `reserve_posted` or other ledger event is raised for this; a
+reader that wants to mirror `coverage` should do the same as the contract and
+treat the reporter's reports as inactive from this event until a later
+`reporter_set` gives the role back. The indexer leaves the history in place. No
 testnet example: nothing has been revoked on the demo deployment.
 
 ### `admin_transferred`

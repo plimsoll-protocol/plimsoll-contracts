@@ -3,8 +3,9 @@ extern crate std;
 use super::*;
 use reporter_registry::{ReporterRegistry, ReporterRegistryClient};
 use soroban_sdk::{
-    testutils::{Address as _, Events as _, Ledger as _},
-    Address, BytesN, Env, String,
+    testutils::{Address as _, AuthorizedFunction, Ledger as _, MockAuth, MockAuthInvoke},
+    xdr::{ScErrorCode, ScErrorType},
+    Address, BytesN, Env, Error, IntoVal, String, Symbol,
 };
 
 const T0: u64 = 1_700_000_000;
@@ -680,288 +681,558 @@ fn zero_supply_counts_as_covered() {
     assert_eq!(c.bps, u32::MAX);
 }
 
-// ---- issuer delegate ------------------------------------------------------
+// ---- one report per reporter (#26) ---------------------------------------
 
-#[test]
-fn issuer_delegate_set_and_clear() {
-    let f = listed();
-    let delegate = Address::generate(&f.env);
-    // Initially no delegate
-    assert_eq!(f.ledger.get_issuer_delegate(&f.sac), None);
+fn add_reporter(f: &Fixture, role: Role) -> Address {
+    let who = Address::generate(&f.env);
+    f.registry
+        .set_reporter(&who, &role, &String::from_str(&f.env, "extra"));
+    who
+}
 
-    // Issuer sets delegate
+fn post(f: &Fixture, who: &Address, amount: i128, as_of: u64) -> Tier {
     f.ledger
-        .set_issuer_delegate(&f.sac, &Some(delegate.clone()));
-    assert_eq!(f.ledger.get_issuer_delegate(&f.sac), Some(delegate.clone()));
+        .post_reserve(who, &f.sac, &amount, &as_of, &hash(&f.env, 4), &uri(&f.env))
+}
 
-    // Issuer clears delegate
-    f.ledger.set_issuer_delegate(&f.sac, &None::<Address>);
-    assert_eq!(f.ledger.get_issuer_delegate(&f.sac), None);
+fn supply(f: &Fixture, amount: i128) {
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &amount, &990, &hash(&f.env, 1));
 }
 
 #[test]
-fn issuer_delegate_only_issuer_can_set() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(T0);
-    env.ledger().set_sequence_number(1_000);
-
-    let admin = Address::generate(&env);
-    let registry_id = env.register(ReporterRegistry, (admin.clone(),));
-    let _registry = ReporterRegistryClient::new(&env, &registry_id);
-    let ledger_id = env.register(CoverageLedger, (admin.clone(), registry_id.clone()));
-    let ledger = CoverageLedgerClient::new(&env, &ledger_id);
-
-    let sac_admin = Address::generate(&env);
-    let handle = env.register_stellar_asset_contract_v2(sac_admin);
-    let sac = handle.address();
-    let _issuer = handle.issuer().address();
-
-    ledger.list_asset(&sac);
-
-    let delegate = Address::generate(&env);
-
-    // With mock_all_auths, the issuer is authorized and can set delegate
-    ledger.set_issuer_delegate(&sac, &Some(delegate.clone()));
-    assert_eq!(ledger.get_issuer_delegate(&sac), Some(delegate));
-
-    // Verify the contract enforces issuer auth (the check is in the contract code:
-    // asset.issuer.require_auth())
-}
-
-#[test]
-fn issuer_delegate_can_post_reserve() {
+fn two_auditors_reports_coexist_and_coverage_picks_the_freshest() {
     let f = listed();
-    let delegate = Address::generate(&f.env);
-    f.ledger
-        .set_issuer_delegate(&f.sac, &Some(delegate.clone()));
+    supply(&f, 100 * UNIT);
+    let second = add_reporter(&f, Role::Auditor);
+    post(&f, &f.auditor, 90 * UNIT, T0 - 100);
+    post(&f, &second, 105 * UNIT, T0 - 10);
 
-    // Delegate posts reserve, gets IssuerSigned tier
-    let tier = f.ledger.post_reserve(
-        &delegate,
-        &f.sac,
-        &(1_000 * UNIT),
-        &(T0 - 60),
-        &hash(&f.env, 9),
-        &uri(&f.env),
+    let reports = f.ledger.get_reports(&f.sac);
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports.get(0).unwrap().reporter, f.auditor);
+    assert_eq!(reports.get(0).unwrap().amount, 90 * UNIT);
+    assert_eq!(reports.get(1).unwrap().reporter, second);
+
+    let c = f.ledger.coverage(&f.sac, &Tier::AuditorSigned).unwrap();
+    assert_eq!(c.reserves, 105 * UNIT);
+    assert_eq!(c.report_as_of, T0 - 10);
+    assert_eq!(
+        f.ledger
+            .get_report(&f.sac, &Tier::AuditorSigned)
+            .unwrap()
+            .reporter,
+        second
     );
-    assert_eq!(tier, Tier::IssuerSigned);
-    let r = f.ledger.get_report(&f.sac, &Tier::IssuerSigned).unwrap();
-    assert_eq!(r.reporter, delegate);
-    assert_eq!(r.tier, Tier::IssuerSigned);
+
+    // The first auditor's next attestation is fresher again and wins, and the
+    // second auditor's figure is still there.
+    post(&f, &f.auditor, 95 * UNIT, T0);
+    let c = f.ledger.coverage(&f.sac, &Tier::AuditorSigned).unwrap();
+    assert_eq!(c.reserves, 95 * UNIT);
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 2);
 }
 
 #[test]
-fn issuer_delegate_cross_asset_isolation() {
+fn an_older_figure_from_another_reporter_is_recorded_not_stale() {
     let f = listed();
-    let delegate = Address::generate(&f.env);
-    let sac_admin2 = Address::generate(&f.env);
-    let handle2 = f.env.register_stellar_asset_contract_v2(sac_admin2);
-    let sac2 = handle2.address();
-    let _issuer2 = handle2.issuer().address();
-    f.ledger.list_asset(&sac2);
-
-    // Set delegate for first asset only
-    f.ledger
-        .set_issuer_delegate(&f.sac, &Some(delegate.clone()));
-
-    // Delegate can post for first asset
-    let tier = f.ledger.post_reserve(
-        &delegate,
-        &f.sac,
-        &(1_000 * UNIT),
-        &(T0 - 60),
-        &hash(&f.env, 9),
-        &uri(&f.env),
+    let second = add_reporter(&f, Role::Auditor);
+    post(&f, &f.auditor, UNIT, T0);
+    // Under one-report-per-tier this was StaleReport and the figure was lost.
+    post(&f, &second, 2 * UNIT, T0 - 1_000);
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 2);
+    // The fresher figure still decides coverage.
+    assert_eq!(
+        f.ledger
+            .get_report(&f.sac, &Tier::AuditorSigned)
+            .unwrap()
+            .reporter,
+        f.auditor
     );
-    assert_eq!(tier, Tier::IssuerSigned);
+}
 
-    // Delegate cannot post for second asset (not delegate there)
+#[test]
+fn a_later_transcription_does_not_erase_another_transcribers_figure() {
+    let f = listed();
+    let second = add_reporter(&f, Role::Transcriber);
+    post(&f, &f.transcriber, UNIT, T0 - 100);
+    post(&f, &second, 3 * UNIT, T0);
+    let reports = f.ledger.get_reports(&f.sac);
+    assert_eq!(reports.len(), 2);
+    assert!(reports
+        .iter()
+        .any(|r| r.reporter == f.transcriber && r.amount == UNIT));
+}
+
+#[test]
+fn staleness_is_per_reporter() {
+    let f = listed();
+    let second = add_reporter(&f, Role::Auditor);
+    post(&f, &f.auditor, UNIT, T0 - 10);
+    post(&f, &second, UNIT, T0 - 10);
     let res = f.ledger.try_post_reserve(
-        &delegate,
-        &sac2,
-        &(1_000 * UNIT),
-        &(T0 - 60),
-        &hash(&f.env, 9),
+        &second,
+        &f.sac,
+        &UNIT,
+        &(T0 - 10),
+        &hash(&f.env, 5),
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::StaleReport.into())));
+}
+
+#[test]
+fn a_tie_within_a_tier_goes_to_the_first_reporter_to_post() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    let second = add_reporter(&f, Role::Auditor);
+    post(&f, &f.auditor, 100 * UNIT, T0);
+    post(&f, &second, 50 * UNIT, T0);
+    let c = f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap();
+    assert_eq!(c.reserves, 100 * UNIT);
+    assert_eq!(
+        f.ledger
+            .get_report(&f.sac, &Tier::AuditorSigned)
+            .unwrap()
+            .reporter,
+        f.auditor
+    );
+}
+
+#[test]
+fn a_tie_across_tiers_still_goes_to_the_stronger_tier() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    let second = add_reporter(&f, Role::Transcriber);
+    post(&f, &f.transcriber, 10 * UNIT, T0);
+    post(&f, &second, 20 * UNIT, T0);
+    post(&f, &f.issuer, 100 * UNIT, T0);
+    let c = f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap();
+    assert_eq!(c.tier, Tier::IssuerSigned);
+}
+
+#[test]
+fn reporters_per_tier_are_capped() {
+    let f = listed();
+    let mut auditors = std::vec![f.auditor.clone()];
+    for _ in 1..MAX_REPORTERS_PER_TIER {
+        auditors.push(add_reporter(&f, Role::Auditor));
+    }
+    for (i, a) in auditors.iter().enumerate() {
+        post(&f, a, UNIT, T0 - 100 + i as u64);
+    }
+    let one_too_many = add_reporter(&f, Role::Auditor);
+    let res = f.ledger.try_post_reserve(
+        &one_too_many,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 5),
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::TooManyReporters.into())));
+
+    // A reporter already holding a slot can still post its next figure.
+    post(&f, &auditors[0], 2 * UNIT, T0);
+    // And the cap is per tier: other tiers are unaffected.
+    post(&f, &f.transcriber, UNIT, T0);
+    assert_eq!(
+        f.ledger.get_reports(&f.sac).len(),
+        MAX_REPORTERS_PER_TIER + 1
+    );
+}
+
+#[test]
+fn reporters_per_tier_are_capped_per_asset() {
+    let f = listed();
+    for _ in 1..MAX_REPORTERS_PER_TIER {
+        let a = add_reporter(&f, Role::Auditor);
+        post(&f, &a, UNIT, T0);
+    }
+    post(&f, &f.auditor, UNIT, T0);
+    // A second asset has its own slots.
+    let other = f
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&f.env))
+        .address();
+    f.ledger.list_asset(&other);
+    let late = add_reporter(&f, Role::Auditor);
+    f.ledger
+        .post_reserve(&late, &other, &UNIT, &T0, &hash(&f.env, 6), &uri(&f.env));
+}
+
+#[test]
+fn a_reporter_whose_role_changes_starts_a_new_entry_at_the_new_tier() {
+    let f = listed();
+    post(&f, &f.transcriber, UNIT, T0 - 100);
+    f.registry.set_reporter(
+        &f.transcriber,
+        &Role::Auditor,
+        &String::from_str(&f.env, "promoted"),
+    );
+    // Not stale: the new figure is at a different tier.
+    let tier = post(&f, &f.transcriber, 2 * UNIT, T0 - 100);
+    assert_eq!(tier, Tier::AuditorSigned);
+    assert_eq!(
+        f.ledger
+            .get_report(&f.sac, &Tier::AuditorSigned)
+            .unwrap()
+            .amount,
+        2 * UNIT
+    );
+}
+
+// ---- v0.1 storage migration ----------------------------------------------
+
+/// Write a report the way the v0.1 ledger stored it: one per tier.
+fn write_legacy(f: &Fixture, report: &ReserveReport) {
+    f.env.as_contract(&f.ledger.address, || {
+        f.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Report(f.sac.clone(), report.tier), report);
+    });
+}
+
+fn has_legacy(f: &Fixture, tier: Tier) -> bool {
+    f.env.as_contract(&f.ledger.address, || {
+        f.env
+            .storage()
+            .persistent()
+            .has(&DataKey::Report(f.sac.clone(), tier))
+    })
+}
+
+fn legacy_report(
+    f: &Fixture,
+    reporter: &Address,
+    tier: Tier,
+    amount: i128,
+    as_of: u64,
+) -> ReserveReport {
+    ReserveReport {
+        amount,
+        as_of,
+        posted_at: as_of,
+        tier,
+        reporter: reporter.clone(),
+        doc_hash: hash(&f.env, 8),
+        doc_uri: uri(&f.env),
+    }
+}
+
+#[test]
+fn a_legacy_report_is_read_before_migration() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    let legacy = legacy_report(&f, &f.auditor, Tier::AuditorSigned, 101 * UNIT, T0 - 50);
+    write_legacy(&f, &legacy);
+    assert_eq!(
+        f.ledger.get_report(&f.sac, &Tier::AuditorSigned),
+        Some(legacy.clone())
+    );
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 1);
+    let c = f.ledger.coverage(&f.sac, &Tier::AuditorSigned).unwrap();
+    assert_eq!(c.bps, 10_100);
+    assert!(f
+        .ledger
+        .is_covered(&f.sac, &10_000, &86_400, &Tier::AuditorSigned));
+}
+
+#[test]
+fn the_first_post_at_a_tier_migrates_its_legacy_report() {
+    let f = listed();
+    let legacy = legacy_report(&f, &f.auditor, Tier::AuditorSigned, UNIT, T0 - 50);
+    write_legacy(&f, &legacy);
+    let issuer_legacy = legacy_report(&f, &f.issuer, Tier::IssuerSigned, UNIT, T0 - 50);
+    write_legacy(&f, &issuer_legacy);
+
+    let second = add_reporter(&f, Role::Auditor);
+    post(&f, &second, 2 * UNIT, T0 - 60);
+
+    assert!(!has_legacy(&f, Tier::AuditorSigned));
+    // Another tier's legacy entry is left until that tier is written.
+    assert!(has_legacy(&f, Tier::IssuerSigned));
+    let reports = f.ledger.get_reports(&f.sac);
+    assert_eq!(reports.len(), 3);
+    // Legacy auditor keeps first place in its tier; nothing is counted twice.
+    assert_eq!(reports.get(0).unwrap(), legacy);
+    assert_eq!(reports.get(1).unwrap().reporter, second);
+    assert_eq!(reports.get(2).unwrap(), issuer_legacy);
+    assert_eq!(
+        f.ledger.get_report(&f.sac, &Tier::AuditorSigned),
+        Some(legacy)
+    );
+}
+
+#[test]
+fn a_migrated_reporter_must_still_move_forward() {
+    let f = listed();
+    write_legacy(
+        &f,
+        &legacy_report(&f, &f.auditor, Tier::AuditorSigned, UNIT, T0 - 50),
+    );
+    let res = f.ledger.try_post_reserve(
+        &f.auditor,
+        &f.sac,
+        &UNIT,
+        &(T0 - 50),
+        &hash(&f.env, 5),
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::StaleReport.into())));
+    post(&f, &f.auditor, 3 * UNIT, T0 - 49);
+    assert!(!has_legacy(&f, Tier::AuditorSigned));
+    let reports = f.ledger.get_reports(&f.sac);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports.get(0).unwrap().amount, 3 * UNIT);
+}
+
+// ---- revoked reporters stop counting (#27) ---------------------------------
+
+const DAY: u64 = 86_400;
+
+/// One fully-covering report per tier, freshest at the weakest tier so that
+/// each tier is what decides coverage at its own `min_tier`.
+fn one_report_per_tier(f: &Fixture) {
+    supply(f, 100 * UNIT);
+    post(f, &f.auditor, 100 * UNIT, T0 - 300);
+    post(f, &f.issuer, 100 * UNIT, T0 - 200);
+    post(f, &f.transcriber, 100 * UNIT, T0 - 100);
+}
+
+#[test]
+fn revoking_the_auditor_drops_its_report_at_every_tier() {
+    let f = listed();
+    one_report_per_tier(&f);
+    f.registry.revoke(&f.auditor);
+
+    assert_eq!(f.ledger.coverage(&f.sac, &Tier::AuditorSigned), None);
+    assert!(!f
+        .ledger
+        .is_covered(&f.sac, &10_000, &DAY, &Tier::AuditorSigned));
+    // Weaker floors are still met by the reports that count.
+    let issuer = f.ledger.coverage(&f.sac, &Tier::IssuerSigned).unwrap();
+    assert_eq!(issuer.tier, Tier::IssuerSigned);
+    assert!(f
+        .ledger
+        .is_covered(&f.sac, &10_000, &DAY, &Tier::IssuerSigned));
+    let any = f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap();
+    assert_eq!(any.tier, Tier::Transcribed);
+
+    assert_eq!(f.ledger.get_report(&f.sac, &Tier::AuditorSigned), None);
+    let reports = f.ledger.get_reports(&f.sac);
+    assert_eq!(reports.len(), 2);
+    assert!(reports.iter().all(|r| r.reporter != f.auditor));
+}
+
+#[test]
+fn revoking_the_transcriber_drops_its_report_at_every_tier() {
+    let f = listed();
+    one_report_per_tier(&f);
+    f.registry.revoke(&f.transcriber);
+
+    // The freshest report overall was the transcription; coverage now falls
+    // back to the issuer's older one.
+    let any = f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap();
+    assert_eq!(any.tier, Tier::IssuerSigned);
+    assert_eq!(any.report_as_of, T0 - 200);
+    assert_eq!(
+        f.ledger.coverage(&f.sac, &Tier::IssuerSigned).unwrap().tier,
+        Tier::IssuerSigned
+    );
+    assert_eq!(
+        f.ledger
+            .coverage(&f.sac, &Tier::AuditorSigned)
+            .unwrap()
+            .tier,
+        Tier::AuditorSigned
+    );
+    assert_eq!(f.ledger.get_report(&f.sac, &Tier::Transcribed), None);
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 2);
+}
+
+#[test]
+fn a_revoked_transcribers_bad_figure_stops_satisfying_is_covered() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.issuer, 80 * UNIT, T0 - 1_000);
+    // A bad actor posts a fresher, flattering figure.
+    post(&f, &f.transcriber, 120 * UNIT, T0);
+    assert!(f
+        .ledger
+        .is_covered(&f.sac, &10_000, &DAY, &Tier::Transcribed));
+    f.registry.revoke(&f.transcriber);
+    // Immediately, with no action on the ledger.
+    assert!(!f
+        .ledger
+        .is_covered(&f.sac, &10_000, &DAY, &Tier::Transcribed));
+    assert_eq!(
+        f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap().bps,
+        8_000
+    );
+}
+
+#[test]
+fn issuer_signed_reports_are_unaffected_by_the_registry() {
+    let f = listed();
+    one_report_per_tier(&f);
+    f.registry.revoke(&f.auditor);
+    f.registry.revoke(&f.transcriber);
+    // Even an issuer that was registered and then revoked keeps signing as
+    // the issuer.
+    f.registry.set_reporter(
+        &f.issuer,
+        &Role::Transcriber,
+        &String::from_str(&f.env, "issuer"),
+    );
+    f.registry.revoke(&f.issuer);
+
+    for min_tier in [Tier::Transcribed, Tier::IssuerSigned] {
+        let c = f.ledger.coverage(&f.sac, &min_tier).unwrap();
+        assert_eq!(c.tier, Tier::IssuerSigned);
+        assert!(f.ledger.is_covered(&f.sac, &10_000, &DAY, &min_tier));
+    }
+    assert_eq!(f.ledger.coverage(&f.sac, &Tier::AuditorSigned), None);
+    let reports = f.ledger.get_reports(&f.sac);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports.get(0).unwrap().tier, Tier::IssuerSigned);
+}
+
+#[test]
+fn revoking_the_freshest_auditor_falls_back_to_another_auditor() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    let second = add_reporter(&f, Role::Auditor);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 100);
+    post(&f, &second, 150 * UNIT, T0);
+    f.registry.revoke(&second);
+    let c = f.ledger.coverage(&f.sac, &Tier::AuditorSigned).unwrap();
+    assert_eq!(c.reserves, 100 * UNIT);
+    assert_eq!(
+        f.ledger
+            .get_report(&f.sac, &Tier::AuditorSigned)
+            .unwrap()
+            .reporter,
+        f.auditor
+    );
+}
+
+#[test]
+fn a_report_stops_counting_when_its_reporter_changes_role() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0);
+    f.registry.set_reporter(
+        &f.auditor,
+        &Role::Transcriber,
+        &String::from_str(&f.env, "demoted"),
+    );
+    // The auditor-tier figure is no longer backed by an auditor.
+    assert_eq!(f.ledger.coverage(&f.sac, &Tier::Transcribed), None);
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 0);
+}
+
+#[test]
+fn reinstating_a_reporter_restores_its_report() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0);
+    f.registry.revoke(&f.auditor);
+    assert_eq!(f.ledger.coverage(&f.sac, &Tier::AuditorSigned), None);
+    f.registry.set_reporter(
+        &f.auditor,
+        &Role::Auditor,
+        &String::from_str(&f.env, "Acme Audit"),
+    );
+    assert!(f
+        .ledger
+        .is_covered(&f.sac, &10_000, &DAY, &Tier::AuditorSigned));
+}
+
+#[test]
+fn a_revoked_reporters_slot_is_reclaimed_when_the_tier_is_full() {
+    let f = listed();
+    let mut auditors = std::vec![f.auditor.clone()];
+    for _ in 1..MAX_REPORTERS_PER_TIER {
+        auditors.push(add_reporter(&f, Role::Auditor));
+    }
+    for a in auditors.iter() {
+        post(&f, a, UNIT, T0 - 100);
+    }
+    f.registry.revoke(&auditors[1]);
+    let newcomer = add_reporter(&f, Role::Auditor);
+    post(&f, &newcomer, 2 * UNIT, T0);
+
+    let reports = f.ledger.get_reports(&f.sac);
+    assert_eq!(reports.len(), MAX_REPORTERS_PER_TIER);
+    assert!(reports.iter().any(|r| r.reporter == newcomer));
+    // The reclaimed report is gone, not just hidden: reinstating its reporter
+    // does not bring it back.
+    f.registry.set_reporter(
+        &auditors[1],
+        &Role::Auditor,
+        &String::from_str(&f.env, "back"),
+    );
+    assert!(f
+        .ledger
+        .get_reports(&f.sac)
+        .iter()
+        .all(|r| r.reporter != auditors[1]));
+    // ...and with every slot held by a reporter who counts, the tier is full.
+    let res = f.ledger.try_post_reserve(
+        &auditors[1],
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 5),
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::TooManyReporters.into())));
+}
+
+#[test]
+fn a_revoked_reporters_slot_is_kept_while_the_tier_has_room() {
+    let f = listed();
+    post(&f, &f.auditor, UNIT, T0 - 100);
+    f.registry.revoke(&f.auditor);
+    let second = add_reporter(&f, Role::Auditor);
+    post(&f, &second, UNIT, T0);
+    // Reinstated before anyone needed the slot: the old report is still there.
+    f.registry.set_reporter(
+        &f.auditor,
+        &Role::Auditor,
+        &String::from_str(&f.env, "back"),
+    );
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 2);
+}
+
+#[test]
+fn a_legacy_report_from_a_revoked_reporter_does_not_count() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    write_legacy(
+        &f,
+        &legacy_report(&f, &f.auditor, Tier::AuditorSigned, 100 * UNIT, T0),
+    );
+    f.registry.revoke(&f.auditor);
+    assert_eq!(f.ledger.coverage(&f.sac, &Tier::AuditorSigned), None);
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 0);
+}
+
+#[test]
+fn a_revoked_auditor_cannot_post_again() {
+    let f = listed();
+    f.registry.revoke(&f.auditor);
+    let res = f.ledger.try_post_reserve(
+        &f.auditor,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 1),
         &uri(&f.env),
     );
     assert_eq!(res, Err(Ok(LedgerError::NotReporter.into())));
-}
-
-#[test]
-fn issuer_delegate_cleared_stops_future_posts() {
-    let f = listed();
-    let delegate = Address::generate(&f.env);
-    f.ledger
-        .set_issuer_delegate(&f.sac, &Some(delegate.clone()));
-
-    // Delegate posts successfully
-    f.ledger.post_reserve(
-        &delegate,
-        &f.sac,
-        &(1_000 * UNIT),
-        &(T0 - 60),
-        &hash(&f.env, 9),
-        &uri(&f.env),
-    );
-
-    // Clear delegate
-    f.ledger.set_issuer_delegate(&f.sac, &None::<Address>);
-
-    // Delegate can no longer post
-    let res = f.ledger.try_post_reserve(
-        &delegate,
-        &f.sac,
-        &(2_000 * UNIT),
-        &(T0 - 30),
-        &hash(&f.env, 9),
-        &uri(&f.env),
-    );
-    assert_eq!(res, Err(Ok(LedgerError::NotReporter.into())));
-
-    // But existing report remains
-    let r = f.ledger.get_report(&f.sac, &Tier::IssuerSigned).unwrap();
-    assert_eq!(r.amount, 1_000 * UNIT);
-    assert_eq!(r.reporter, delegate);
-}
-
-#[test]
-fn issuer_delegate_events_emitted() {
-    let f = listed();
-    let delegate = Address::generate(&f.env);
-    // Just verify both operations emit events by checking event count increases
-    let before = f.env.events().all().events().len();
-    f.ledger
-        .set_issuer_delegate(&f.sac, &Some(delegate.clone()));
-    let after_set = f.env.events().all().events().len();
-    f.ledger.set_issuer_delegate(&f.sac, &None::<Address>);
-    let after_clear = f.env.events().all().events().len();
-    // At minimum, two events should be emitted (one for set, one for clear)
-    // Note: exact counts may vary due to mock_all_auths behavior
-    assert!(after_set >= before);
-    assert!(after_clear >= after_set);
-}
-
-// ---- time-locked upgrades -------------------------------------------------
-
-#[test]
-fn upgrade_propose_and_execute() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(T0);
-    env.ledger().set_sequence_number(1_000);
-
-    let admin = Address::generate(&env);
-    let registry_id = env.register(ReporterRegistry, (admin.clone(),));
-    let _registry = ReporterRegistryClient::new(&env, &registry_id);
-    let ledger_id = env.register(CoverageLedger, (admin.clone(), registry_id.clone()));
-    let ledger = CoverageLedgerClient::new(&env, &ledger_id);
-
-    // Propose upgrade
-    let wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
-    ledger.propose_upgrade(&wasm_hash);
-
-    let pending = ledger.pending_upgrade().unwrap();
-    assert_eq!(pending.wasm_hash, wasm_hash);
-    assert_eq!(pending.proposed_at_ledger, 1_000);
-    assert_eq!(pending.proposed_by, admin);
-
-    // Cannot execute before delay
-    let res = ledger.try_execute_upgrade();
-    assert_eq!(res, Err(Ok(LedgerError::UpgradeDelayNotElapsed.into())));
-
-    // Advance ledger past delay
-    env.ledger().set_sequence_number(1_000 + 17_280 + 1); // UPGRADE_DELAY_LEDGERS + 1
-
-    // After delay, execute_upgrade will try to deploy the wasm.
-    // In test env the wasm doesn't exist, so it fails with Storage(MissingValue)
-    // but the important thing is our delay check passes.
-    // We verify the proposal is still there (not executed due to missing wasm)
-    assert!(ledger.pending_upgrade().is_some());
-}
-
-#[test]
-fn upgrade_cancel_clears_proposal() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(T0);
-    env.ledger().set_sequence_number(1_000);
-
-    let admin = Address::generate(&env);
-    let registry_id = env.register(ReporterRegistry, (admin.clone(),));
-    let _registry = ReporterRegistryClient::new(&env, &registry_id);
-    let ledger_id = env.register(CoverageLedger, (admin.clone(), registry_id.clone()));
-    let ledger = CoverageLedgerClient::new(&env, &ledger_id);
-
-    let wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
-    ledger.propose_upgrade(&wasm_hash);
-    assert!(ledger.pending_upgrade().is_some());
-
-    ledger.cancel_upgrade();
-    assert_eq!(ledger.pending_upgrade(), None);
-}
-
-#[test]
-fn upgrade_new_proposal_restarts_clock() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(T0);
-    env.ledger().set_sequence_number(1_000);
-
-    let admin = Address::generate(&env);
-    let registry_id = env.register(ReporterRegistry, (admin.clone(),));
-    let _registry = ReporterRegistryClient::new(&env, &registry_id);
-    let ledger_id = env.register(CoverageLedger, (admin.clone(), registry_id.clone()));
-    let ledger = CoverageLedgerClient::new(&env, &ledger_id);
-
-    let wasm_hash1 = BytesN::from_array(&env, &[1u8; 32]);
-    let wasm_hash2 = BytesN::from_array(&env, &[2u8; 32]);
-
-    ledger.propose_upgrade(&wasm_hash1);
-    let pending1 = ledger.pending_upgrade().unwrap();
-    assert_eq!(pending1.proposed_at_ledger, 1_000);
-
-    // New proposal overwrites and restarts clock
-    env.ledger().set_sequence_number(1_500);
-    ledger.propose_upgrade(&wasm_hash2);
-    let pending2 = ledger.pending_upgrade().unwrap();
-    assert_eq!(pending2.wasm_hash, wasm_hash2);
-    assert_eq!(pending2.proposed_at_ledger, 1_500);
-}
-
-#[test]
-fn upgrade_execute_fails_when_not_proposed() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(T0);
-    env.ledger().set_sequence_number(1_000);
-
-    let admin = Address::generate(&env);
-    let registry_id = env.register(ReporterRegistry, (admin.clone(),));
-    let _registry = ReporterRegistryClient::new(&env, &registry_id);
-    let ledger_id = env.register(CoverageLedger, (admin.clone(), registry_id.clone()));
-    let ledger = CoverageLedgerClient::new(&env, &ledger_id);
-
-    let res = ledger.try_execute_upgrade();
-    assert_eq!(res, Err(Ok(LedgerError::UpgradeNotProposed.into())));
-}
-
-// ---- version --------------------------------------------------------------
-
-#[test]
-fn version_returns_constant() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(T0);
-    env.ledger().set_sequence_number(1_000);
-
-    let admin = Address::generate(&env);
-    let registry_id = env.register(ReporterRegistry, (admin.clone(),));
-    let _registry = ReporterRegistryClient::new(&env, &registry_id);
-    let ledger_id = env.register(CoverageLedger, (admin.clone(), registry_id.clone()));
-    let ledger = CoverageLedgerClient::new(&env, &ledger_id);
-
-    assert_eq!(ledger.version(), 1);
 }
 
 // ---- admin ----------------------------------------------------------------
@@ -973,4 +1244,127 @@ fn transfer_admin_changes_admin() {
     f.ledger.transfer_admin(&next);
     assert_eq!(f.ledger.admin(), next);
     assert_eq!(f.ledger.registry(), f.registry.address);
+}
+
+/// Authorise exactly these `(address, function, args)` calls on the ledger and
+/// nothing else, replacing the fixture's `mock_all_auths`.
+fn authorise_only(f: &Fixture, entries: &[(&Address, &str, soroban_sdk::Vec<soroban_sdk::Val>)]) {
+    let invokes: std::vec::Vec<MockAuthInvoke> = entries
+        .iter()
+        .map(|(_, fn_name, args)| MockAuthInvoke {
+            contract: &f.ledger.address,
+            fn_name,
+            args: args.clone(),
+            sub_invokes: &[],
+        })
+        .collect();
+    let mocks: std::vec::Vec<MockAuth> = entries
+        .iter()
+        .zip(invokes.iter())
+        .map(|((address, _, _), invoke)| MockAuth { address, invoke })
+        .collect();
+    f.env.mock_auths(&mocks);
+}
+
+/// What a client sees when a `require_auth` inside the ledger finds no
+/// matching authorisation: the host reports it against the failing frame.
+fn auth_failure() -> Error {
+    Error::from_type_and_code(ScErrorType::Context, ScErrorCode::InvalidAction)
+}
+
+#[test]
+fn transfer_admin_requires_both() {
+    let f = setup();
+    let admin = f.ledger.admin();
+    let next = Address::generate(&f.env);
+    f.ledger.transfer_admin(&next);
+
+    // Both the outgoing and the incoming admin signed this exact call.
+    let call = AuthorizedFunction::Contract((
+        f.ledger.address.clone(),
+        Symbol::new(&f.env, "transfer_admin"),
+        (next.clone(),).into_val(&f.env),
+    ));
+    let auths = f.env.auths();
+    assert_eq!(auths.len(), 2);
+    for signer in [&admin, &next] {
+        assert!(auths
+            .iter()
+            .any(|(a, inv)| a == signer && inv.function == call));
+    }
+    assert_eq!(f.ledger.admin(), next);
+}
+
+#[test]
+fn transfer_admin_fails_without_the_new_admins_signature() {
+    let f = setup();
+    let admin = f.ledger.admin();
+    let next = Address::generate(&f.env);
+    authorise_only(
+        &f,
+        &[(&admin, "transfer_admin", (next.clone(),).into_val(&f.env))],
+    );
+    assert_eq!(f.ledger.try_transfer_admin(&next), Err(Ok(auth_failure())));
+    assert_eq!(f.ledger.admin(), admin);
+}
+
+#[test]
+fn transfer_admin_fails_without_the_current_admins_signature() {
+    let f = setup();
+    let admin = f.ledger.admin();
+    let next = Address::generate(&f.env);
+    authorise_only(
+        &f,
+        &[(&next, "transfer_admin", (next.clone(),).into_val(&f.env))],
+    );
+    assert_eq!(f.ledger.try_transfer_admin(&next), Err(Ok(auth_failure())));
+    assert_eq!(f.ledger.admin(), admin);
+}
+
+#[test]
+fn old_admin_loses_upgrade_and_transfer_after_transfer() {
+    let f = setup();
+    let old = f.ledger.admin();
+    let next = Address::generate(&f.env);
+    let third = Address::generate(&f.env);
+    let wasm_hash = BytesN::from_array(&f.env, &[7; 32]);
+    authorise_only(
+        &f,
+        &[
+            (&old, "transfer_admin", (next.clone(),).into_val(&f.env)),
+            (&next, "transfer_admin", (next.clone(),).into_val(&f.env)),
+        ],
+    );
+    f.ledger.transfer_admin(&next);
+    assert_eq!(f.ledger.admin(), next);
+
+    // The old admin's signature on upgrade no longer carries any weight.
+    authorise_only(
+        &f,
+        &[(&old, "upgrade", (wasm_hash.clone(),).into_val(&f.env))],
+    );
+    assert_eq!(f.ledger.try_upgrade(&wasm_hash), Err(Ok(auth_failure())));
+
+    // Nor can the old admin hand the role on, even with the recipient's
+    // signature.
+    authorise_only(
+        &f,
+        &[
+            (&old, "transfer_admin", (third.clone(),).into_val(&f.env)),
+            (&third, "transfer_admin", (third.clone(),).into_val(&f.env)),
+        ],
+    );
+    assert_eq!(f.ledger.try_transfer_admin(&third), Err(Ok(auth_failure())));
+    assert_eq!(f.ledger.admin(), next);
+
+    // The new admin can.
+    authorise_only(
+        &f,
+        &[
+            (&next, "transfer_admin", (third.clone(),).into_val(&f.env)),
+            (&third, "transfer_admin", (third.clone(),).into_val(&f.env)),
+        ],
+    );
+    f.ledger.transfer_admin(&third);
+    assert_eq!(f.ledger.admin(), third);
 }

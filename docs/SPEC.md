@@ -173,9 +173,38 @@ Records what was said, and answers coverage questions.
 | `Registry` | instance | `Address` |
 | `Asset(Address)` | persistent | `AssetRecord` |
 | `Supply(Address)` | persistent | `SupplySnapshot` (latest only) |
-| `Report(Address, Tier)` | persistent | `ReserveReport` (latest per tier) |
-| `IssuerDelegate(Address)` | persistent | `Option<Address>` (delegate for `IssuerSigned` tier) |
-| `PendingUpgrade` | instance | `Option<PendingUpgrade>` |
+| `ReportBy(Address, Tier, Address)` | persistent | `ReserveReport`: the latest from one reporter at one tier for one asset |
+| `Reporters(Address, Tier)` | persistent | `Vec<Address>`: the reporters with a `ReportBy` entry at that tier, in the order they first posted; at most `MAX_REPORTERS_PER_TIER = 4` |
+| `Report(Address, Tier)` | persistent | `ReserveReport`: the v0.1 layout (one per tier). Read until migrated, never written; see [Upgrading a v0.1 deployment](#upgrading-a-v01-deployment) |
+
+Every reporter keeps their own figure. Two auditors' reports coexist, and a
+transcriber who posts a later `as_of` adds a fresher figure without erasing
+anyone else's. The key includes the tier as well as the reporter so that a
+reporter whose role changes (transcriber promoted to auditor, say) starts a
+new entry at the new tier instead of moving the old one between indexes; the
+old entry stops counting by the rule below.
+
+A stored report **counts** while its reporter is still entitled to its tier:
+
+- `IssuerSigned`: always. The issuer is fixed by the asset record.
+- `AuditorSigned`: while `registry.role_of(reporter) == Some(Auditor)`.
+- `Transcribed`: while `registry.role_of(reporter) == Some(Transcriber)`.
+
+So `reporter-registry.revoke` takes a bad actor's figures out of
+`coverage`, `is_covered`, `get_report` and `get_reports` in the same
+transaction, with no second admin action, and restoring the role with
+`set_reporter` brings them back. Issuer-signed reports never depend on the
+registry. The reports are not deleted when the reporter is revoked; they stay
+in storage until their slot is reclaimed (see the cap rule) and their history
+is in events either way.
+
+`coverage` first picks the report that would win on `as_of` and tier, then
+asks the registry about that one only, and moves to the next only if it no
+longer counts. So a fresh issuer-signed report costs no `role_of` call, a
+fresh auditor or transcriber report costs one, and the worst case (every
+fresher report revoked) is `2 * MAX_REPORTERS_PER_TIER` calls. The alternative, an admin-only
+`void_report`, is cheaper to read but leaves the bad figure in force until a
+maintainer remembers the second step. That gap is what this rule removes.
 
 History lives in events. The indexer keeps the full series. Their topic and
 data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
@@ -187,13 +216,11 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `__constructor(admin: Address, registry: Address)` | — | — | — | — |
 | `list_asset(sac: Address)` | none (permissionless) | `AssetRecord` | `NotAStellarAsset`, `AlreadyListed` | `asset_listed {sac} code, issuer` |
 | `post_supply(poster: Address, sac: Address, amount: i128, ledger: u32, breakdown_hash: BytesN<32>)` | poster | `()` | `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` | `supply_posted {sac} amount, ledger, breakdown_hash, poster` |
-| `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `ImplausibleAmount` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
-| `set_issuer_delegate(sac: Address, delegate: Option<Address>)` | asset.issuer | `()` | `AssetNotListed` | `issuer_delegate_set {sac} delegate` / `issuer_delegate_cleared {sac}` |
-| `get_issuer_delegate(sac: Address)` | — | `Option<Address>` | — | — |
+| `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `ImplausibleAmount`, `TooManyReporters` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
 | `get_asset(sac)` | — | `Option<AssetRecord>` | — | — |
 | `get_supply(sac)` | — | `Option<SupplySnapshot>` | — | — |
-| `get_report(sac, tier: Tier)` | — | `Option<ReserveReport>` | — | — |
-| `get_reports(sac)` | — | `Vec<ReserveReport>` (latest per tier, strongest first, missing tiers skipped) | — | — |
+| `get_report(sac, tier: Tier)` | — | `Option<ReserveReport>` (the freshest report at that tier that counts) | — | — |
+| `get_reports(sac)` | — | `Vec<ReserveReport>` (every stored report that counts: strongest tier first, then first-post order within a tier) | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | — | — |
 | `registry()` / `admin()` | — | `Address` | — | — |
@@ -222,7 +249,16 @@ Rules:
   the delegate, not the issuer itself.
 - Supply snapshots must move forward: `ledger` strictly greater than the stored
   one and not greater than the current ledger. Reports per tier must move
-  forward: `as_of` strictly greater than the stored one and not in the future.
+  forward per reporter: `as_of` strictly greater than that reporter's stored
+  report at that tier, and not in the future. Another reporter's report at the
+  same tier does not make a figure stale.
+- Each tier holds reports from at most `MAX_REPORTERS_PER_TIER = 4` reporters
+  per asset. When a reporter with no report at a tier posts to a full tier,
+  `post_reserve` first drops the entries whose reporter no longer counts
+  (revoked, or moved to another role), report and index entry both; if the
+  tier is still full it fails with `TooManyReporters`. A maintainer frees a
+  slot by revoking a reporter. The cap bounds what `coverage` reads, and so
+  what every `is_covered` caller pays.
 - `post_reserve` rejects a figure whose coverage against the stored supply
   would fall outside `MIN_PLAUSIBLE_BPS = 1` (0.01%) to
   `MAX_PLAUSIBLE_BPS = 1_000_000` (10,000%), with `ImplausibleAmount`. Amounts
@@ -234,9 +270,10 @@ Rules:
   `amount == 0` is always allowed: no reserves at all is a statement the
   protocol exists to be able to carry, and unlike a small non-zero figure it
   cannot be the result of a unit slip.
-- `coverage(sac, min_tier)` picks, among tiers `>= min_tier` that have a
-  report, the one with the latest `as_of` (ties go to the higher tier). It
-  returns `None` if there is no supply snapshot or no qualifying report.
+- `coverage(sac, min_tier)` picks, among the stored reports at tiers
+  `>= min_tier` that count, the one with the latest `as_of`. Ties go to the
+  higher tier, then to the reporter who first posted at that tier. It returns
+  `None` if there is no supply snapshot or no qualifying report.
 - `is_covered` is true only if `coverage` is `Some`, both the supply snapshot
   and the report are no older than `max_age` seconds, and `bps >= min_bps`.
 
@@ -244,18 +281,42 @@ Errors (`LedgerError`): `NotAStellarAsset = 1`, `AlreadyListed = 2`,
 `AssetNotListed = 3`, `NotSupplyPoster = 4`, `NotReporter = 5`,
 `InvalidAmount = 6`, `FutureLedger = 7`, `StaleLedger = 8`,
 `FutureTimestamp = 9`, `StaleReport = 10`, `InvalidUri = 11`,
-`ImplausibleAmount = 12`, `UpgradeNotProposed = 13`, `UpgradeDelayNotElapsed = 14`.
+`ImplausibleAmount = 12`, `TooManyReporters = 13`.
 
-Events:
-- `asset_listed {sac} code, issuer`
-- `supply_posted {sac} amount, ledger, breakdown_hash, poster`
-- `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri`
-- `issuer_delegate_set {sac} delegate` — published when a delegate is set
-- `issuer_delegate_cleared {sac}` — published when a delegate is cleared
-- `upgrade_proposed {wasm_hash} proposed_at_ledger, proposed_by`
-- `upgrade_executed {wasm_hash}`
-- `upgrade_cancelled`
-- `admin_transferred {new_admin}`
+### Upgrading a v0.1 deployment
+
+The v0.1 ledger stored one report per tier under `Report(sac, tier)`. The
+live testnet ledger holds such entries, and the deployed vaults store the
+ledger's address in their config with no way to change it, so the ledger is
+upgraded in place rather than redeployed:
+
+```bash
+stellar contract build
+HASH=$(stellar contract upload --wasm target/wasm32v1-none/release/coverage_ledger.wasm \
+  --source plimsoll-admin --network testnet)
+stellar contract invoke --id "$COVERAGE_LEDGER_ID" --source plimsoll-admin --network testnet -- \
+  upgrade --wasm_hash "$HASH"
+```
+
+then record `HASH` under `liveWasm.coverageLedger` in
+`deployments/testnet.json`.
+
+No migration call is needed. The new code migrates lazily:
+
+- **Reads** treat a legacy `Report(sac, tier)` as one more stored report at
+  that tier, from the reporter recorded in it, subject to the same counting
+  rule, ordered before the indexed reporters.
+- **Writes**: the first `post_reserve` at a tier moves that tier's legacy
+  entry, if any, to `ReportBy(sac, tier, reporter)`, makes its reporter the
+  first entry of `Reporters(sac, tier)`, and removes the legacy key, before
+  applying the staleness and cap rules. A legacy key therefore exists only
+  while its tier's index is empty, so nothing is ever counted twice.
+
+Contract ids, function signatures (apart from the added error) and event
+layouts are unchanged, so the indexer, the dashboard and the vaults need no
+change. Rolling back means upgrading to the previous hash; entries that were
+already migrated would then be invisible to the old code, so a rollback should
+be followed by each reporter posting again.
 
 ## covered-vault (reference consumer)
 
@@ -269,7 +330,14 @@ covered. Withdrawals are never blocked.
 | `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
-| `version()` | — | `u32` | — | — |
+| `can_deposit()` | — | `bool` | — | — |
+
+`can_deposit()` makes the same `is_covered(asset, min_bps, max_age,
+min_tier)` call `deposit` makes, with the stored config, and returns its
+answer. It is true exactly when a positive deposit would pass the coverage
+gate, so a front end can show whether the vault is open without simulating a
+deposit and reading a `NotCovered` failure. It says nothing about the
+depositor's balance or authorisation.
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
 `InsufficientBalance = 3`.
@@ -284,9 +352,10 @@ Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
 | Auditor publishes attestation | `coverage-ledger.post_reserve` (auditor) |
 | Volunteer copies a figure from a PDF report | `coverage-ledger.post_reserve` (transcriber) |
 | Maintainer onboards an auditor / transcriber / poster | `reporter-registry.set_reporter` |
-| Maintainer removes a bad actor | `reporter-registry.revoke` |
+| Maintainer removes a bad actor | `reporter-registry.revoke` (their reports stop counting at once) |
 | Dashboard shows ratio and freshness | `coverage-ledger.coverage`, `get_supply`, `get_reports` |
 | Lending pool refuses an under-backed asset | `coverage-ledger.is_covered` (see `covered-vault`) |
+| Front end shows whether the vault is taking deposits | `covered-vault.can_deposit` |
 
 ## Out of scope for v0.1
 

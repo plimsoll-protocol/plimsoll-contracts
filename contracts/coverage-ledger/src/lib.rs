@@ -19,15 +19,9 @@ const MAX_SAC_NAME_LEN: usize = 69;
 const STRKEY_LEN: usize = 56;
 const MAX_CODE_LEN: usize = 12;
 
-/// Contract version. Increment on every behavioural change.
-const VERSION: u32 = 1;
-
-// Contract metadata for `stellar contract info meta`
-contractmeta!(key = "description", val = "Plimsoll Coverage Ledger");
-contractmeta!(
-    key = "repository",
-    val = "https://github.com/plimsoll-protocol/plimsoll-contracts"
-);
+/// Most reporters whose figures one asset keeps at one tier. Bounds what
+/// `coverage` reads, and so what every `is_covered` caller pays.
+pub const MAX_REPORTERS_PER_TIER: u32 = 4;
 
 #[contracttype]
 #[derive(Clone)]
@@ -36,9 +30,12 @@ enum DataKey {
     Registry,
     Asset(Address),
     Supply(Address),
+    /// v0.1 layout, one report per tier. Read until migrated, never written.
     Report(Address, Tier),
-    IssuerDelegate(Address),
-    PendingUpgrade,
+    /// The latest report from one reporter at one tier: (sac, tier, reporter).
+    ReportBy(Address, Tier, Address),
+    /// Reporters with a `ReportBy` entry at (sac, tier), in first-post order.
+    Reporters(Address, Tier),
 }
 
 #[contracterror]
@@ -57,8 +54,7 @@ pub enum LedgerError {
     StaleReport = 10,
     InvalidUri = 11,
     ImplausibleAmount = 12,
-    UpgradeNotProposed = 13,
-    UpgradeDelayNotElapsed = 14,
+    TooManyReporters = 13,
 }
 
 #[contractevent]
@@ -209,26 +205,129 @@ fn parse_sac_name(env: &Env, name: &String) -> Option<(String, Address)> {
     Some((code, Address::from_string(&issuer)))
 }
 
-fn best_report(env: &Env, sac: &Address, min_tier: Tier) -> Option<ReserveReport> {
-    let mut best: Option<ReserveReport> = None;
-    // Strongest tier first, so a tie on `as_of` keeps the stronger report.
-    for tier in Tier::ALL_DESC {
-        if tier < min_tier {
-            continue;
-        }
+fn reporters(env: &Env, sac: &Address, tier: Tier) -> Vec<Address> {
+    read_persistent(env, &DataKey::Reporters(sac.clone(), tier)).unwrap_or_else(|| Vec::new(env))
+}
+
+/// Every stored report at `tier`: a not-yet-migrated v0.1 entry first, then
+/// the indexed reporters' in first-post order.
+fn reports_at(env: &Env, sac: &Address, tier: Tier) -> Vec<ReserveReport> {
+    let mut out = Vec::new(env);
+    if let Some(legacy) = read_persistent::<ReserveReport>(env, &DataKey::Report(sac.clone(), tier))
+    {
+        out.push_back(legacy);
+    }
+    for reporter in reporters(env, sac, tier).iter() {
         if let Some(report) =
-            read_persistent::<ReserveReport>(env, &DataKey::Report(sac.clone(), tier))
+            read_persistent::<ReserveReport>(env, &DataKey::ReportBy(sac.clone(), tier, reporter))
         {
-            let newer = match &best {
-                Some(current) => report.as_of > current.as_of,
-                None => true,
-            };
-            if newer {
-                best = Some(report);
-            }
+            out.push_back(report);
         }
     }
-    best
+    out
+}
+
+/// Move a v0.1 `Report(sac, tier)` entry into the per-reporter layout. Runs
+/// before every write at a tier, so a legacy key only ever exists while that
+/// tier's index is empty: the legacy reporter becomes its first entry, and no
+/// report is ever read twice.
+fn migrate_legacy(env: &Env, sac: &Address, tier: Tier) {
+    let legacy_key = DataKey::Report(sac.clone(), tier);
+    if let Some(legacy) = env
+        .storage()
+        .persistent()
+        .get::<_, ReserveReport>(&legacy_key)
+    {
+        let reporter = legacy.reporter.clone();
+        write_persistent(
+            env,
+            &DataKey::ReportBy(sac.clone(), tier, reporter.clone()),
+            &legacy,
+        );
+        write_persistent(
+            env,
+            &DataKey::Reporters(sac.clone(), tier),
+            &Vec::from_array(env, [reporter]),
+        );
+        env.storage().persistent().remove(&legacy_key);
+    }
+}
+
+/// Whether a stored report still counts: its reporter must still be entitled
+/// to its tier. Issuer-signed reports always count; the issuer is fixed by the
+/// asset record. A revoked auditor or transcriber, or one whose role changed,
+/// no longer speaks for the figures they posted.
+fn counts(registry: &RegistryClient, report: &ReserveReport) -> bool {
+    let needed = match report.tier {
+        Tier::IssuerSigned => return true,
+        Tier::AuditorSigned => Role::Auditor,
+        Tier::Transcribed => Role::Transcriber,
+    };
+    registry.role_of(&report.reporter) == Some(needed)
+}
+
+/// The freshest report in `candidates` that still counts. Candidates come in
+/// priority order (strongest tier first, then first-post order), so on equal
+/// `as_of` the earlier one wins. The registry is asked only about the report
+/// that would win, and again only if that one no longer counts, so a fresh
+/// issuer-signed report costs no cross-contract call at all.
+fn pick_counting(env: &Env, mut candidates: Vec<ReserveReport>) -> Option<ReserveReport> {
+    let registry = RegistryClient::new(env, &registry(env));
+    loop {
+        let mut best: Option<(u32, ReserveReport)> = None;
+        for (i, report) in candidates.iter().enumerate() {
+            if best.as_ref().is_none_or(|(_, b)| report.as_of > b.as_of) {
+                best = Some((i as u32, report));
+            }
+        }
+        let (i, report) = best?;
+        if counts(&registry, &report) {
+            return Some(report);
+        }
+        candidates.remove(i);
+    }
+}
+
+/// The freshest counting report at `tier`.
+fn freshest_at(env: &Env, sac: &Address, tier: Tier) -> Option<ReserveReport> {
+    pick_counting(env, reports_at(env, sac, tier))
+}
+
+fn best_report(env: &Env, sac: &Address, min_tier: Tier) -> Option<ReserveReport> {
+    let mut candidates = Vec::new(env);
+    for tier in Tier::ALL_DESC {
+        if tier >= min_tier {
+            candidates.append(&reports_at(env, sac, tier));
+        }
+    }
+    pick_counting(env, candidates)
+}
+
+/// Drop index entries, and their reports, whose reporter no longer counts.
+/// Called only when a tier is full, so a revoked reporter cannot hold a slot
+/// against a working one.
+fn reclaim_slots(
+    env: &Env,
+    registry: &RegistryClient,
+    sac: &Address,
+    tier: Tier,
+    index: &Vec<Address>,
+) -> Vec<Address> {
+    let mut kept = Vec::new(env);
+    for reporter in index.iter() {
+        let key = DataKey::ReportBy(sac.clone(), tier, reporter.clone());
+        let keep = env
+            .storage()
+            .persistent()
+            .get::<_, ReserveReport>(&key)
+            .is_some_and(|report| counts(registry, &report));
+        if keep {
+            kept.push_back(reporter);
+        } else {
+            env.storage().persistent().remove(&key);
+        }
+    }
+    kept
 }
 
 #[contractimpl]
@@ -385,11 +484,26 @@ impl CoverageLedger {
             }
         }
 
-        let key = DataKey::Report(sac.clone(), tier);
+        migrate_legacy(&env, &sac, tier);
+        // Staleness is per reporter: another reporter's figure at this tier,
+        // however recent, does not stop this one being recorded.
+        let key = DataKey::ReportBy(sac.clone(), tier, reporter.clone());
         if let Some(previous) = read_persistent::<ReserveReport>(&env, &key) {
             if as_of <= previous.as_of {
                 panic_with_error!(&env, LedgerError::StaleReport);
             }
+        }
+        let mut index = reporters(&env, &sac, tier);
+        if !index.contains(&reporter) {
+            if index.len() >= MAX_REPORTERS_PER_TIER {
+                let registry = RegistryClient::new(&env, &registry(&env));
+                index = reclaim_slots(&env, &registry, &sac, tier, &index);
+            }
+            if index.len() >= MAX_REPORTERS_PER_TIER {
+                panic_with_error!(&env, LedgerError::TooManyReporters);
+            }
+            index.push_back(reporter.clone());
+            write_persistent(&env, &DataKey::Reporters(sac.clone(), tier), &index);
         }
         let report = ReserveReport {
             amount,
@@ -423,19 +537,21 @@ impl CoverageLedger {
         read_persistent(&env, &DataKey::Supply(sac))
     }
 
+    /// The freshest report at `tier` that still counts.
     pub fn get_report(env: Env, sac: Address, tier: Tier) -> Option<ReserveReport> {
-        read_persistent(&env, &DataKey::Report(sac, tier))
+        freshest_at(&env, &sac, tier)
     }
 
-    /// Every tier's latest report, strongest first, skipping tiers with none.
-    /// Showing all of them took three calls; this takes one.
+    /// Every stored report that still counts, strongest tier first, then
+    /// first-post order within a tier.
     pub fn get_reports(env: Env, sac: Address) -> Vec<ReserveReport> {
+        let registry = RegistryClient::new(&env, &registry(&env));
         let mut out = Vec::new(&env);
         for tier in Tier::ALL_DESC {
-            if let Some(report) =
-                read_persistent::<ReserveReport>(&env, &DataKey::Report(sac.clone(), tier))
-            {
-                out.push_back(report);
+            for report in reports_at(&env, &sac, tier).iter() {
+                if counts(&registry, &report) {
+                    out.push_back(report);
+                }
             }
         }
         out

@@ -173,10 +173,93 @@ fn config_round_trips() {
     assert_eq!(cfg.min_tier, Tier::IssuerSigned);
 }
 
-// ---- version --------------------------------------------------------------
+// ---- can_deposit ----------------------------------------------------------
 
 #[test]
-fn version_returns_constant() {
+fn can_deposit_true_when_covered() {
     let f = setup();
-    assert_eq!(f.vault.version(), 1);
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    assert!(f.vault.can_deposit());
+    // ...and a deposit does go through.
+    f.vault.deposit(&f.user, &UNIT);
+}
+
+#[test]
+fn can_deposit_false_when_under_backed() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 999 * UNIT);
+    assert!(!f.vault.can_deposit());
+    assert_eq!(
+        f.vault.try_deposit(&f.user, &UNIT),
+        Err(Ok(VaultError::NotCovered.into()))
+    );
+}
+
+#[test]
+fn can_deposit_false_when_stale() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    // Exactly max_age old is still fresh.
+    f.env.ledger().set_timestamp(T0 + DAY);
+    assert!(f.vault.can_deposit());
+    f.env.ledger().set_timestamp(T0 + DAY + 1);
+    assert!(!f.vault.can_deposit());
+    assert_eq!(
+        f.vault.try_deposit(&f.user, &UNIT),
+        Err(Ok(VaultError::NotCovered.into()))
+    );
+}
+
+#[test]
+fn can_deposit_false_without_any_report() {
+    let f = setup();
+    assert!(!f.vault.can_deposit());
+    // Supply alone is not enough either.
+    let seq = f.env.ledger().sequence();
+    f.ledger.post_supply(
+        &f.poster,
+        &f.sac,
+        &(1_000 * UNIT),
+        &seq,
+        &BytesN::from_array(&f.env, &[1; 32]),
+    );
+    assert!(!f.vault.can_deposit());
+    assert_eq!(
+        f.vault.try_deposit(&f.user, &UNIT),
+        Err(Ok(VaultError::NotCovered.into()))
+    );
+}
+
+#[test]
+fn can_deposit_uses_the_stored_min_tier() {
+    let f = setup();
+    // A transcriber's figure is below the vault's IssuerSigned floor, so it
+    // does not open the vault even though the ratio is fine.
+    let transcriber = Address::generate(&f.env);
+    ReporterRegistryClient::new(&f.env, &f.ledger.registry()).set_reporter(
+        &transcriber,
+        &Role::Transcriber,
+        &String::from_str(&f.env, "volunteer"),
+    );
+    let seq = f.env.ledger().sequence();
+    f.ledger.post_supply(
+        &f.poster,
+        &f.sac,
+        &(1_000 * UNIT),
+        &seq,
+        &BytesN::from_array(&f.env, &[1; 32]),
+    );
+    f.ledger.post_reserve(
+        &transcriber,
+        &f.sac,
+        &(1_000 * UNIT),
+        &T0,
+        &BytesN::from_array(&f.env, &[2; 32]),
+        &String::from_str(&f.env, "https://example.org/report.pdf"),
+    );
+    assert!(!f.vault.can_deposit());
+    assert_eq!(
+        f.vault.try_deposit(&f.user, &UNIT),
+        Err(Ok(VaultError::NotCovered.into()))
+    );
 }

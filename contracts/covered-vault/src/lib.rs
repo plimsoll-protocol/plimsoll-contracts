@@ -74,6 +74,16 @@ fn config(env: &Env) -> VaultConfig {
         .expect("config is set in the constructor")
 }
 
+/// The coverage gate `deposit` applies, with the stored config.
+fn is_open(env: &Env, cfg: &VaultConfig) -> bool {
+    CoverageLedgerClient::new(env, &cfg.ledger).is_covered(
+        &cfg.asset,
+        &cfg.min_bps,
+        &cfg.max_age,
+        &cfg.min_tier,
+    )
+}
+
 fn balance_of(env: &Env, who: &Address) -> i128 {
     let key = DataKey::Balance(who.clone());
     let balance = env.storage().persistent().get::<_, i128>(&key);
@@ -126,13 +136,7 @@ impl CoveredVault {
             panic_with_error!(&env, VaultError::InvalidAmount);
         }
         let cfg = config(&env);
-        let covered = CoverageLedgerClient::new(&env, &cfg.ledger).is_covered(
-            &cfg.asset,
-            &cfg.min_bps,
-            &cfg.max_age,
-            &cfg.min_tier,
-        );
-        if !covered {
+        if !is_open(&env, &cfg) {
             panic_with_error!(&env, VaultError::NotCovered);
         }
         token::TokenClient::new(&env, &cfg.asset).transfer(
@@ -180,9 +184,9 @@ impl CoveredVault {
         config(&env)
     }
 
-    /// Returns the contract version.
-    pub fn version(_env: Env) -> u32 {
-        VERSION
+    /// Whether a positive deposit would pass the coverage gate right now.
+    pub fn can_deposit(env: Env) -> bool {
+        is_open(&env, &config(&env))
     }
 }
 

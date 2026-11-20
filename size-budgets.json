@@ -1,7 +1,7 @@
 {
-  "_comment": "Byte ceiling per contract wasm, checked by scripts/check-wasm-sizes.sh after `stellar contract build`. Each was set at the size on 2026-10-30 plus about 20%, rounded up. Raise a budget deliberately, in the commit that needs the room, so growth is argued for rather than absorbed.",
+  "_comment": "Byte ceiling per contract wasm, checked by scripts/check-wasm-sizes.sh after `stellar contract build`. Each was set at the size on 2026-10-30 plus about 20%, rounded up. Raise a budget deliberately, in the commit that needs the room, so growth is argued for rather than absorbed. coverage_ledger raised to 21700 on 2026-11-20 (18017 bytes + 20%) for per-reporter reports and the revoked-reporter check (#26, #27).",
   "budgets": {
-    "coverage_ledger": 17700,
+    "coverage_ledger": 21700,
     "covered_vault": 5800,
     "reporter_registry": 4900
   }
