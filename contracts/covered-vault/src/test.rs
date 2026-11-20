@@ -172,3 +172,11 @@ fn config_round_trips() {
     assert_eq!(cfg.max_age, DAY);
     assert_eq!(cfg.min_tier, Tier::IssuerSigned);
 }
+
+// ---- version --------------------------------------------------------------
+
+#[test]
+fn version_returns_constant() {
+    let f = setup();
+    assert_eq!(f.vault.version(), 1);
+}
