@@ -54,6 +54,52 @@ so `1_0000000` is one unit). No floats anywhere. Coverage is basis points:
 When supply is zero, `bps = u32::MAX` (nothing is owed, so nothing is
 uncovered).
 
+## Shared upgrade logic (`plimsoll-types`)
+
+Both `reporter-registry` and `coverage-ledger` share the same time-locked
+upgrade mechanism to protect against a compromised or careless admin key.
+
+| Constant | Value | Description |
+| --- | --- | --- |
+| `UPGRADE_DELAY_LEDGERS` | `17_280` (1 day) | Minimum ledgers between `propose_upgrade` and `execute_upgrade` |
+
+**Storage (per contract)**
+
+| Key | Storage | Value |
+| --- | --- | --- |
+| `PendingUpgrade` | instance | `Option<PendingUpgrade>` (see struct below) |
+
+```rust
+#[contracttype]
+pub struct PendingUpgrade {
+    pub wasm_hash: BytesN<32>,
+    pub proposed_at_ledger: u32,
+    pub proposed_by: Address,
+}
+```
+
+**Functions (per contract)**
+
+| Function | Auth | Returns | Errors | Event |
+| --- | --- | --- | --- | --- |
+| `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} proposed_at_ledger, proposed_by` |
+| `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
+| `cancel_upgrade()` | admin | `()` | — | `upgrade_cancelled` |
+| `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
+
+Rules:
+- `propose_upgrade` stores the `wasm_hash`, current ledger sequence, and admin
+  address. It overwrites any existing proposal (restarting the delay clock).
+- `execute_upgrade` fails if no proposal exists (`UpgradeNotProposed`) or if
+  fewer than `UPGRADE_DELAY_LEDGERS` ledgers have passed since the proposal
+  (`UpgradeDelayNotElapsed`).
+- `cancel_upgrade` clears any pending proposal.
+- A new `propose_upgrade` after cancellation or execution restarts the delay.
+- The admin must authorize each step (`propose_upgrade`, `execute_upgrade`,
+  `cancel_upgrade`).
+- The delay is measured in ledgers (not time) to be independent of ledger
+  close time variance. At 5-second close time, 17,280 ledgers ≈ 24 hours.
+
 ## reporter-registry
 
 Decides who may speak. Holds no money.
@@ -64,6 +110,8 @@ Decides who may speak. Holds no money.
 | --- | --- | --- |
 | `Admin` | instance | `Address` |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
+| `ReporterIndex` | persistent, TTL extended on write | `Vec<Address>` (ordered list of all reporters) |
+| `PendingUpgrade` | instance | `Option<PendingUpgrade>` |
 
 **Functions**
 
@@ -75,10 +123,43 @@ Decides who may speak. Holds no money.
 | `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `reporter_revoked {reporter}` |
 | `role_of(reporter: Address)` | — | `Option<Role>` | — | — |
 | `get_reporter(reporter: Address)` | — | `Option<ReporterInfo>` | — | — |
+| `reporter_count()` | — | `u32` | — | — |
+| `reporters(start: u32, limit: u32)` | — | `Vec<Address>` | — | — |
 | `transfer_admin(new_admin: Address)` | admin and new_admin | `()` | — | `admin_transferred {new_admin}` |
-| `upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | — |
+| `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} proposed_at_ledger, proposed_by` |
+| `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
+| `cancel_upgrade()` | admin | `()` | — | `upgrade_cancelled` |
+| `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
+| `version()` | — | `u32` | — | — |
 
-Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`.
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`, `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
+
+Rules:
+
+- `set_reporter` appends the reporter to `ReporterIndex` if it is a new
+  reporter (not already present). Changing an existing reporter's role/name
+  does not change the index order.
+- `revoke` removes the reporter from `ReporterIndex` using swap-remove (the
+  last element is moved into the removed slot). This changes the order of
+  remaining reporters; consumers must not rely on stable ordering across
+  revokes.
+- `reporters(start, limit)` returns up to `limit` addresses from `ReporterIndex`
+  starting at `start`. The maximum `limit` is capped at 100; larger values are
+  treated as 100.
+- `reporter_count()` returns the current length of `ReporterIndex`.
+
+Backfill for pre-upgrade reporters: on first call to `reporter_count` or
+`reporters` after upgrade, if `ReporterIndex` is missing, reconstruct it by
+iterating all `Reporter(*)` keys in storage. This is a one-time O(N) operation
+that runs in the first request after upgrade.
+
+Events:
+- `reporter_set {reporter} role, name`
+- `reporter_revoked {reporter}`
+- `admin_transferred {new_admin}`
+- `upgrade_proposed {wasm_hash} proposed_at_ledger, proposed_by`
+- `upgrade_executed {wasm_hash}`
+- `upgrade_cancelled`
 
 ## coverage-ledger
 
@@ -93,6 +174,8 @@ Records what was said, and answers coverage questions.
 | `Asset(Address)` | persistent | `AssetRecord` |
 | `Supply(Address)` | persistent | `SupplySnapshot` (latest only) |
 | `Report(Address, Tier)` | persistent | `ReserveReport` (latest per tier) |
+| `IssuerDelegate(Address)` | persistent | `Option<Address>` (delegate for `IssuerSigned` tier) |
+| `PendingUpgrade` | instance | `Option<PendingUpgrade>` |
 
 History lives in events. The indexer keeps the full series. Their topic and
 data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
@@ -105,6 +188,8 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `list_asset(sac: Address)` | none (permissionless) | `AssetRecord` | `NotAStellarAsset`, `AlreadyListed` | `asset_listed {sac} code, issuer` |
 | `post_supply(poster: Address, sac: Address, amount: i128, ledger: u32, breakdown_hash: BytesN<32>)` | poster | `()` | `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` | `supply_posted {sac} amount, ledger, breakdown_hash, poster` |
 | `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `ImplausibleAmount` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
+| `set_issuer_delegate(sac: Address, delegate: Option<Address>)` | asset.issuer | `()` | `AssetNotListed` | `issuer_delegate_set {sac} delegate` / `issuer_delegate_cleared {sac}` |
+| `get_issuer_delegate(sac: Address)` | — | `Option<Address>` | — | — |
 | `get_asset(sac)` | — | `Option<AssetRecord>` | — | — |
 | `get_supply(sac)` | — | `Option<SupplySnapshot>` | — | — |
 | `get_report(sac, tier: Tier)` | — | `Option<ReserveReport>` | — | — |
@@ -113,7 +198,11 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | — | — |
 | `registry()` / `admin()` | — | `Address` | — | — |
 | `transfer_admin(new_admin)` | admin and new_admin | `()` | — | `admin_transferred` |
-| `upgrade(wasm_hash)` | admin | `()` | — | — |
+| `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} proposed_at_ledger, proposed_by` |
+| `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
+| `cancel_upgrade()` | admin | `()` | — | `upgrade_cancelled` |
+| `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
+| `version()` | — | `u32` | — | — |
 
 Rules:
 
@@ -124,9 +213,13 @@ Rules:
   "native"`) is rejected: it has no issuer and no reserves.
 - `post_reserve` tier resolution: if `reporter == asset.issuer` the tier is
   `IssuerSigned` (the classic issuer account signs the Soroban auth entry).
-  Otherwise the registry role decides: `Auditor → AuditorSigned`,
-  `Transcriber → Transcribed`. A `SupplyPoster` or unknown address gets
-  `NotReporter`.
+  If a delegate is set for the asset via `set_issuer_delegate` and
+  `reporter == delegate`, the tier is also `IssuerSigned`. Otherwise the
+  registry role decides: `Auditor → AuditorSigned`, `Transcriber →
+  Transcribed`. A `SupplyPoster` or unknown address gets `NotReporter`.
+  The report's `reporter` field records the delegate's address when a delegate
+  posts; consumers infer `IssuerSigned` from the tier and that the reporter is
+  the delegate, not the issuer itself.
 - Supply snapshots must move forward: `ledger` strictly greater than the stored
   one and not greater than the current ledger. Reports per tier must move
   forward: `as_of` strictly greater than the stored one and not in the future.
@@ -151,7 +244,18 @@ Errors (`LedgerError`): `NotAStellarAsset = 1`, `AlreadyListed = 2`,
 `AssetNotListed = 3`, `NotSupplyPoster = 4`, `NotReporter = 5`,
 `InvalidAmount = 6`, `FutureLedger = 7`, `StaleLedger = 8`,
 `FutureTimestamp = 9`, `StaleReport = 10`, `InvalidUri = 11`,
-`ImplausibleAmount = 12`.
+`ImplausibleAmount = 12`, `UpgradeNotProposed = 13`, `UpgradeDelayNotElapsed = 14`.
+
+Events:
+- `asset_listed {sac} code, issuer`
+- `supply_posted {sac} amount, ledger, breakdown_hash, poster`
+- `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri`
+- `issuer_delegate_set {sac} delegate` — published when a delegate is set
+- `issuer_delegate_cleared {sac}` — published when a delegate is cleared
+- `upgrade_proposed {wasm_hash} proposed_at_ledger, proposed_by`
+- `upgrade_executed {wasm_hash}`
+- `upgrade_cancelled`
+- `admin_transferred {new_admin}`
 
 ## covered-vault (reference consumer)
 
@@ -165,6 +269,7 @@ covered. Withdrawals are never blocked.
 | `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
+| `version()` | — | `u32` | — | — |
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
 `InsufficientBalance = 3`.

@@ -14,6 +14,9 @@ pub const PERSISTENT_EXTEND_TO: u32 = 90 * DAY_IN_LEDGERS;
 pub const INSTANCE_THRESHOLD: u32 = 30 * DAY_IN_LEDGERS;
 pub const INSTANCE_EXTEND_TO: u32 = 90 * DAY_IN_LEDGERS;
 
+/// Minimum ledgers between propose_upgrade and execute_upgrade (1 day).
+pub const UPGRADE_DELAY_LEDGERS: u32 = DAY_IN_LEDGERS;
+
 /// Basis-point denominator: 10_000 bps = 100%.
 pub const BPS_DENOMINATOR: i128 = 10_000;
 
@@ -30,6 +33,15 @@ pub const MIN_PLAUSIBLE_BPS: u32 = 1;
 /// ceiling on how over-backed an asset can be claimed to be before the claim
 /// says more about the reporter than the reserves.
 pub const MAX_PLAUSIBLE_BPS: u32 = 1_000_000;
+
+/// Pending upgrade information for time-locked upgrades.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub wasm_hash: BytesN<32>,
+    pub proposed_at_ledger: u32,
+    pub proposed_by: Address,
+}
 
 /// What a registered address is allowed to say.
 #[contracttype]
