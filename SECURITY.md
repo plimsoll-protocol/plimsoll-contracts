@@ -41,3 +41,11 @@ Out of scope:
 - The registry admin decides who is an auditor, transcriber or supply poster.
 - Supply snapshots are computed off-chain by a registered poster. They are
   verifiable (the breakdown hash is on-chain) but not proven on-chain.
+- Contract upgrades are time-locked: `propose_upgrade` → delay (1 day in ledgers) →
+  `execute_upgrade`. The admin key can only propose, not execute immediately.
+  Watchers have the delay period to detect and react to malicious proposals.
+  The delay is enforced on-chain and cannot be bypassed by the admin.
+- The upgrade delay is measured in ledgers (not wall time), so it is robust to
+  ledger close time variance.
+- A proposed upgrade can be cancelled by the admin before execution.
+- A new proposal overwrites any existing one, restarting the delay clock.
