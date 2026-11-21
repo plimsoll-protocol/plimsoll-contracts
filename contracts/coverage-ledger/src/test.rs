@@ -5,14 +5,32 @@ use reporter_registry::{ReporterRegistry, ReporterRegistryClient};
 use soroban_sdk::{
     testutils::{Address as _, AuthorizedFunction, Ledger as _, MockAuth, MockAuthInvoke},
     xdr::{ScErrorCode, ScErrorType},
-    Address, BytesN, Env, Error, IntoVal, String, Symbol,
+    Address, Bytes, BytesN, Env, Error, IntoVal, String, Symbol,
 };
 
 const T0: u64 = 1_700_000_000;
 const UNIT: i128 = 10_000_000;
 
+#[allow(dead_code)]
+fn upgrade_fixture_wasm() -> std::vec::Vec<u8> {
+    const VENDORED: &[u8] =
+        include_bytes!("../../upgrade-fixture-ledger/testdata/upgrade_fixture_ledger.wasm");
+    let built = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("target/wasm32v1-none/release/upgrade_fixture_ledger.wasm");
+    std::fs::read(built).unwrap_or_else(|_| VENDORED.to_vec())
+}
+
+#[allow(dead_code)]
+fn upload_upgrade_fixture(env: &Env) -> BytesN<32> {
+    env.deployer()
+        .upload_contract_wasm(Bytes::from_slice(env, &upgrade_fixture_wasm()))
+}
+
+#[allow(dead_code)]
 struct Fixture {
     env: Env,
+    admin: Address,
     ledger: CoverageLedgerClient<'static>,
     registry: ReporterRegistryClient<'static>,
     sac: Address,
@@ -62,6 +80,7 @@ fn setup() -> Fixture {
 
     Fixture {
         env,
+        admin,
         ledger,
         registry,
         sac,

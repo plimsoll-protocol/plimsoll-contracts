@@ -98,8 +98,8 @@ Requirements: Rust stable with the `wasm32v1-none` target, and
 git clone https://github.com/plimsoll-protocol/plimsoll-contracts
 cd plimsoll-contracts
 
-cargo test                 # 58 tests across all crates
 stellar contract build     # wasm in target/wasm32v1-none/release/
+cargo test                 # 72 tests across all crates
 
 python3 scripts/check_wasm_sizes.py   # each wasm against its size budget
 ```
@@ -108,11 +108,53 @@ The size budgets live in [size-budgets.json](size-budgets.json) and CI enforces
 them, so a contract cannot quietly grow towards the install limit. Raising one
 is fine; doing it in the commit that needs the room is the point.
 
-Deploy your own copy to testnet (creates and funds the identities it needs):
+The per-call CPU and memory ceilings live in
+[resource-budgets.json](resource-budgets.json). The tests in
+`contracts/coverage-ledger` measure `is_covered`, `post_supply` and
+`post_reserve` with `env.cost_estimate()` and fail if a call grows past its
+ceiling, printing what it used against what it is allowed. Raise a ceiling
+deliberately, in the commit that needs the room, and say why; otherwise a new
+storage read or cross-contract call can slip onto another contract's hot path
+unnoticed.
+
+Deploy your own copy to testnet. `deploy-testnet.sh` remains the one-command
+demo path and is a thin wrapper around the two scripts below:
 
 ```bash
 ./scripts/deploy-testnet.sh
 ```
+
+### Deploying to any network
+
+Deployment and demo seeding are separate:
+
+```bash
+./scripts/deploy.sh <network>       # contracts only, writes deployments/<network>.json
+./scripts/seed-demo.sh <network>    # demo identities, PUSD and its vault
+```
+
+`deploy.sh` creates no identities, funds nothing and seeds no demo data. It
+needs a funded identity named `plimsoll-admin` (override with
+`ADMIN_IDENTITY`), builds the wasm, and writes the deployment record. `testnet`,
+`futurenet` and `local` are built into the Stellar CLI; add any other network
+with `stellar network add`. For a network whose built-in entry has no RPC URL
+(mainnet), set `STELLAR_RPC_URL`. `seed-demo.sh` refuses to run on mainnet,
+by name or by passphrase.
+
+A local quickstart network works end to end:
+
+```bash
+# terminal 1: a local Stellar network with Soroban RPC on localhost:8000
+docker run --rm -p 8000:8000 --name stellar stellar/quickstart:latest --local
+
+# terminal 2: from the repository
+stellar keys generate plimsoll-admin --network local --fund
+./scripts/deploy.sh local
+./scripts/seed-demo.sh local
+```
+
+The ids of the local deployment, including the demo vault, are written to
+`deployments/local.json`.
 
 Query the live deployment:
 
@@ -121,6 +163,27 @@ stellar contract invoke --network testnet --send=no \
   --id CC2QQ7R4FLPHZP7KA5AO4IASXXICTG6N4GQXCXITTEBNYQEYTYXKMN4D -- \
   coverage --sac CCHPT4TEJDPZQDSUVW3NP6A35ROGV4WEFZKT45SKWYCFZSUB7R5HIM7S --min_tier 1
 ```
+
+### Verifying a deployed contract against a release
+
+Every `v*` tag publishes a GitHub release containing the three wasm files,
+their interface specs (`*.spec.json`) and `SHA256SUMS`. Download a release and
+check it before comparing it with what is deployed:
+
+```bash
+gh release download v0.1.0 --pattern '*'
+sha256sum -c SHA256SUMS
+
+stellar contract info hash --wasm coverage_ledger.wasm
+stellar contract info hash --id CC2QQ7R4FLPHZP7KA5AO4IASXXICTG6N4GQXCXITTEBNYQEYTYXKMN4D --network testnet
+```
+
+The two hashes must match. `deployments/testnet.json` records the wasm hash
+currently installed under `liveWasm` whenever a contract has been upgraded past
+its first deployment; for contracts not listed there, the release that matches
+the deployment is the one whose wasm hash matches `contract info hash --id`.
+The spec JSON is what SDK authors should generate bindings from, so they do not
+need to build the wasm to know a release's interface.
 
 ### Keeping the demo honest
 

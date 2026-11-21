@@ -215,7 +215,7 @@ due)
 post)
   # The hash we record has to be the hash of the document GitHub serves, or the
   # report points at something nobody else can verify.
-  for CODE in $(awk -F'|' 'NF{print $1}' <<< "$REPORTS" | awk '!seen[$0]++'); do
+  while IFS= read -r CODE; do
     DOC=$(doc_path "$CODE")
     [ -f "$DOC" ] || { echo "$DOC is missing from the working tree" >&2; exit 1; }
     WANT=$(hash_of "$DOC")
@@ -233,7 +233,7 @@ post)
       echo "waiting for GitHub to serve the current $DOC (attempt $attempt)"
       sleep 20
     done
-  done
+  done < <(awk -F'|' 'NF && !seen[$1]++ {print $1}' <<< "$REPORTS")
 
   while IFS='|' read -r CODE RESERVES SIGNER TIER; do
     [ -n "$CODE" ] || continue

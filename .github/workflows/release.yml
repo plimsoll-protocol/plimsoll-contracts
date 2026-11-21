@@ -1,0 +1,56 @@
+name: Release
+
+# A v* tag publishes the three contract wasm files, their interface specs and a
+# SHA256SUMS file, so anyone can compare a deployed contract with the release
+# it claims to be. The size budgets are re-checked here rather than trusted
+# from the pull request that landed before the tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: publish wasm and specs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Stellar CLI
+        run: |
+          curl -sSfL https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C /usr/local/bin stellar
+          stellar --version
+      - name: Build wasm
+        run: stellar contract build --locked
+      - name: Check wasm size budgets
+        run: python3 scripts/check_wasm_sizes.py
+      - name: Collect artifacts
+        run: |
+          mkdir -p release-artifacts
+          for contract in reporter_registry coverage_ledger covered_vault; do
+            cp "target/wasm32v1-none/release/$contract.wasm" release-artifacts/
+            stellar contract info interface \
+              --wasm "target/wasm32v1-none/release/$contract.wasm" \
+              --output json-formatted > "release-artifacts/$contract.spec.json"
+          done
+      - name: Write checksums
+        working-directory: release-artifacts
+        run: sha256sum *.wasm *.spec.json > SHA256SUMS
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release create "$TAG" release-artifacts/* \
+            --repo "$REPO" \
+            --title "$TAG" \
+            --generate-notes

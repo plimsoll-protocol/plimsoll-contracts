@@ -1,0 +1,67 @@
+name: "Feature request"
+description: "Suggest a new feature or change to the Plimsoll contracts"
+title: "[Feature]: "
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please describe the change and why it's needed.
+
+  - type: dropdown
+    id: contract
+    attributes:
+      label: "Target contract(s)"
+      description: "Which contract(s) would this affect?"
+      options:
+        - reporter-registry
+        - coverage-ledger
+        - covered-vault
+        - plimsoll-types (shared library)
+        - New contract
+        - Cross-cutting / infrastructure
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem statement"
+      description: "What problem does this solve? Why is it needed?"
+      placeholder: "Currently, users cannot..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Proposed solution"
+      description: "How should this work? Sketch the API, storage changes, events, and auth rules."
+      placeholder: |
+        New function: `fn new_function(env: Env, param: Type) -> ReturnType`
+        - Auth: ...
+        - Storage: ...
+        - Events: ...
+        - Errors: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives considered"
+      description: "What other approaches did you consider? Why is this one better?"
+      placeholder: "Alternative: ..."
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: spec
+    attributes:
+      label: "SPEC.md impact"
+      description: "Will this require changes to SPEC.md?"
+      options:
+        - label: "Yes, SPEC.md must be updated in the same PR"
+          required: false
+        - label: "No, this is internal/refactoring only"
+          required: false

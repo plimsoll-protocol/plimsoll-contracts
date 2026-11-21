@@ -1,0 +1,22 @@
+# Plimsoll contracts CODEOWNERS
+#
+# These owners will be requested for review when someone opens a pull request
+# modifying the matching files.
+
+# Contracts
+/contracts/reporter-registry/ @plimsoll-protocol/contract-maintainers
+/contracts/coverage-ledger/ @plimsoll-protocol/contract-maintainers
+/contracts/covered-vault/ @plimsoll-protocol/contract-maintainers
+
+# Shared types and cross-contract interfaces
+/crates/types/ @plimsoll-protocol/contract-maintainers
+
+# Specification (source of truth)
+/docs/SPEC.md @plimsoll-protocol/contract-maintainers
+
+# CI/CD and repository configuration
+/.github/ @plimsoll-protocol/contract-maintainers
+/scripts/ @plimsoll-protocol/contract-maintainers
+
+# Deployment artifacts
+/deployments/ @plimsoll-protocol/contract-maintainers

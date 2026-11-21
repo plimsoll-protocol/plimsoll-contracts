@@ -1,0 +1,16 @@
+[package]
+name = "upgrade-fixture-ledger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+test = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+plimsoll-types = { workspace = true }

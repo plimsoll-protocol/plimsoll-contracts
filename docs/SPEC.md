@@ -54,51 +54,70 @@ so `1_0000000` is one unit). No floats anywhere. Coverage is basis points:
 When supply is zero, `bps = u32::MAX` (nothing is owed, so nothing is
 uncovered).
 
-## Shared upgrade logic (`plimsoll-types`)
+## Storage and TTL
 
-Both `reporter-registry` and `coverage-ledger` share the same time-locked
-upgrade mechanism to protect against a compromised or careless admin key.
+All three contracts use the same TTL policy, defined in `plimsoll-types`:
 
-| Constant | Value | Description |
+| Constant | Value | Meaning |
 | --- | --- | --- |
-| `UPGRADE_DELAY_LEDGERS` | `17_280` (1 day) | Minimum ledgers between `propose_upgrade` and `execute_upgrade` |
+| `DAY_IN_LEDGERS` | 17 280 | One day at 5-second close time. |
+| `PERSISTENT_THRESHOLD` | 30 days (518 400 ledgers) | Extend a persistent entry when its remaining TTL drops below this. |
+| `PERSISTENT_EXTEND_TO` | 90 days (1 555 200 ledgers) | Extend persistent entries up to this TTL. |
+| `INSTANCE_THRESHOLD` | 30 days (518 400 ledgers) | Extend instance storage when its remaining TTL drops below this. |
+| `INSTANCE_EXTEND_TO` | 90 days (1 555 200 ledgers) | Extend instance storage up to this TTL. |
 
-**Storage (per contract)**
+### Which operations extend which entries
 
-| Key | Storage | Value |
-| --- | --- | --- |
-| `PendingUpgrade` | instance | `Option<PendingUpgrade>` (see struct below) |
+**reporter-registry**
 
-```rust
-#[contracttype]
-pub struct PendingUpgrade {
-    pub wasm_hash: BytesN<32>,
-    pub proposed_at_ledger: u32,
-    pub proposed_by: Address,
-}
-```
+| Entry | Extended by |
+| --- | --- |
+| `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `revoke` |
+| `Reporter(Address)` (persistent) | `set_reporter` (write), `get_reporter` / `role_of` (read) |
 
-**Functions (per contract)**
+**coverage-ledger**
 
-| Function | Auth | Returns | Errors | Event |
-| --- | --- | --- | --- | --- |
-| `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} proposed_at_ledger, proposed_by` |
-| `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
-| `cancel_upgrade()` | admin | `()` | — | `upgrade_cancelled` |
-| `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
+| Entry | Extended by |
+| --- | --- |
+| `Admin`, `Registry` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `list_asset`, `post_supply`, `post_reserve` |
+| `Asset(Address)` (persistent) | `list_asset` (write), `get_asset` (read) |
+| `Supply(Address)` (persistent) | `post_supply` (write), `get_supply`, `coverage`, `is_covered` (read) |
+| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `coverage`, `is_covered` (read) |
 
-Rules:
-- `propose_upgrade` stores the `wasm_hash`, current ledger sequence, and admin
-  address. It overwrites any existing proposal (restarting the delay clock).
-- `execute_upgrade` fails if no proposal exists (`UpgradeNotProposed`) or if
-  fewer than `UPGRADE_DELAY_LEDGERS` ledgers have passed since the proposal
-  (`UpgradeDelayNotElapsed`).
-- `cancel_upgrade` clears any pending proposal.
-- A new `propose_upgrade` after cancellation or execution restarts the delay.
-- The admin must authorize each step (`propose_upgrade`, `execute_upgrade`,
-  `cancel_upgrade`).
-- The delay is measured in ledgers (not time) to be independent of ledger
-  close time variance. At 5-second close time, 17,280 ledgers ≈ 24 hours.
+**covered-vault**
+
+| Entry | Extended by |
+| --- | --- |
+| `Config` (instance) | `__constructor`, `deposit`, `withdraw` |
+| `Balance(Address)` (persistent) | `deposit` (write), `withdraw` (write), `balance` (read) |
+
+### Archival behaviour
+
+When an entry's TTL reaches zero it is **archived** by the Soroban host. An
+archived entry is no longer accessible until it is explicitly restored (which
+requires paying the rent for the missed ledgers plus the new TTL).
+
+- **Read functions** (`get_reporter`, `role_of`, `get_asset`, `get_supply`,
+  `get_report`, `get_reports`, `coverage`, `is_covered`, `balance`, `config`,
+  `admin`, `registry`) return `None` (or `false` for `is_covered`) when the
+  entry they depend on is archived. They do **not** auto-restore.
+- **Write functions** (`set_reporter`, `revoke`, `list_asset`, `post_supply`,
+  `post_reserve`, `deposit`, `withdraw`, `transfer_admin`, `upgrade`) will
+  fail with a host trap if they try to read an archived entry they depend on
+  (e.g., `post_supply` reading an archived `Asset` entry). The caller must
+  first restore the archived entry using the Soroban RPC `restore` method and
+  pay the associated fee.
+- **`is_covered` on an archived asset**: if either the `Asset`, the latest
+  `Supply`, or the chosen `Report` entry is archived, the read returns `None`
+  / `false`. The consumer experiences the asset as "not covered" until the
+  missing entries are restored.
+
+### Re-add after revoke
+
+`reporter-registry.set_reporter` after a `revoke` creates a fresh
+`ReporterInfo` with a new `added_at = current ledger timestamp`. The previous
+`added_at` is not preserved. This is distinct from changing an existing
+reporter's role/name, which keeps the original `added_at`.
 
 ## reporter-registry
 

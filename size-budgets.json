@@ -3,6 +3,8 @@
   "budgets": {
     "coverage_ledger": 21700,
     "covered_vault": 5800,
-    "reporter_registry": 4900
+    "reporter_registry": 4900,
+    "upgrade_fixture_ledger": 18100,
+    "upgrade_fixture_registry": 4900
   }
 }

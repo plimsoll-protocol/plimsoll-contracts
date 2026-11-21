@@ -5,6 +5,8 @@ members = [
   "contracts/reporter-registry",
   "contracts/coverage-ledger",
   "contracts/covered-vault",
+  "contracts/upgrade-fixture-registry",
+  "contracts/upgrade-fixture-ledger",
 ]
 
 [workspace.package]
@@ -14,7 +16,7 @@ license = "Apache-2.0"
 repository = "https://github.com/plimsoll-protocol/plimsoll-contracts"
 
 [workspace.dependencies]
-soroban-sdk = "28.0.0"
+soroban-sdk = "29.0.1"
 plimsoll-types = { path = "crates/types" }
 
 [profile.release]
