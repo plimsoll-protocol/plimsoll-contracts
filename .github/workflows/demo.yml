@@ -49,7 +49,7 @@ jobs:
       AUDITOR_SECRET: ${{ secrets.DEMO_AUDITOR_SECRET }}
       TRANSCRIBER_SECRET: ${{ secrets.DEMO_TRANSCRIBER_SECRET }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Secrets are not available to a job-level `if`, so the gate is a step.
       - name: Are the demo reporter keys configured?
@@ -108,7 +108,7 @@ jobs:
     # whether the demo is currently right.
     if: always()
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Stellar CLI
         run: |
           curl -sSfL https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz \
