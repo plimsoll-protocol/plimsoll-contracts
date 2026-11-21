@@ -129,6 +129,8 @@ Decides who may speak. Holds no money.
 | --- | --- | --- |
 | `Admin` | instance | `Address` |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
+| `ReporterIndex` | persistent, TTL extended on write | `Vec<Address>` (ordered list of all reporters) |
+| `PendingUpgrade` | instance | `Option<PendingUpgrade>` |
 
 **Functions**
 
@@ -140,10 +142,43 @@ Decides who may speak. Holds no money.
 | `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `reporter_revoked {reporter}` |
 | `role_of(reporter: Address)` | — | `Option<Role>` | — | — |
 | `get_reporter(reporter: Address)` | — | `Option<ReporterInfo>` | — | — |
+| `reporter_count()` | — | `u32` | — | — |
+| `reporters(start: u32, limit: u32)` | — | `Vec<Address>` | — | — |
 | `transfer_admin(new_admin: Address)` | admin and new_admin | `()` | — | `admin_transferred {new_admin}` |
-| `upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | — |
+| `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} proposed_at_ledger, proposed_by` |
+| `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
+| `cancel_upgrade()` | admin | `()` | — | `upgrade_cancelled` |
+| `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
+| `version()` | — | `u32` | — | — |
 
-Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`.
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`, `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
+
+Rules:
+
+- `set_reporter` appends the reporter to `ReporterIndex` if it is a new
+  reporter (not already present). Changing an existing reporter's role/name
+  does not change the index order.
+- `revoke` removes the reporter from `ReporterIndex` using swap-remove (the
+  last element is moved into the removed slot). This changes the order of
+  remaining reporters; consumers must not rely on stable ordering across
+  revokes.
+- `reporters(start, limit)` returns up to `limit` addresses from `ReporterIndex`
+  starting at `start`. The maximum `limit` is capped at 100; larger values are
+  treated as 100.
+- `reporter_count()` returns the current length of `ReporterIndex`.
+
+Backfill for pre-upgrade reporters: on first call to `reporter_count` or
+`reporters` after upgrade, if `ReporterIndex` is missing, reconstruct it by
+iterating all `Reporter(*)` keys in storage. This is a one-time O(N) operation
+that runs in the first request after upgrade.
+
+Events:
+- `reporter_set {reporter} role, name`
+- `reporter_revoked {reporter}`
+- `admin_transferred {new_admin}`
+- `upgrade_proposed {wasm_hash} proposed_at_ledger, proposed_by`
+- `upgrade_executed {wasm_hash}`
+- `upgrade_cancelled`
 
 ## coverage-ledger
 
@@ -209,7 +244,11 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | — | — |
 | `registry()` / `admin()` | — | `Address` | — | — |
 | `transfer_admin(new_admin)` | admin and new_admin | `()` | — | `admin_transferred` |
-| `upgrade(wasm_hash)` | admin | `()` | — | — |
+| `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} proposed_at_ledger, proposed_by` |
+| `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
+| `cancel_upgrade()` | admin | `()` | — | `upgrade_cancelled` |
+| `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
+| `version()` | — | `u32` | — | — |
 
 Rules:
 
@@ -220,9 +259,13 @@ Rules:
   "native"`) is rejected: it has no issuer and no reserves.
 - `post_reserve` tier resolution: if `reporter == asset.issuer` the tier is
   `IssuerSigned` (the classic issuer account signs the Soroban auth entry).
-  Otherwise the registry role decides: `Auditor → AuditorSigned`,
-  `Transcriber → Transcribed`. A `SupplyPoster` or unknown address gets
-  `NotReporter`.
+  If a delegate is set for the asset via `set_issuer_delegate` and
+  `reporter == delegate`, the tier is also `IssuerSigned`. Otherwise the
+  registry role decides: `Auditor → AuditorSigned`, `Transcriber →
+  Transcribed`. A `SupplyPoster` or unknown address gets `NotReporter`.
+  The report's `reporter` field records the delegate's address when a delegate
+  posts; consumers infer `IssuerSigned` from the tier and that the reporter is
+  the delegate, not the issuer itself.
 - Supply snapshots must move forward: `ledger` strictly greater than the stored
   one and not greater than the current ledger. Reports per tier must move
   forward per reporter: `as_of` strictly greater than that reporter's stored

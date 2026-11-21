@@ -4,13 +4,13 @@
 #![no_std]
 
 use plimsoll_types::{
-    coverage_bps, AssetRecord, Coverage, RegistryClient, ReserveReport, Role, SupplySnapshot, Tier,
-    INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, MAX_PLAUSIBLE_BPS, MIN_PLAUSIBLE_BPS,
-    PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
+    coverage_bps, AssetRecord, Coverage, PendingUpgrade, RegistryClient, ReserveReport, Role,
+    SupplySnapshot, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, MAX_PLAUSIBLE_BPS,
+    MIN_PLAUSIBLE_BPS, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
 };
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
-    Address, BytesN, ContractExecutable, Env, Executable, String, Vec,
+    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype,
+    panic_with_error, token, Address, BytesN, ContractExecutable, Env, Executable, String, Vec,
 };
 
 const MAX_URI_LEN: u32 = 256;
@@ -97,6 +97,41 @@ pub struct AdminTransferred {
     #[topic]
     pub new_admin: Address,
 }
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssuerDelegateSet {
+    #[topic]
+    pub sac: Address,
+    pub delegate: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssuerDelegateCleared {
+    #[topic]
+    pub sac: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposed {
+    #[topic]
+    pub wasm_hash: BytesN<32>,
+    pub proposed_at_ledger: u32,
+    pub proposed_by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeExecuted {
+    #[topic]
+    pub wasm_hash: BytesN<32>,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeCancelled;
 
 #[contract]
 pub struct CoverageLedger;
@@ -385,8 +420,8 @@ impl CoverageLedger {
     }
 
     /// Record a reserve figure for `sac`. The reporter's identity sets the
-    /// tier: the asset's issuer account, a registered auditor, or a
-    /// registered transcriber.
+    /// tier: the asset's issuer account, an issuer-appointed delegate, a
+    /// registered auditor, or a registered transcriber.
     pub fn post_reserve(
         env: Env,
         reporter: Address,
@@ -400,6 +435,18 @@ impl CoverageLedger {
         let asset = require_listed(&env, &sac);
         let tier = if reporter == asset.issuer {
             Tier::IssuerSigned
+        } else if let Some(delegate) =
+            read_persistent::<Address>(&env, &DataKey::IssuerDelegate(sac.clone()))
+        {
+            if reporter == delegate {
+                Tier::IssuerSigned
+            } else {
+                match RegistryClient::new(&env, &registry(&env)).role_of(&reporter) {
+                    Some(Role::Auditor) => Tier::AuditorSigned,
+                    Some(Role::Transcriber) => Tier::Transcribed,
+                    _ => panic_with_error!(&env, LedgerError::NotReporter),
+                }
+            }
         } else {
             match RegistryClient::new(&env, &registry(&env)).role_of(&reporter) {
                 Some(Role::Auditor) => Tier::AuditorSigned,
@@ -545,10 +592,113 @@ impl CoverageLedger {
         AdminTransferred { new_admin }.publish(&env);
     }
 
-    pub fn upgrade(env: Env, wasm_hash: BytesN<32>) {
+    /// Set or clear the issuer-appointed delegate for the `IssuerSigned` tier.
+    /// Only the asset's issuer may call this.
+    pub fn set_issuer_delegate(env: Env, sac: Address, delegate: Option<Address>) {
+        let asset = require_listed(&env, &sac);
+        asset.issuer.require_auth();
+        let key = DataKey::IssuerDelegate(sac.clone());
+        match delegate {
+            Some(d) => {
+                env.storage().persistent().set(&key, &d);
+                env.storage().persistent().extend_ttl(
+                    &key,
+                    PERSISTENT_THRESHOLD,
+                    PERSISTENT_EXTEND_TO,
+                );
+                bump_instance(&env);
+                IssuerDelegateSet { sac, delegate: d }.publish(&env);
+            }
+            None => {
+                env.storage().persistent().remove(&key);
+                bump_instance(&env);
+                IssuerDelegateCleared { sac }.publish(&env);
+            }
+        }
+    }
+
+    /// Get the current issuer delegate for an asset, if any.
+    pub fn get_issuer_delegate(env: Env, sac: Address) -> Option<Address> {
+        let key = DataKey::IssuerDelegate(sac);
+        let delegate = env.storage().persistent().get::<_, Address>(&key);
+        if delegate.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        }
+        delegate
+    }
+
+    /// Propose a contract upgrade. The upgrade can be executed after a delay.
+    pub fn propose_upgrade(env: Env, wasm_hash: BytesN<32>) {
         admin(&env).require_auth();
+        let proposed = PendingUpgrade {
+            wasm_hash: wasm_hash.clone(),
+            proposed_at_ledger: env.ledger().sequence(),
+            proposed_by: admin(&env),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgrade, &proposed);
+        bump_instance(&env);
+        UpgradeProposed {
+            wasm_hash,
+            proposed_at_ledger: proposed.proposed_at_ledger,
+            proposed_by: proposed.proposed_by,
+        }
+        .publish(&env);
+    }
+
+    /// Execute a previously proposed upgrade after the delay has elapsed.
+    pub fn execute_upgrade(env: Env) {
+        admin(&env).require_auth();
+        let proposed = match env
+            .storage()
+            .instance()
+            .get::<_, PendingUpgrade>(&DataKey::PendingUpgrade)
+        {
+            Some(p) => p,
+            None => panic_with_error!(&env, LedgerError::UpgradeNotProposed),
+        };
+        let current = env.ledger().sequence();
+        if current < proposed.proposed_at_ledger + UPGRADE_DELAY_LEDGERS {
+            panic_with_error!(&env, LedgerError::UpgradeDelayNotElapsed);
+        }
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        bump_instance(&env);
+        UpgradeExecuted {
+            wasm_hash: proposed.wasm_hash.clone(),
+        }
+        .publish(&env);
         env.deployer()
-            .update_current_contract(ContractExecutable::Wasm(wasm_hash));
+            .update_current_contract(ContractExecutable::Wasm(proposed.wasm_hash));
+    }
+
+    /// Cancel a pending upgrade proposal.
+    pub fn cancel_upgrade(env: Env) {
+        admin(&env).require_auth();
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        bump_instance(&env);
+        UpgradeCancelled.publish(&env);
+    }
+
+    /// Get the currently pending upgrade, if any.
+    pub fn pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        let upgrade = env
+            .storage()
+            .instance()
+            .get::<_, PendingUpgrade>(&DataKey::PendingUpgrade);
+        if upgrade.is_some() {
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
+        }
+        upgrade
+    }
+
+    /// Returns the contract version.
+    pub fn version(_env: Env) -> u32 {
+        VERSION
     }
 }
 

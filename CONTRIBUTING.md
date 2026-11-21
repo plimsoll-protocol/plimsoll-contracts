@@ -27,6 +27,7 @@ stellar contract build
 - [ ] `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass.
 - [ ] New public functions have tests for the success path **and** every error they can return.
 - [ ] If behaviour changed, [docs/SPEC.md](docs/SPEC.md) is updated in the same pull request.
+- [ ] `version()` constant is bumped in the affected contract(s) when behaviour changes.
 - [ ] Commit messages use [Conventional Commits](https://www.conventionalcommits.org/): `feat(ledger): …`, `fix(registry): …`, `test(vault): …`.
 
 ## Code standards
