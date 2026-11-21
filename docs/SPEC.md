@@ -4,6 +4,9 @@ This document is the source of truth for the contract layer. Code that
 disagrees with it is a bug in one or the other; fix whichever is wrong and
 update both in the same pull request.
 
+What every error code means and what a caller should do about it is in
+[ERRORS.md](ERRORS.md). Error numbers are never reused or renumbered.
+
 ## What the contracts do
 
 Plimsoll answers one question about a Stellar-issued asset: *how much of what
@@ -93,24 +96,29 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 
 ### Archival behaviour
 
-When an entry's TTL reaches zero it is **archived** by the Soroban host. An
-archived entry is no longer accessible until it is explicitly restored (which
-requires paying the rent for the missed ledgers plus the new TTL).
+When an entry's TTL runs out the Soroban host **archives** it. Since Protocol
+23 (CAP-0066) a transaction restores the archived persistent entries in its
+footprint automatically: `simulateTransaction` marks them for restoration and
+the submitter pays the rent for bringing them back. So the contracts never
+observe an archived entry:
 
-- **Read functions** (`get_reporter`, `role_of`, `get_asset`, `get_supply`,
-  `get_report`, `get_reports`, `coverage`, `is_covered`, `balance`, `config`,
-  `admin`, `registry`) return `None` (or `false` for `is_covered`) when the
-  entry they depend on is archived. They do **not** auto-restore.
-- **Write functions** (`set_reporter`, `revoke`, `list_asset`, `post_supply`,
-  `post_reserve`, `deposit`, `withdraw`, `transfer_admin`, `upgrade`) will
-  fail with a host trap if they try to read an archived entry they depend on
-  (e.g., `post_supply` reading an archived `Asset` entry). The caller must
-  first restore the archived entry using the Soroban RPC `restore` method and
-  pay the associated fee.
-- **`is_covered` on an archived asset**: if either the `Asset`, the latest
-  `Supply`, or the chosen `Report` entry is archived, the read returns `None`
-  / `false`. The consumer experiences the asset as "not covered" until the
-  missing entries are restored.
+- **Reads and writes behave as if the entry were live.** No function returns
+  `None`, or `false` for `is_covered`, because something it reads was
+  archived; it answers from the restored value. A restored entry comes back
+  with the network's minimum persistent TTL, and the next write or read that
+  extends it brings it back to `PERSISTENT_EXTEND_TO`.
+- **A transaction built without the restoration** (an old footprint, or a
+  client that skips simulation) fails before the contract runs, as it would
+  for any wrong footprint. That is a host error, not a contract error code.
+- **`is_covered` after archival.** Reports and supply snapshots are written
+  with a TTL of `PERSISTENT_EXTEND_TO` (about 90 days) and reads only extend
+  it, so an entry can only be archived once at least that long has passed
+  since it was posted. A restored report's `as_of`, or a restored snapshot's
+  `timestamp`, is therefore at least 90 days old, and `is_covered` answers
+  `false` for any `max_age` shorter than that, on age alone.
+
+The test `archived_report_is_restored_and_judged_by_its_age` in
+`examples/coverage-gate` pins this behaviour.
 
 ### Re-add after revoke
 
@@ -151,34 +159,8 @@ Decides who may speak. Holds no money.
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
 | `version()` | — | `u32` | — | — |
 
-Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`, `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
-
-Rules:
-
-- `set_reporter` appends the reporter to `ReporterIndex` if it is a new
-  reporter (not already present). Changing an existing reporter's role/name
-  does not change the index order.
-- `revoke` removes the reporter from `ReporterIndex` using swap-remove (the
-  last element is moved into the removed slot). This changes the order of
-  remaining reporters; consumers must not rely on stable ordering across
-  revokes.
-- `reporters(start, limit)` returns up to `limit` addresses from `ReporterIndex`
-  starting at `start`. The maximum `limit` is capped at 100; larger values are
-  treated as 100.
-- `reporter_count()` returns the current length of `ReporterIndex`.
-
-Backfill for pre-upgrade reporters: on first call to `reporter_count` or
-`reporters` after upgrade, if `ReporterIndex` is missing, reconstruct it by
-iterating all `Reporter(*)` keys in storage. This is a one-time O(N) operation
-that runs in the first request after upgrade.
-
-Events:
-- `reporter_set {reporter} role, name`
-- `reporter_revoked {reporter}`
-- `admin_transferred {new_admin}`
-- `upgrade_proposed {wasm_hash} proposed_at_ledger, proposed_by`
-- `upgrade_executed {wasm_hash}`
-- `upgrade_cancelled`
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`.
+Causes and remedies: [ERRORS.md](ERRORS.md#registryerror).
 
 ## coverage-ledger
 
@@ -301,6 +283,7 @@ Errors (`LedgerError`): `NotAStellarAsset = 1`, `AlreadyListed = 2`,
 `InvalidAmount = 6`, `FutureLedger = 7`, `StaleLedger = 8`,
 `FutureTimestamp = 9`, `StaleReport = 10`, `InvalidUri = 11`,
 `ImplausibleAmount = 12`, `TooManyReporters = 13`.
+Causes, remedies and the order they are checked in: [ERRORS.md](ERRORS.md#ledgererror).
 
 ### Upgrading a v0.1 deployment
 
@@ -359,7 +342,8 @@ deposit and reading a `NotCovered` failure. It says nothing about the
 depositor's balance or authorisation.
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
-`InsufficientBalance = 3`.
+`InsufficientBalance = 3`. Causes and remedies, and the asset-contract errors a
+vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 
 ## User flow → function map
 

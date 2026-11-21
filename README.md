@@ -26,6 +26,9 @@ is_covered(asset, min_bps, max_age, min_tier) -> bool
 ```
 
 and refuse an asset that is under-backed or whose figures are out of date.
+[docs/INTEGRATING.md](docs/INTEGRATING.md) walks through gating your own
+contract on it: the dependency, the call, choosing each parameter, and the
+edge cases.
 
 | Repo | What it is |
 | --- | --- |
@@ -62,7 +65,9 @@ reporter-registry  ◀── role_of ──  coverage-ledger  ◀── is_cover
 
 The full function-by-function specification is in [docs/SPEC.md](docs/SPEC.md),
 and the event topic and data layouts every off-chain reader depends on are in
-[docs/EVENTS.md](docs/EVENTS.md).
+[docs/EVENTS.md](docs/EVENTS.md). What each error code means, from
+`Error(Contract, #1)` up, and what a caller should do about it is in
+[docs/ERRORS.md](docs/ERRORS.md).
 
 ### Why it is Stellar-specific
 
@@ -204,6 +209,42 @@ document it points at. The [Demo coverage](.github/workflows/demo.yml) workflow
 runs it twice a day and restates the reserves when they are more than three
 days old, which keeps the standing statements in
 [docs/demo](docs/demo) matching what is on chain.
+
+### End-to-end test against the built wasm
+
+The per-contract tests run natively. `tests/e2e` instead loads the three
+compiled contracts from `target/wasm32v1-none/release/`, the same files the
+deploy scripts upload, and runs the whole flow: register reporters, list an
+asset, post supply and reserves, deposit, let the report go stale, deposit
+refused, withdraw still works. It only compiles once the wasm exists, so it is
+not part of a plain `cargo test`:
+
+```bash
+stellar contract build
+cargo test -p plimsoll-e2e
+```
+
+CI runs it straight after the wasm build.
+
+### Test coverage
+
+CI measures which contract lines the tests reach with
+[cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov). Every pull request
+gets a per-crate table in the `coverage` job's log and on the run's summary
+page, and the full lcov report as the `coverage-lcov` artifact. To produce the
+same report locally:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+
+./scripts/coverage.sh          # target/coverage/lcov.info + per-crate summary
+./scripts/coverage.sh --html   # also target/coverage/html/index.html
+```
+
+Test files are left out of the figures, and so are `tests/e2e` (it runs the
+compiled wasm, which carries no coverage instrumentation) and
+`examples/coverage-gate` (documentation, not a deployed contract).
 
 ## Contributing
 

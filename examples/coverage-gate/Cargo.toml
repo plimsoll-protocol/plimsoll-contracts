@@ -1,0 +1,24 @@
+[package]
+name = "coverage-gate-example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The example from docs/INTEGRATING.md: gating a contract function on is_covered."
+
+# rlib only, so `stellar contract build` and the wasm size budgets leave it
+# alone: it is documentation that the test suite compiles and runs, not a
+# contract anyone deploys. Your own contract needs `crate-type = ["cdylib"]`.
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+plimsoll-types = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+reporter-registry = { path = "../../contracts/reporter-registry" }
+coverage-ledger = { path = "../../contracts/coverage-ledger" }

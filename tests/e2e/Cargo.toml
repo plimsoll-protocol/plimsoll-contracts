@@ -1,0 +1,19 @@
+[package]
+name = "plimsoll-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "End-to-end scenario against the wasm built by `stellar contract build`."
+
+# Not a default workspace member: the test loads the compiled wasm with
+# `contractimport!`, which fails to compile until `stellar contract build` has
+# run. Run it explicitly with `cargo test -p plimsoll-e2e` after the build.
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

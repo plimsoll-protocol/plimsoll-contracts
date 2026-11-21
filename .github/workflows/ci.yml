@@ -35,3 +35,31 @@ jobs:
         run: shellcheck scripts/*.sh
       - name: Test
         run: cargo test
+      # tests/e2e loads the wasm built above with contractimport!, so it is not
+      # a default workspace member and runs only once that wasm exists.
+      - name: Clippy (e2e)
+        run: cargo clippy -p plimsoll-e2e --all-targets -- -D warnings
+      - name: End-to-end scenario against the built wasm
+        run: cargo test -p plimsoll-e2e
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # Prints the per-crate table in the log and on the run's summary page.
+      - name: Measure coverage
+        run: ./scripts/coverage.sh
+      - name: Upload lcov report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov
+          path: target/coverage/lcov.info
+          if-no-files-found: error

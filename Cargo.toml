@@ -7,6 +7,21 @@ members = [
   "contracts/covered-vault",
   "contracts/upgrade-fixture-registry",
   "contracts/upgrade-fixture-ledger",
+  "tests/e2e",
+  "examples/coverage-gate",
+]
+# `tests/e2e` imports the built wasm, so it only compiles after
+# `stellar contract build`. Leaving it out of the defaults keeps a plain
+# `cargo test` / `cargo clippy` working on a fresh clone; run it with
+# `cargo test -p plimsoll-e2e`.
+default-members = [
+  "crates/types",
+  "contracts/reporter-registry",
+  "contracts/coverage-ledger",
+  "contracts/covered-vault",
+  "contracts/upgrade-fixture-registry",
+  "contracts/upgrade-fixture-ledger",
+  "examples/coverage-gate",
 ]
 
 [workspace.package]
