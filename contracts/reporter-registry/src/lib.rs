@@ -3,8 +3,8 @@
 #![no_std]
 
 use plimsoll_types::{
-    ReporterInfo, Role, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, PERSISTENT_EXTEND_TO,
-    PERSISTENT_THRESHOLD,
+    PendingUpgrade, ReporterInfo, Role, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
+    PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
@@ -18,6 +18,7 @@ const MAX_NAME_LEN: u32 = 64;
 enum DataKey {
     Admin,
     Reporter(Address),
+    PendingUpgrade,
 }
 
 #[contracterror]
@@ -26,6 +27,8 @@ enum DataKey {
 pub enum RegistryError {
     ReporterNotFound = 1,
     InvalidName = 2,
+    UpgradeNotProposed = 3,
+    UpgradeDelayNotElapsed = 4,
 }
 
 #[contractevent]
@@ -51,6 +54,28 @@ pub struct AdminTransferred {
     pub new_admin: Address,
 }
 
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposed {
+    #[topic]
+    pub wasm_hash: BytesN<32>,
+    pub executable_at_ledger: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeExecuted {
+    #[topic]
+    pub wasm_hash: BytesN<32>,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeCancelled {
+    #[topic]
+    pub wasm_hash: BytesN<32>,
+}
+
 #[contract]
 pub struct ReporterRegistry;
 
@@ -65,6 +90,10 @@ fn bump_instance(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
+}
+
+fn pending(env: &Env) -> Option<PendingUpgrade> {
+    env.storage().instance().get(&DataKey::PendingUpgrade)
 }
 
 #[contractimpl]
@@ -143,10 +172,71 @@ impl ReporterRegistry {
         AdminTransferred { new_admin }.publish(&env);
     }
 
-    pub fn upgrade(env: Env, wasm_hash: BytesN<32>) {
+    /// Propose a wasm hash for installation after the upgrade delay. A new
+    /// proposal replaces any pending one and restarts the clock.
+    pub fn propose_upgrade(env: Env, wasm_hash: BytesN<32>) {
         admin(&env).require_auth();
+        let executable_at_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(UPGRADE_DELAY_LEDGERS);
+        env.storage().instance().set(
+            &DataKey::PendingUpgrade,
+            &PendingUpgrade {
+                wasm_hash: wasm_hash.clone(),
+                executable_at_ledger,
+            },
+        );
+        bump_instance(&env);
+        UpgradeProposed {
+            wasm_hash,
+            executable_at_ledger,
+        }
+        .publish(&env);
+    }
+
+    /// Install the pending wasm once its delay has elapsed.
+    pub fn execute_upgrade(env: Env) {
+        admin(&env).require_auth();
+        let proposed = match pending(&env) {
+            Some(proposed) => proposed,
+            None => panic_with_error!(&env, RegistryError::UpgradeNotProposed),
+        };
+        if env.ledger().sequence() < proposed.executable_at_ledger {
+            panic_with_error!(&env, RegistryError::UpgradeDelayNotElapsed);
+        }
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        bump_instance(&env);
+        UpgradeExecuted {
+            wasm_hash: proposed.wasm_hash.clone(),
+        }
+        .publish(&env);
         env.deployer()
-            .update_current_contract(ContractExecutable::Wasm(wasm_hash));
+            .update_current_contract(ContractExecutable::Wasm(proposed.wasm_hash));
+    }
+
+    /// Cancel the pending upgrade.
+    pub fn cancel_upgrade(env: Env) {
+        admin(&env).require_auth();
+        let proposed = match pending(&env) {
+            Some(proposed) => proposed,
+            None => panic_with_error!(&env, RegistryError::UpgradeNotProposed),
+        };
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        bump_instance(&env);
+        UpgradeCancelled {
+            wasm_hash: proposed.wasm_hash,
+        }
+        .publish(&env);
+    }
+
+    /// The pending upgrade, if any.
+    pub fn pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        let proposed = pending(&env);
+        if proposed.is_some() {
+            bump_instance(&env);
+        }
+        proposed
     }
 }
 

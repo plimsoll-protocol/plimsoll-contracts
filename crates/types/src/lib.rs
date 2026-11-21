@@ -14,6 +14,11 @@ pub const PERSISTENT_EXTEND_TO: u32 = 90 * DAY_IN_LEDGERS;
 pub const INSTANCE_THRESHOLD: u32 = 30 * DAY_IN_LEDGERS;
 pub const INSTANCE_EXTEND_TO: u32 = 90 * DAY_IN_LEDGERS;
 
+/// Minimum ledgers between proposing and executing an upgrade: one day at a
+/// 5-second close time. Long enough for watchers to alert and consumers to
+/// pause, short enough to ship a fix during an incident.
+pub const UPGRADE_DELAY_LEDGERS: u32 = DAY_IN_LEDGERS;
+
 /// Basis-point denominator: 10_000 bps = 100%.
 pub const BPS_DENOMINATOR: i128 = 10_000;
 
@@ -110,24 +115,66 @@ pub struct Coverage {
     pub report_as_of: u64,
 }
 
+/// A proposed contract upgrade and the first ledger at which it may execute.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub wasm_hash: BytesN<32>,
+    pub executable_at_ledger: u32,
+}
+
+/// `ceil(a * b / 10_000)` for non-negative `a` and `b`, or `None` when the
+/// result does not fit in `i128`. Splitting `b` by the denominator keeps the
+/// intermediate products small enough to check.
+fn mul_div_ceil_bps(a: i128, b: i128) -> Option<i128> {
+    let whole = b / BPS_DENOMINATOR;
+    let part = b % BPS_DENOMINATOR;
+    let high = a.checked_mul(whole)?;
+    let low = (a * part + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR;
+    high.checked_add(low)
+}
+
+/// `floor(remainder * 10_000 / supply)` for `0 <= remainder < supply`.
+/// The direct product is tried first; when it would overflow `i128`, a binary
+/// search over the 0..=9_999 result uses [`mul_div_ceil_bps`] instead.
+fn fractional_bps(remainder: i128, supply: i128) -> u32 {
+    if let Some(scaled) = remainder.checked_mul(BPS_DENOMINATOR) {
+        return (scaled / supply) as u32;
+    }
+    let mut low = 0u32;
+    let mut high = BPS_DENOMINATOR as u32;
+    while low + 1 < high {
+        let mid = low + (high - low) / 2;
+        let threshold = mul_div_ceil_bps(mid as i128, supply).unwrap_or(i128::MAX);
+        if remainder >= threshold {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
 /// `reserves * 10_000 / supply`, rounded down, saturating at `u32::MAX`.
 /// Zero supply means nothing is owed, so it is reported as `u32::MAX`.
+/// Non-positive reserves report zero.
 pub fn coverage_bps(reserves: i128, supply: i128) -> u32 {
     if supply <= 0 {
         return u32::MAX;
     }
-    match reserves.checked_mul(BPS_DENOMINATOR) {
-        Some(scaled) => {
-            let bps = scaled / supply;
-            if bps > u32::MAX as i128 {
-                u32::MAX
-            } else if bps < 0 {
-                0
-            } else {
-                bps as u32
-            }
-        }
-        None => u32::MAX,
+    if reserves <= 0 {
+        return 0;
+    }
+    let whole = reserves / supply;
+    if whole > (u32::MAX as i128) / BPS_DENOMINATOR {
+        return u32::MAX;
+    }
+    let bps =
+        whole as u64 * BPS_DENOMINATOR as u64 + fractional_bps(reserves % supply, supply) as u64;
+    if bps > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        bps as u32
     }
 }
 
@@ -146,7 +193,77 @@ pub trait CoverageLedgerInterface {
 
 #[cfg(test)]
 mod test {
+    extern crate std;
+
     use super::*;
+    use num_bigint::BigInt;
+    use proptest::prelude::*;
+
+    /// Exact `reserves * 10_000 / supply`, clamped the way the contract's
+    /// `i128` implementation must behave.
+    fn reference_bps(reserves: i128, supply: i128) -> u32 {
+        if supply <= 0 {
+            return u32::MAX;
+        }
+        let scaled = BigInt::from(reserves) * BigInt::from(BPS_DENOMINATOR);
+        let bps = scaled / BigInt::from(supply);
+        if bps > BigInt::from(u32::MAX) {
+            u32::MAX
+        } else if bps < BigInt::from(0) {
+            0
+        } else {
+            u32::try_from(bps).unwrap()
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn bps_never_panics(reserves: i128, supply: i128) {
+            let _ = coverage_bps(reserves, supply);
+        }
+
+        #[test]
+        fn bps_matches_a_big_integer_reference(reserves: i128, supply: i128) {
+            prop_assert_eq!(coverage_bps(reserves, supply), reference_bps(reserves, supply));
+        }
+
+        #[test]
+        fn bps_is_non_decreasing_in_reserves(a: i128, b: i128, supply: i128) {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            prop_assert!(coverage_bps(lo, supply) <= coverage_bps(hi, supply));
+        }
+
+        #[test]
+        fn bps_is_non_increasing_in_positive_supply(
+            reserves: i128,
+            a: i128,
+            b: i128,
+        ) {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            let lo = lo.max(1);
+            let hi = hi.max(lo);
+            prop_assert!(coverage_bps(reserves, lo) >= coverage_bps(reserves, hi));
+        }
+
+        #[test]
+        fn bps_non_positive_supply_is_max(reserves: i128, supply: i128) {
+            prop_assume!(supply <= 0);
+            prop_assert_eq!(coverage_bps(reserves, supply), u32::MAX);
+        }
+    }
+
+    #[test]
+    fn bps_handles_i128_extremes() {
+        let values = [i128::MIN, i128::MIN + 1, -1, 0, 1, i128::MAX - 1, i128::MAX];
+        for reserves in values {
+            for supply in values {
+                assert_eq!(
+                    coverage_bps(reserves, supply),
+                    reference_bps(reserves, supply)
+                );
+            }
+        }
+    }
 
     #[test]
     fn bps_rounds_down() {

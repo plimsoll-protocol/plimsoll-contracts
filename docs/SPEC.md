@@ -50,12 +50,60 @@ it exists to show the integration in about 100 lines.
 | `SupplySnapshot` | struct | `amount: i128`, `ledger: u32`, `timestamp: u64`, `breakdown_hash: BytesN<32>`, `poster: Address` |
 | `ReserveReport` | struct | `amount: i128`, `as_of: u64`, `posted_at: u64`, `tier: Tier`, `reporter: Address`, `doc_hash: BytesN<32>`, `doc_uri: String` |
 | `Coverage` | struct | `bps: u32`, `supply: i128`, `reserves: i128`, `tier: Tier`, `supply_ledger: u32`, `supply_timestamp: u64`, `report_as_of: u64` |
+| `PendingUpgrade` | struct | `wasm_hash: BytesN<32>`, `executable_at_ledger: u32` |
 
 Amounts are in the asset's smallest unit (Stellar classic assets: 7 decimals,
 so `1_0000000` is one unit). No floats anywhere. Coverage is basis points:
-`bps = reserves * 10_000 / supply`, rounded down, saturating at `u32::MAX`.
-When supply is zero, `bps = u32::MAX` (nothing is owed, so nothing is
-uncovered).
+`bps = reserves * 10_000 / supply`, rounded down. Non-positive reserves report
+`0` bps. Positive results saturate at `u32::MAX`, including when
+`reserves * 10_000` would overflow `i128`. When supply is zero or negative,
+`bps = u32::MAX` (nothing is owed, so nothing is uncovered).
+
+## Time-locked upgrades
+
+`reporter-registry` and `coverage-ledger` replace the old immediate `upgrade`
+with a two-step process. A compromised or careless admin key can still propose
+code, but cannot install it until `UPGRADE_DELAY_LEDGERS` ledgers have passed.
+That window lets watchers notice and alert, and lets consumers pause or exit
+before the logic they depend on changes.
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `UPGRADE_DELAY_LEDGERS` | `17_280` (one day at 5-second ledgers) | Minimum ledgers between proposal and execution. |
+
+The delay is measured in ledgers rather than seconds so it does not depend on
+ledger close-time drift. One day is deliberately short enough to ship a fix
+during an incident, but long enough for an always-on watcher to raise an alarm.
+
+**Storage (each contract)**
+
+| Key | Storage | Value |
+| --- | --- | --- |
+| `PendingUpgrade` | instance | `PendingUpgrade` |
+
+**Functions (each contract)**
+
+| Function | Auth | Returns | Errors | Event |
+| --- | --- | --- | --- | --- |
+| `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
+| `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
+| `cancel_upgrade()` | admin | `()` | `UpgradeNotProposed` | `upgrade_cancelled {wasm_hash}` |
+| `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
+
+Rules:
+
+- `propose_upgrade` stores the hash and
+  `executable_at_ledger = current ledger + UPGRADE_DELAY_LEDGERS`. It replaces
+  any existing proposal, so a new proposal restarts the clock.
+- `execute_upgrade` fails with `UpgradeNotProposed` when nothing is pending and
+  with `UpgradeDelayNotElapsed` before `executable_at_ledger`. On success it
+  clears the proposal, publishes `upgrade_executed`, and installs the wasm. If
+  installation fails the transaction rolls back and the proposal remains.
+- `cancel_upgrade` clears the proposal and publishes `upgrade_cancelled`.
+  Calling it with no proposal fails with `UpgradeNotProposed`.
+- The admin authorises every step. `pending_upgrade` is a public view so a
+  watcher or front end can show what is scheduled and when it may execute.
+- The old immediate `upgrade(wasm_hash)` is removed from both contracts.
 
 ## Storage and TTL
 
@@ -137,6 +185,7 @@ Decides who may speak. Holds no money.
 | --- | --- | --- |
 | `Admin` | instance | `Address` |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
+| `PendingUpgrade` | instance | `PendingUpgrade` |
 
 **Functions**
 
@@ -149,7 +198,10 @@ Decides who may speak. Holds no money.
 | `role_of(reporter: Address)` | — | `Option<Role>` | — | — |
 | `get_reporter(reporter: Address)` | — | `Option<ReporterInfo>` | — | — |
 | `transfer_admin(new_admin: Address)` | admin and new_admin | `()` | — | `admin_transferred {new_admin}` |
-| `upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | — |
+| `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
+| `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
+| `cancel_upgrade()` | admin | `()` | `UpgradeNotProposed` | `upgrade_cancelled {wasm_hash}` |
+| `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`.
 Causes and remedies: [ERRORS.md](ERRORS.md#registryerror).
@@ -164,6 +216,7 @@ Records what was said, and answers coverage questions.
 | --- | --- | --- |
 | `Admin` | instance | `Address` |
 | `Registry` | instance | `Address` |
+| `PendingUpgrade` | instance | `PendingUpgrade` |
 | `Asset(Address)` | persistent | `AssetRecord` |
 | `Supply(Address)` | persistent | `SupplySnapshot` (latest only) |
 | `ReportBy(Address, Tier, Address)` | persistent | `ReserveReport`: the latest from one reporter at one tier for one asset |
@@ -218,7 +271,10 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | — | — |
 | `registry()` / `admin()` | — | `Address` | — | — |
 | `transfer_admin(new_admin)` | admin and new_admin | `()` | — | `admin_transferred` |
-| `upgrade(wasm_hash)` | admin | `()` | — | — |
+| `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
+| `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
+| `cancel_upgrade()` | admin | `()` | `UpgradeNotProposed` | `upgrade_cancelled {wasm_hash}` |
+| `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
 
 Rules:
 
@@ -274,7 +330,10 @@ Causes, remedies and the order they are checked in: [ERRORS.md](ERRORS.md#ledger
 The v0.1 ledger stored one report per tier under `Report(sac, tier)`. The
 live testnet ledger holds such entries, and the deployed vaults store the
 ledger's address in their config with no way to change it, so the ledger is
-upgraded in place rather than redeployed:
+upgraded in place rather than redeployed.
+
+The deployed v0.1 code predates time locks and still exposes the old immediate
+`upgrade(wasm_hash)`. Use it once to install this version:
 
 ```bash
 stellar contract build
@@ -284,8 +343,19 @@ stellar contract invoke --id "$COVERAGE_LEDGER_ID" --source plimsoll-admin --net
   upgrade --wasm_hash "$HASH"
 ```
 
-then record `HASH` under `liveWasm.coverageLedger` in
-`deployments/testnet.json`.
+Then record `HASH` under `liveWasm.coverageLedger` in
+`deployments/testnet.json`. From this version on, every upgrade uses the
+two-step flow:
+
+```bash
+HASH=$(stellar contract upload --wasm target/wasm32v1-none/release/coverage_ledger.wasm \
+  --source plimsoll-admin --network testnet)
+stellar contract invoke --id "$COVERAGE_LEDGER_ID" --source plimsoll-admin --network testnet -- \
+  propose_upgrade --wasm_hash "$HASH"
+# after UPGRADE_DELAY_LEDGERS have closed:
+stellar contract invoke --id "$COVERAGE_LEDGER_ID" --source plimsoll-admin --network testnet -- \
+  execute_upgrade
+```
 
 No migration call is needed. The new code migrates lazily:
 
@@ -298,11 +368,13 @@ No migration call is needed. The new code migrates lazily:
   applying the staleness and cap rules. A legacy key therefore exists only
   while its tier's index is empty, so nothing is ever counted twice.
 
-Contract ids, function signatures (apart from the added error) and event
-layouts are unchanged, so the indexer, the dashboard and the vaults need no
-change. Rolling back means upgrading to the previous hash; entries that were
-already migrated would then be invisible to the old code, so a rollback should
-be followed by each reporter posting again.
+Contract ids, the coverage and query function signatures, and the existing
+event layouts are unchanged, so the indexer, the dashboard and the vaults need
+no change. The upgrade entry point changes from `upgrade(wasm_hash)` to
+`propose_upgrade` / `execute_upgrade` / `cancel_upgrade`. Rolling back means
+proposing and executing the previous hash through the same time lock; entries
+that were already migrated would then be invisible to the old code, so a
+rollback should be followed by each reporter posting again.
 
 ## covered-vault (reference consumer)
 

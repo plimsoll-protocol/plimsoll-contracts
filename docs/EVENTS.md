@@ -120,6 +120,38 @@ Raised by `transfer_admin`, which requires both the outgoing and incoming
 admin to authorise. No testnet example: admin has never been transferred on the
 demo deployment.
 
+### `upgrade_proposed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `upgrade_proposed` | `Symbol` |
+| topic 1 | `wasm_hash` | `BytesN<32>` |
+| data | `executable_at_ledger` | `u32` |
+
+Raised by `propose_upgrade`. `executable_at_ledger` is the first ledger at
+which `execute_upgrade` may succeed. A new proposal replaces any pending one
+and restarts the clock.
+
+### `upgrade_executed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `upgrade_executed` | `Symbol` |
+| topic 1 | `wasm_hash` | `BytesN<32>` |
+
+No data map. Raised when `execute_upgrade` installs the proposed wasm. If the
+installation fails the transaction rolls back, so neither the event nor the
+cleared proposal survives.
+
+### `upgrade_cancelled`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `upgrade_cancelled` | `Symbol` |
+| topic 1 | `wasm_hash` | `BytesN<32>` |
+
+No data map. Raised by `cancel_upgrade`, which clears the pending proposal.
+
 ## reporter-registry
 
 `CCZCBR7MGSW5LGIEUQR5TU5Z7JQWBDEESB3RGPTRPMCBUMOISRPY7GOB` on testnet.
@@ -165,6 +197,11 @@ testnet example: nothing has been revoked on the demo deployment.
 
 Same layout as the coverage ledger's, above. The two are distinct events on
 distinct contracts, so filter on `contract_id` as well as the topic.
+
+### `upgrade_proposed`, `upgrade_executed`, `upgrade_cancelled`
+
+Same layouts as the coverage ledger's upgrade events, above. The two contracts
+emit them independently, so filter on `contract_id` as well as the topic.
 
 ## covered-vault
 
@@ -227,6 +264,9 @@ pasted:
 | `reporter_set` | `AAAADwAAAAxyZXBvcnRlcl9zZXQ=` |
 | `reporter_revoked` | `AAAADwAAABByZXBvcnRlcl9yZXZva2Vk` |
 | `admin_transferred` | `AAAADwAAABFhZG1pbl90cmFuc2ZlcnJlZAAAAA==` |
+| `upgrade_proposed` | `AAAADwAAABB1cGdyYWRlX3Byb3Bvc2Vk` |
+| `upgrade_executed` | `AAAADwAAABB1cGdyYWRlX2V4ZWN1dGVk` |
+| `upgrade_cancelled` | `AAAADwAAABF1cGdyYWRlX2NhbmNlbGxlZA==` |
 
 ```bash
 # supply posts for any asset: name, then any sac

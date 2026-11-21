@@ -41,3 +41,23 @@ Out of scope:
 - The registry admin decides who is an auditor, transcriber or supply poster.
 - Supply snapshots are computed off-chain by a registered poster. They are
   verifiable (the breakdown hash is on-chain) but not proven on-chain.
+
+## Upgrades
+
+Both stateful contracts (`reporter-registry`, `coverage-ledger`) upgrade in
+place. The admin proposes a wasm hash with `propose_upgrade`; it can only be
+installed by `execute_upgrade` after `UPGRADE_DELAY_LEDGERS = 17_280` ledgers
+(about one day at a five-second close time). The admin can cancel a proposal,
+and a new proposal replaces the old one and restarts the delay.
+
+This means a compromised admin key cannot swap code instantly. It does not
+make the admin trustworthy: it can still propose and eventually execute any
+code. The delay is the window in which holders, vault depositors and the
+indexer can observe the `upgrade_proposed` event and stop interacting with, or
+exit, the affected contracts. The vaults have no admin pause, so withdrawals
+remain available throughout. Consumers that must not run changed code should
+pin the wasm hash they audited and treat a proposal as a signal to migrate.
+
+The upgrade entry point is itself admin-only and emits an event for every
+step, so a proposal that was never announced on-chain did not come from this
+contract.
