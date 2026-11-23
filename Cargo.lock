@@ -76,7 +76,7 @@ dependencies = [
  "fnv",
  "hashbrown 0.15.5",
  "itertools",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
  "zeroize",
@@ -96,7 +96,7 @@ dependencies = [
  "digest 0.10.7",
  "educe",
  "itertools",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "paste",
  "zeroize",
@@ -118,7 +118,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09be120733ee33f7693ceaa202ca41accd5653b779563608f1234f78ae07c4b3"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "proc-macro2",
  "quote",
@@ -150,7 +150,7 @@ dependencies = [
  "ark-std",
  "arrayvec",
  "digest 0.10.7",
- "num-bigint",
+ "num-bigint 0.4.8",
 ]
 
 [[package]]
@@ -310,7 +310,7 @@ version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b04f2b1d34cb428043f14aa4c853d14294532e8bbde3b6a3bc2faaaae31a1dd"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -1225,6 +1225,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1310,7 +1320,7 @@ dependencies = [
 name = "plimsoll-types"
 version = "0.1.0"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.5.1",
  "proptest",
  "soroban-sdk",
 ]
