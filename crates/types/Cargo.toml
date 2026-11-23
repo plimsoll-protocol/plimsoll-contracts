@@ -12,3 +12,7 @@ doctest = false
 
 [dependencies]
 soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+num-bigint = "0.5"
+proptest = "1"

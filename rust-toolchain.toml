@@ -1,5 +1,9 @@
+# An exact version, not "stable": the wasm size budgets, the resource budgets
+# and clippy all depend on the compiler, so it changes only in a commit. CI
+# installs this same toolchain through .github/actions/setup-rust. To bump it,
+# see "Bumping the Rust toolchain and the Stellar CLI" in README.md.
 [toolchain]
-channel = "stable"
+channel = "1.100.0"
 targets = ["wasm32v1-none"]
 profile = "minimal"
 components = ["rustfmt", "clippy"]

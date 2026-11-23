@@ -1,0 +1,50 @@
+# cargo-deny policy. Run locally with `cargo deny check`.
+# CI runs the same command on every pull request and weekly.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+# Advisories fail the build. Add an ignore only with a linked issue and a
+# reason, and remove it when the dependency is patched.
+ignore = [
+    # Transitive: soroban-sdk 28 -> soroban-env-host -> elliptic-curve 0.13
+    # -> crypto-bigint 0.5. The contract wasm links the guest SDK, not the
+    # host crypto stack. elliptic-curve 0.13 pins crypto-bigint ^0.5, so we
+    # cannot move to the fixed 0.7 without a soroban-sdk upgrade.
+    { id = "RUSTSEC-2026-0387", reason = "blocked on soroban-sdk's elliptic-curve 0.13; host-only code path" },
+]
+
+[licenses]
+# Every dependency must offer at least one of these licences. The list covers
+# the Soroban SDK, its transitive crates and the test-only proptest tree.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+exceptions = []
+
+[bans]
+# Duplicate versions are a warning; the lockfile keeps them visible in review.
+multiple-versions = "warn"
+# Workspace and path dependencies intentionally omit a version. None of these
+# crates are published, so there is no registry version to pin.
+wildcards = "allow"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

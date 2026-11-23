@@ -62,12 +62,9 @@ jobs:
             echo "::notice::Restating is not configured, so the reports will expire on their own. Add the repository secrets DEMO_ISSUER_SECRET, DEMO_AUDITOR_SECRET and DEMO_TRANSCRIBER_SECRET (the S-keys of the demo reporters) to let this job keep them fresh. The verify job below is what will go red when they do expire."
           fi
 
-      - name: Install Stellar CLI
+      - name: Install Stellar CLI (checksum verified)
         if: steps.keys.outputs.configured == 'true'
-        run: |
-          curl -sSfL https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz \
-            | tar -xz -C /usr/local/bin stellar
-          stellar --version
+        uses: ./.github/actions/install-stellar-cli
 
       # `force` exists so the posting path can be exercised on demand instead of
       # waiting for the reports to age: a job first proven in anger is a job
@@ -109,11 +106,8 @@ jobs:
     if: always()
     steps:
       - uses: actions/checkout@v7
-      - name: Install Stellar CLI
-        run: |
-          curl -sSfL https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz \
-            | tar -xz -C /usr/local/bin stellar
-          stellar --version
+      - name: Install Stellar CLI (checksum verified)
+        uses: ./.github/actions/install-stellar-cli
       # Reads are simulated against an account whose keys nobody needs.
       - name: Check coverage answers and document hashes
         run: ./scripts/refresh-demo-reserves.sh verify

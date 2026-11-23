@@ -1,0 +1,36 @@
+name: Verify deployment
+
+# Builds the contracts with CI's pinned Rust toolchain and Stellar CLI, and
+# checks that every contract recorded in deployments/<network>.json runs that
+# code (scripts/verify-deployment.sh). Needs no keys or secrets.
+#
+# It runs on demand rather than on a schedule because the live testnet
+# contracts predate the time-locked upgrades on main, so the check fails
+# until they are upgraded (docs/RUNBOOK.md, section 3). Once a deployment is
+# expected to match main, add a `schedule:` trigger here so drift is noticed.
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: Deployment to verify (a file in deployments/, without .json)
+        type: string
+        default: testnet
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify ${{ inputs.network }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Stellar CLI (checksum verified)
+        uses: ./.github/actions/install-stellar-cli
+      - name: Compare on-chain wasm with the local build
+        env:
+          NETWORK: ${{ inputs.network }}
+        run: ./scripts/verify-deployment.sh "$NETWORK"

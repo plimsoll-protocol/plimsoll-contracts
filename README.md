@@ -69,6 +69,12 @@ and the event topic and data layouts every off-chain reader depends on are in
 `Error(Contract, #1)` up, and what a caller should do about it is in
 [docs/ERRORS.md](docs/ERRORS.md).
 
+What each actor (admins, supply poster, reporters, issuers, anyone) can make
+the ledger say, what limits them and what an integrator should do about it is
+in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md). Every admin operation
+(upgrades, moving admin to a multisig, onboarding and revoking reporters) is a
+tested, step-by-step procedure in [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
 ### Why it is Stellar-specific
 
 - **Issued assets are a protocol feature.** Supply for any classic asset can be summed from trustlines, claimable balances, liquidity pools and contract balances, with no cooperation from the issuer.
@@ -96,8 +102,12 @@ Listed demo assets: `PUSD` (demo issuer, SAC `CCHPT4…HIM7S`) and Circle's test
 
 ## Quick start
 
-Requirements: Rust stable with the `wasm32v1-none` target, and
-[Stellar CLI](https://developers.stellar.org/docs/tools/cli) 28 or later.
+Requirements: Rust at the exact version pinned in
+[rust-toolchain.toml](rust-toolchain.toml) (rustup installs it, with the
+`wasm32v1-none` target, the first time you run `cargo` here), and
+[Stellar CLI](https://developers.stellar.org/docs/tools/cli) 28 or later. To
+reproduce CI's wasm hashes exactly, use the CLI version CI pins (see
+[Bumping the Rust toolchain and the Stellar CLI](#bumping-the-rust-toolchain-and-the-stellar-cli)).
 
 ```bash
 git clone https://github.com/plimsoll-protocol/plimsoll-contracts
@@ -190,6 +200,24 @@ the deployment is the one whose wasm hash matches `contract info hash --id`.
 The spec JSON is what SDK authors should generate bindings from, so they do not
 need to build the wasm to know a release's interface.
 
+### Verifying a deployment against this checkout
+
+`scripts/verify-deployment.sh` does the comparison above for every contract in
+a deployments file at once, against a local build of whatever is checked out:
+
+```bash
+./scripts/verify-deployment.sh testnet    # reads deployments/testnet.json, needs no keys
+```
+
+It prints `ok` or `MISMATCH` per contract, with the expected (local) and actual
+(on-chain) hashes, and exits non-zero on any mismatch. The wasm is identical
+across Linux and macOS for the same inputs, but the Stellar CLI writes its own
+version into the wasm, so build with the CLI version CI pins. On a mismatch the
+script prints the rustc, soroban-sdk and stellar-cli versions each side was
+built with, so a toolchain difference is not mistaken for a code difference.
+The [Verify deployment](.github/workflows/verify-deployment.yml) workflow runs
+it on demand with CI's pinned toolchain.
+
 ### Keeping the demo honest
 
 A reserve report expires. The PUSD vault asks for one at most 7 days old, so
@@ -246,6 +274,49 @@ Test files are left out of the figures, and so are `tests/e2e` (it runs the
 compiled wasm, which carries no coverage instrumentation) and
 `examples/coverage-gate` (documentation, not a deployed contract).
 
+### Bumping the Rust toolchain and the Stellar CLI
+
+Both are pinned, so the compiler and CLI that check the size budgets, run
+clippy and build the release wasm only change in a commit.
+
+**Rust.** The version lives only in [rust-toolchain.toml](rust-toolchain.toml).
+Locally rustup reads it, and in CI
+[`.github/actions/setup-rust`](.github/actions/setup-rust/action.yml) installs it
+and fails if any other `rustc` ends up active. To bump:
+
+1. Set `channel` in `rust-toolchain.toml` to the new exact version (for example
+   `"1.101.0"`; a bare `stable` is rejected by CI).
+2. Run the full check locally: `cargo fmt --all --check`,
+   `cargo clippy --all-targets -- -D warnings`, `stellar contract build --locked`,
+   `python3 scripts/check_wasm_sizes.py`, `cargo test`.
+3. If a size or resource budget moves, adjust it in the same commit and say why.
+4. Commit as `ci: bump Rust to <version>`.
+
+**Stellar CLI.** The version and the SHA-256 of its Linux archive live only in
+[`.github/actions/install-stellar-cli/action.yml`](.github/actions/install-stellar-cli/action.yml),
+which every workflow uses. CI refuses to extract an archive whose checksum does
+not match. To bump:
+
+1. Read the new release's checksum from GitHub:
+
+   ```bash
+   gh api repos/stellar/stellar-cli/releases/tags/v<version> \
+     -q '.assets[] | select(.name | test("x86_64-unknown-linux-gnu.tar.gz")) | .digest'
+   ```
+
+2. Confirm it independently against the archive itself:
+
+   ```bash
+   curl -sSfLO https://github.com/stellar/stellar-cli/releases/download/v<version>/stellar-cli-<version>-x86_64-unknown-linux-gnu.tar.gz
+   sha256sum stellar-cli-<version>-x86_64-unknown-linux-gnu.tar.gz
+   ```
+
+3. Set `STELLAR_CLI_VERSION` and `STELLAR_CLI_SHA256` in the action to the new
+   version and the matching hash, and update the CLI row in
+   [AGENTS.md](AGENTS.md).
+4. Commit as `ci: bump Stellar CLI to <version>`. The wasm hashes change with
+   the CLI version, so note it in the next release.
+
 ## Contributing
 
 Issues labelled [`good first issue`](https://github.com/plimsoll-protocol/plimsoll-contracts/labels/good%20first%20issue)
@@ -253,6 +324,7 @@ are scoped for a first pull request. Read [CONTRIBUTING.md](CONTRIBUTING.md) bef
 and comment on an issue to have it assigned.
 
 Security reports: see [SECURITY.md](SECURITY.md). Do not open public issues for vulnerabilities.
+Trust assumptions per actor: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Contributors
 

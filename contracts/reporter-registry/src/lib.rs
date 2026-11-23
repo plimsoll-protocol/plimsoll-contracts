@@ -30,7 +30,6 @@ contractmeta!(
 enum DataKey {
     Admin,
     Reporter(Address),
-    ReporterIndex,
     PendingUpgrade,
 }
 
@@ -72,8 +71,7 @@ pub struct AdminTransferred {
 pub struct UpgradeProposed {
     #[topic]
     pub wasm_hash: BytesN<32>,
-    pub proposed_at_ledger: u32,
-    pub proposed_by: Address,
+    pub executable_at_ledger: u32,
 }
 
 #[contractevent]
@@ -85,7 +83,10 @@ pub struct UpgradeExecuted {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeCancelled;
+pub struct UpgradeCancelled {
+    #[topic]
+    pub wasm_hash: BytesN<32>,
+}
 
 #[contract]
 pub struct ReporterRegistry;
@@ -103,58 +104,8 @@ fn bump_instance(env: &Env) {
         .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
 }
 
-fn read_index(env: &Env) -> Vec<Address> {
-    env.storage()
-        .persistent()
-        .get::<_, Vec<Address>>(&DataKey::ReporterIndex)
-        .unwrap_or_else(|| Vec::new(env))
-}
-
-fn write_index(env: &Env, index: &Vec<Address>) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::ReporterIndex, index);
-    env.storage().persistent().extend_ttl(
-        &DataKey::ReporterIndex,
-        PERSISTENT_THRESHOLD,
-        PERSISTENT_EXTEND_TO,
-    );
-}
-
-fn ensure_index_backfilled(env: &Env) {
-    let key = DataKey::ReporterIndex;
-    if env.storage().persistent().has(&key) {
-        return;
-    }
-    // Backfill: iterate all Reporter keys and build the index.
-    // Note: soroban-sdk doesn't provide a direct way to iterate all keys with a prefix.
-    // For now, the index starts empty and is built up from new reporters.
-    // A full backfill would require a migration script or iterating known reporters.
-    write_index(env, &Vec::new(env));
-}
-
-fn add_reporter_to_index(env: &Env, reporter: &Address) {
-    let mut index = read_index(env);
-    // Only add if not already present
-    if !index.iter().any(|a| a == *reporter) {
-        index.push_back(reporter.clone());
-        write_index(env, &index);
-    }
-}
-
-fn remove_reporter_from_index(env: &Env, reporter: &Address) {
-    let mut index = read_index(env);
-    let len = index.len();
-    if let Some(pos) = index.iter().position(|a| a == *reporter) {
-        // Swap-remove: move last element to the removed position
-        let last = len - 1;
-        let pos_u32: u32 = pos.try_into().unwrap();
-        if pos_u32 != last {
-            index.set(pos_u32, index.get(last).unwrap());
-        }
-        index.pop_back();
-        write_index(env, &index);
-    }
+fn pending(env: &Env) -> Option<PendingUpgrade> {
+    env.storage().instance().get(&DataKey::PendingUpgrade)
 }
 
 #[contractimpl]
@@ -260,39 +211,37 @@ impl ReporterRegistry {
         AdminTransferred { new_admin }.publish(&env);
     }
 
-    /// Propose a contract upgrade. The upgrade can be executed after a delay.
+    /// Propose a wasm hash for installation after the upgrade delay. A new
+    /// proposal replaces any pending one and restarts the clock.
     pub fn propose_upgrade(env: Env, wasm_hash: BytesN<32>) {
         admin(&env).require_auth();
-        let proposed = PendingUpgrade {
-            wasm_hash: wasm_hash.clone(),
-            proposed_at_ledger: env.ledger().sequence(),
-            proposed_by: admin(&env),
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingUpgrade, &proposed);
+        let executable_at_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(UPGRADE_DELAY_LEDGERS);
+        env.storage().instance().set(
+            &DataKey::PendingUpgrade,
+            &PendingUpgrade {
+                wasm_hash: wasm_hash.clone(),
+                executable_at_ledger,
+            },
+        );
         bump_instance(&env);
         UpgradeProposed {
             wasm_hash,
-            proposed_at_ledger: proposed.proposed_at_ledger,
-            proposed_by: proposed.proposed_by,
+            executable_at_ledger,
         }
         .publish(&env);
     }
 
-    /// Execute a previously proposed upgrade after the delay has elapsed.
+    /// Install the pending wasm once its delay has elapsed.
     pub fn execute_upgrade(env: Env) {
         admin(&env).require_auth();
-        let proposed = match env
-            .storage()
-            .instance()
-            .get::<_, PendingUpgrade>(&DataKey::PendingUpgrade)
-        {
-            Some(p) => p,
+        let proposed = match pending(&env) {
+            Some(proposed) => proposed,
             None => panic_with_error!(&env, RegistryError::UpgradeNotProposed),
         };
-        let current = env.ledger().sequence();
-        if current < proposed.proposed_at_ledger + UPGRADE_DELAY_LEDGERS {
+        if env.ledger().sequence() < proposed.executable_at_ledger {
             panic_with_error!(&env, RegistryError::UpgradeDelayNotElapsed);
         }
         env.storage().instance().remove(&DataKey::PendingUpgrade);
@@ -305,31 +254,28 @@ impl ReporterRegistry {
             .update_current_contract(ContractExecutable::Wasm(proposed.wasm_hash));
     }
 
-    /// Cancel a pending upgrade proposal.
+    /// Cancel the pending upgrade.
     pub fn cancel_upgrade(env: Env) {
         admin(&env).require_auth();
+        let proposed = match pending(&env) {
+            Some(proposed) => proposed,
+            None => panic_with_error!(&env, RegistryError::UpgradeNotProposed),
+        };
         env.storage().instance().remove(&DataKey::PendingUpgrade);
         bump_instance(&env);
-        UpgradeCancelled.publish(&env);
-    }
-
-    /// Get the currently pending upgrade, if any.
-    pub fn pending_upgrade(env: Env) -> Option<PendingUpgrade> {
-        let upgrade = env
-            .storage()
-            .instance()
-            .get::<_, PendingUpgrade>(&DataKey::PendingUpgrade);
-        if upgrade.is_some() {
-            env.storage()
-                .instance()
-                .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
+        UpgradeCancelled {
+            wasm_hash: proposed.wasm_hash,
         }
-        upgrade
+        .publish(&env);
     }
 
-    /// Returns the contract version.
-    pub fn version(_env: Env) -> u32 {
-        VERSION
+    /// The pending upgrade, if any.
+    pub fn pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        let proposed = pending(&env);
+        if proposed.is_some() {
+            bump_instance(&env);
+        }
+        proposed
     }
 }
 

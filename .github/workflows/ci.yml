@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly, so new advisories surface even when nobody opens a PR.
+    - cron: "0 6 * * 1"
 
 jobs:
   test:
@@ -11,19 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
-          components: rustfmt, clippy
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: Install Stellar CLI
-        run: |
-          curl -sSfL https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz             | tar -xz -C /usr/local/bin stellar
-          stellar --version
+      - name: Install Stellar CLI (checksum verified)
+        uses: ./.github/actions/install-stellar-cli
       # soroban-sdk 28 only builds contract wasm under `stellar contract build`.
       # The upgrade tests upload the fixture wasm, so this must run before the
       # tests, not after them.
@@ -47,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2

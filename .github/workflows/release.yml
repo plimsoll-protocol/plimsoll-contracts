@@ -19,15 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
+      - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
-      - name: Install Stellar CLI
-        run: |
-          curl -sSfL https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz \
-            | tar -xz -C /usr/local/bin stellar
-          stellar --version
+      - name: Install Stellar CLI (checksum verified)
+        uses: ./.github/actions/install-stellar-cli
       - name: Build wasm
         run: stellar contract build --locked
       - name: Check wasm size budgets

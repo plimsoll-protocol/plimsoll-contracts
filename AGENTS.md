@@ -14,7 +14,7 @@ without an issue that says so: the indexer decodes them.
 
 | Item | Version |
 | --- | --- |
-| Rust | stable, edition 2021 |
+| Rust | 1.100.0, pinned in `rust-toolchain.toml` (edition 2021) |
 | soroban-sdk | 28.0.0 (workspace dependency) |
 | Target | `wasm32v1-none` |
 | Stellar CLI | 28.1.0 (`stellar contract build` is required by soroban-sdk 28) |

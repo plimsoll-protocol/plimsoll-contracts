@@ -21,10 +21,20 @@ cargo test
 stellar contract build
 ```
 
+Dependency policy is checked with `cargo-deny`:
+
+```bash
+cargo install cargo-deny --locked
+cargo deny check
+```
+
+`deny.toml` covers advisories, licences and duplicate versions. Any ignored
+advisory has a comment explaining why it cannot be fixed yet.
+
 ## Pull request checklist
 
 - [ ] One logical change per pull request. Link the issue (`Closes #12`).
-- [ ] `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass.
+- [ ] `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and `cargo deny check` pass.
 - [ ] New public functions have tests for the success path **and** every error they can return.
 - [ ] If behaviour changed, [docs/SPEC.md](docs/SPEC.md) is updated in the same pull request.
 - [ ] `version()` constant is bumped in the affected contract(s) when behaviour changes.
