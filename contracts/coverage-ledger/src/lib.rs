@@ -23,6 +23,16 @@ const MAX_CODE_LEN: usize = 12;
 /// `coverage` reads, and so what every `is_covered` caller pays.
 pub const MAX_REPORTERS_PER_TIER: u32 = 4;
 
+/// Contract version. Increment on every behavioural change.
+const VERSION: u32 = 1;
+
+// Contract metadata for `stellar contract info meta`
+contractmeta!(key = "description", val = "Plimsoll Coverage Ledger");
+contractmeta!(
+    key = "repository",
+    val = "https://github.com/plimsoll-protocol/plimsoll-contracts"
+);
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -37,6 +47,8 @@ enum DataKey {
     ReportBy(Address, Tier, Address),
     /// Reporters with a `ReportBy` entry at (sac, tier), in first-post order.
     Reporters(Address, Tier),
+    /// The account the asset's issuer appointed to post `IssuerSigned` for it.
+    IssuerDelegate(Address),
 }
 
 #[contracterror]
@@ -99,6 +111,21 @@ pub struct ReservePosted {
 pub struct AdminTransferred {
     #[topic]
     pub new_admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssuerDelegateSet {
+    #[topic]
+    pub sac: Address,
+    pub delegate: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssuerDelegateCleared {
+    #[topic]
+    pub sac: Address,
 }
 
 #[contractevent]
@@ -247,13 +274,25 @@ fn migrate_legacy(env: &Env, sac: &Address, tier: Tier) {
     }
 }
 
+/// Whether `reporter` may sign at `IssuerSigned` for `sac`: the asset's issuer
+/// account, or the delegate it currently appoints.
+fn speaks_for_issuer(env: &Env, sac: &Address, issuer: &Address, reporter: &Address) -> bool {
+    reporter == issuer
+        || read_persistent::<Address>(env, &DataKey::IssuerDelegate(sac.clone()))
+            .is_some_and(|delegate| delegate == *reporter)
+}
+
 /// Whether a stored report still counts: its reporter must still be entitled
-/// to its tier. Issuer-signed reports always count; the issuer is fixed by the
-/// asset record. A revoked auditor or transcriber, or one whose role changed,
-/// no longer speaks for the figures they posted.
-fn counts(registry: &RegistryClient, report: &ReserveReport) -> bool {
+/// to its tier. An issuer-signed report counts while its reporter is the
+/// issuer, which the asset record fixes, or the current delegate. A revoked
+/// auditor or transcriber, one whose role changed, or a delegate the issuer
+/// cleared or replaced, no longer speaks for the figures they posted.
+fn counts(env: &Env, registry: &RegistryClient, sac: &Address, report: &ReserveReport) -> bool {
     let needed = match report.tier {
-        Tier::IssuerSigned => return true,
+        Tier::IssuerSigned => {
+            return read_persistent::<AssetRecord>(env, &DataKey::Asset(sac.clone()))
+                .is_some_and(|asset| speaks_for_issuer(env, sac, &asset.issuer, &report.reporter))
+        }
         Tier::AuditorSigned => Role::Auditor,
         Tier::Transcribed => Role::Transcriber,
     };
@@ -265,7 +304,11 @@ fn counts(registry: &RegistryClient, report: &ReserveReport) -> bool {
 /// `as_of` the earlier one wins. The registry is asked only about the report
 /// that would win, and again only if that one no longer counts, so a fresh
 /// issuer-signed report costs no cross-contract call at all.
-fn pick_counting(env: &Env, mut candidates: Vec<ReserveReport>) -> Option<ReserveReport> {
+fn pick_counting(
+    env: &Env,
+    sac: &Address,
+    mut candidates: Vec<ReserveReport>,
+) -> Option<ReserveReport> {
     let registry = RegistryClient::new(env, &registry(env));
     loop {
         let mut best: Option<(u32, ReserveReport)> = None;
@@ -275,7 +318,7 @@ fn pick_counting(env: &Env, mut candidates: Vec<ReserveReport>) -> Option<Reserv
             }
         }
         let (i, report) = best?;
-        if counts(&registry, &report) {
+        if counts(env, &registry, sac, &report) {
             return Some(report);
         }
         candidates.remove(i);
@@ -284,7 +327,7 @@ fn pick_counting(env: &Env, mut candidates: Vec<ReserveReport>) -> Option<Reserv
 
 /// The freshest counting report at `tier`.
 fn freshest_at(env: &Env, sac: &Address, tier: Tier) -> Option<ReserveReport> {
-    pick_counting(env, reports_at(env, sac, tier))
+    pick_counting(env, sac, reports_at(env, sac, tier))
 }
 
 fn best_report(env: &Env, sac: &Address, min_tier: Tier) -> Option<ReserveReport> {
@@ -294,7 +337,7 @@ fn best_report(env: &Env, sac: &Address, min_tier: Tier) -> Option<ReserveReport
             candidates.append(&reports_at(env, sac, tier));
         }
     }
-    pick_counting(env, candidates)
+    pick_counting(env, sac, candidates)
 }
 
 /// Drop index entries, and their reports, whose reporter no longer counts.
@@ -314,7 +357,7 @@ fn reclaim_slots(
             .storage()
             .persistent()
             .get::<_, ReserveReport>(&key)
-            .is_some_and(|report| counts(registry, &report));
+            .is_some_and(|report| counts(env, registry, sac, &report));
         if keep {
             kept.push_back(reporter);
         } else {
@@ -427,20 +470,8 @@ impl CoverageLedger {
     ) -> Tier {
         reporter.require_auth();
         let asset = require_listed(&env, &sac);
-        let tier = if reporter == asset.issuer {
+        let tier = if speaks_for_issuer(&env, &sac, &asset.issuer, &reporter) {
             Tier::IssuerSigned
-        } else if let Some(delegate) =
-            read_persistent::<Address>(&env, &DataKey::IssuerDelegate(sac.clone()))
-        {
-            if reporter == delegate {
-                Tier::IssuerSigned
-            } else {
-                match RegistryClient::new(&env, &registry(&env)).role_of(&reporter) {
-                    Some(Role::Auditor) => Tier::AuditorSigned,
-                    Some(Role::Transcriber) => Tier::Transcribed,
-                    _ => panic_with_error!(&env, LedgerError::NotReporter),
-                }
-            }
         } else {
             match RegistryClient::new(&env, &registry(&env)).role_of(&reporter) {
                 Some(Role::Auditor) => Tier::AuditorSigned,
@@ -543,7 +574,7 @@ impl CoverageLedger {
         let mut out = Vec::new(&env);
         for tier in Tier::ALL_DESC {
             for report in reports_at(&env, &sac, tier).iter() {
-                if counts(&registry, &report) {
+                if counts(&env, &registry, &sac, &report) {
                     out.push_back(report);
                 }
             }
@@ -584,6 +615,31 @@ impl CoverageLedger {
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         bump_instance(&env);
         AdminTransferred { new_admin }.publish(&env);
+    }
+
+    /// Appoint, replace or clear the account that posts `IssuerSigned`
+    /// reports for `sac` on the issuer's behalf. Only the issuer may call it.
+    pub fn set_issuer_delegate(env: Env, sac: Address, delegate: Option<Address>) {
+        let asset = require_listed(&env, &sac);
+        asset.issuer.require_auth();
+        let key = DataKey::IssuerDelegate(sac.clone());
+        match delegate {
+            Some(delegate) => {
+                write_persistent(&env, &key, &delegate);
+                bump_instance(&env);
+                IssuerDelegateSet { sac, delegate }.publish(&env);
+            }
+            None => {
+                env.storage().persistent().remove(&key);
+                bump_instance(&env);
+                IssuerDelegateCleared { sac }.publish(&env);
+            }
+        }
+    }
+
+    /// The account the issuer of `sac` appointed to post for it, if any.
+    pub fn get_issuer_delegate(env: Env, sac: Address) -> Option<Address> {
+        read_persistent(&env, &DataKey::IssuerDelegate(sac))
     }
 
     /// Propose a wasm hash for installation after the upgrade delay. A new
@@ -651,6 +707,11 @@ impl CoverageLedger {
             bump_instance(&env);
         }
         proposed
+    }
+
+    /// The contract version, raised on every behavioural change.
+    pub fn version(_env: Env) -> u32 {
+        VERSION
     }
 }
 
