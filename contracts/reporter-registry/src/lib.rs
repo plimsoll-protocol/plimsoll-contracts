@@ -19,6 +19,8 @@ enum DataKey {
     Admin,
     Reporter(Address),
     PendingUpgrade,
+    Delegate(Address),
+    DelegateOf(Address),
 }
 
 #[contracterror]
@@ -29,6 +31,7 @@ pub enum RegistryError {
     InvalidName = 2,
     UpgradeNotProposed = 3,
     UpgradeDelayNotElapsed = 4,
+    DelegateNotFound = 5,
 }
 
 #[contractevent]
@@ -45,6 +48,22 @@ pub struct ReporterSet {
 pub struct ReporterRevoked {
     #[topic]
     pub reporter: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegateSet {
+    #[topic]
+    pub reporter: Address,
+    pub delegate: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegateRevoked {
+    #[topic]
+    pub reporter: Address,
+    pub delegate: Address,
 }
 
 #[contractevent]
@@ -145,8 +164,81 @@ impl ReporterRegistry {
             panic_with_error!(&env, RegistryError::ReporterNotFound);
         }
         env.storage().persistent().remove(&key);
+        let del_key = DataKey::Delegate(reporter.clone());
+        if let Some(delegate) = env.storage().persistent().get::<_, Address>(&del_key) {
+            env.storage().persistent().remove(&del_key);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::DelegateOf(delegate));
+        }
         bump_instance(&env);
         ReporterRevoked { reporter }.publish(&env);
+    }
+
+    /// Authorize `delegate` to post reserve reports on `reporter`'s behalf.
+    pub fn set_delegate(env: Env, reporter: Address, delegate: Address) {
+        reporter.require_auth();
+        let reporter_key = DataKey::Reporter(reporter.clone());
+        if !env.storage().persistent().has(&reporter_key) {
+            panic_with_error!(&env, RegistryError::ReporterNotFound);
+        }
+        let del_key = DataKey::Delegate(reporter.clone());
+        if let Some(old_delegate) = env.storage().persistent().get::<_, Address>(&del_key) {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::DelegateOf(old_delegate));
+        }
+        let del_of_key = DataKey::DelegateOf(delegate.clone());
+        env.storage().persistent().set(&del_key, &delegate);
+        env.storage()
+            .persistent()
+            .extend_ttl(&del_key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        env.storage().persistent().set(&del_of_key, &reporter);
+        env.storage().persistent().extend_ttl(
+            &del_of_key,
+            PERSISTENT_THRESHOLD,
+            PERSISTENT_EXTEND_TO,
+        );
+        bump_instance(&env);
+        DelegateSet { reporter, delegate }.publish(&env);
+    }
+
+    /// Revoke `reporter`'s active delegate address.
+    pub fn revoke_delegate(env: Env, reporter: Address) {
+        reporter.require_auth();
+        let del_key = DataKey::Delegate(reporter.clone());
+        let delegate = match env.storage().persistent().get::<_, Address>(&del_key) {
+            Some(d) => d,
+            None => panic_with_error!(&env, RegistryError::DelegateNotFound),
+        };
+        env.storage().persistent().remove(&del_key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DelegateOf(delegate.clone()));
+        bump_instance(&env);
+        DelegateRevoked { reporter, delegate }.publish(&env);
+    }
+
+    pub fn get_delegate(env: Env, reporter: Address) -> Option<Address> {
+        let key = DataKey::Delegate(reporter);
+        let delegate = env.storage().persistent().get::<_, Address>(&key);
+        if delegate.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        }
+        delegate
+    }
+
+    pub fn delegator_of(env: Env, delegate: Address) -> Option<Address> {
+        let key = DataKey::DelegateOf(delegate);
+        let reporter = env.storage().persistent().get::<_, Address>(&key);
+        if reporter.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        }
+        reporter
     }
 
     pub fn role_of(env: Env, reporter: Address) -> Option<Role> {

@@ -1680,3 +1680,57 @@ fn a_new_proposal_restarts_the_clock() {
         Err(Ok(LedgerError::UpgradeDelayNotElapsed.into()))
     );
 }
+
+// ---- delegation & dispute count -------------------------------------------
+
+#[test]
+fn post_reserve_accepts_auth_from_delegate_and_rejects_after_revoke() {
+    let f = setup();
+    f.ledger.list_asset(&f.sac);
+    let seq = f.env.ledger().sequence();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(1_000 * UNIT), &seq, &hash(&f.env, 1));
+
+    let delegate = Address::generate(&f.env);
+    f.registry.set_delegate(&f.auditor, &delegate);
+
+    let tier = f.ledger.post_reserve(
+        &delegate,
+        &f.sac,
+        &(1_050 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    assert_eq!(tier, Tier::AuditorSigned);
+    let report = f
+        .ledger
+        .get_report(&f.sac, &Tier::AuditorSigned)
+        .expect("report recorded under delegating reporter");
+    assert_eq!(report.reporter, f.auditor);
+
+    f.registry.revoke_delegate(&f.auditor);
+    assert_eq!(
+        f.ledger.try_post_reserve(
+            &delegate,
+            &f.sac,
+            &(1_060 * UNIT),
+            &(T0 + 1),
+            &hash(&f.env, 3),
+            &uri(&f.env),
+        ),
+        Err(Ok(LedgerError::NotReporter.into()))
+    );
+}
+
+#[test]
+fn get_dispute_count_returns_zero_by_default_and_reads_open_disputes() {
+    let f = setup();
+    let asset = soroban_sdk::Bytes::from_slice(&f.env, b"USDC:GISSUER");
+    assert_eq!(f.ledger.get_dispute_count(&asset), 0);
+
+    f.env.as_contract(&f.ledger.address, || {
+        write_persistent(&f.env, &DataKey::DisputeCount(asset.clone()), &3u32);
+    });
+    assert_eq!(f.ledger.get_dispute_count(&asset), 3);
+}

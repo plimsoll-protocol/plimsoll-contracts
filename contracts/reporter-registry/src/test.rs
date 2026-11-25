@@ -210,3 +210,80 @@ fn transfer_admin_without_new_admin_auth_fails() {
     assert!(res.is_err());
     assert_eq!(client.admin(), admin);
 }
+
+// ---- delegation -----------------------------------------------------------
+
+#[test]
+fn set_and_revoke_delegate_emits_events_and_updates_lookup() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+
+    let reporter = Address::generate(&env);
+    let delegate = Address::generate(&env);
+    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "Acme"));
+
+    client.set_delegate(&reporter, &delegate);
+    let events = env.events().all().filter_by_contract(&id);
+    assert_eq!(events.events().len(), 1);
+    assert_eq!(client.get_delegate(&reporter), Some(delegate.clone()));
+    assert_eq!(client.delegator_of(&delegate), Some(reporter.clone()));
+
+    client.revoke_delegate(&reporter);
+    let events = env.events().all().filter_by_contract(&id);
+    assert_eq!(events.events().len(), 1);
+    assert_eq!(client.get_delegate(&reporter), None);
+    assert_eq!(client.delegator_of(&delegate), None);
+}
+
+#[test]
+fn set_delegate_requires_registered_reporter() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+
+    let stranger = Address::generate(&env);
+    let delegate = Address::generate(&env);
+    assert_eq!(
+        client.try_set_delegate(&stranger, &delegate),
+        Err(Ok(RegistryError::ReporterNotFound.into()))
+    );
+}
+
+#[test]
+fn revoke_delegate_without_active_delegate_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+
+    let reporter = Address::generate(&env);
+    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "Acme"));
+    assert_eq!(
+        client.try_revoke_delegate(&reporter),
+        Err(Ok(RegistryError::DelegateNotFound.into()))
+    );
+}
+
+#[test]
+fn revoking_reporter_clears_delegate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+
+    let reporter = Address::generate(&env);
+    let delegate = Address::generate(&env);
+    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "Acme"));
+    client.set_delegate(&reporter, &delegate);
+
+    client.revoke(&reporter);
+    assert_eq!(client.get_delegate(&reporter), None);
+    assert_eq!(client.delegator_of(&delegate), None);
+}

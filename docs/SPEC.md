@@ -185,6 +185,8 @@ Decides who may speak. Holds no money.
 | --- | --- | --- |
 | `Admin` | instance | `Address` |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
+| `Delegate(Address)` | persistent, TTL extended on write and read | `Address` (reporter -> delegate) |
+| `DelegateOf(Address)` | persistent, TTL extended on write and read | `Address` (delegate -> reporter) |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 
 **Functions**
@@ -195,6 +197,10 @@ Decides who may speak. Holds no money.
 | `admin()` | — | `Address` | — | — |
 | `set_reporter(reporter: Address, role: Role, name: String)` | admin | `()` | `InvalidName` (len 0 or > 64) | `reporter_set {reporter} role, name` |
 | `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `reporter_revoked {reporter}` |
+| `set_delegate(reporter: Address, delegate: Address)` | reporter | `()` | `ReporterNotFound` | `delegate_set {reporter} delegate` |
+| `revoke_delegate(reporter: Address)` | reporter | `()` | `DelegateNotFound` | `delegate_revoked {reporter} delegate` |
+| `get_delegate(reporter: Address)` | — | `Option<Address>` | — | — |
+| `delegator_of(delegate: Address)` | — | `Option<Address>` | — | — |
 | `role_of(reporter: Address)` | — | `Option<Role>` | — | — |
 | `get_reporter(reporter: Address)` | — | `Option<ReporterInfo>` | — | — |
 | `transfer_admin(new_admin: Address)` | admin and new_admin | `()` | — | `admin_transferred {new_admin}` |
@@ -203,7 +209,8 @@ Decides who may speak. Holds no money.
 | `cancel_upgrade()` | admin | `()` | `UpgradeNotProposed` | `upgrade_cancelled {wasm_hash}` |
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
 
-Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`.
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
+`UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`, `DelegateNotFound = 5`.
 Causes and remedies: [ERRORS.md](ERRORS.md#registryerror).
 
 ## coverage-ledger
@@ -269,6 +276,7 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `get_reports(sac)` | — | `Vec<ReserveReport>` (every stored report that counts: strongest tier first, then first-post order within a tier) | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | — | — |
+| `get_dispute_count(asset: Bytes)` | — | `u32` | — | — |
 | `registry()` / `admin()` | — | `Address` | — | — |
 | `transfer_admin(new_admin)` | admin and new_admin | `()` | — | `admin_transferred` |
 | `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
@@ -286,7 +294,10 @@ Rules:
 - `post_reserve` tier resolution: if `reporter == asset.issuer` the tier is
   `IssuerSigned` (the classic issuer account signs the Soroban auth entry).
   Otherwise the registry role decides: `Auditor → AuditorSigned`,
-  `Transcriber → Transcribed`. A `SupplyPoster` or unknown address gets
+  `Transcriber → Transcribed`. If `reporter` has no direct role,
+  `coverage-ledger` checks `registry.delegator_of(reporter)` so an active
+  delegate can post on the registered reporter's behalf (recording the report
+  under the delegating reporter). A `SupplyPoster` or unknown address gets
   `NotReporter`.
 - Supply snapshots must move forward: `ledger` strictly greater than the stored
   one and not greater than the current ledger. Reports per tier must move
@@ -385,7 +396,7 @@ covered. Withdrawals are never blocked.
 | --- | --- | --- | --- | --- |
 | `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
 | `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount` |
-| `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
+| `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount`, optional `reserve_warning balance, threshold_bps` |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
 | `can_deposit()` | — | `bool` | — | — |
@@ -396,6 +407,12 @@ answer. It is true exactly when a positive deposit would pass the coverage
 gate, so a front end can show whether the vault is open without simulating a
 deposit and reading a `NotCovered` failure. It says nothing about the
 depositor's balance or authorisation.
+
+`withdraw(to, amount)` also checks whether the vault's token balance against
+current on-chain supply crosses `min_bps` downward (`bps_before >= min_bps`
+and `bps_after < min_bps`); when it does, it emits `ReserveWarning { balance,
+threshold_bps }`. Repeated withdrawals while already below `min_bps` do not
+re-emit `ReserveWarning`.
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
 `InsufficientBalance = 3`. Causes and remedies, and the asset-contract errors a

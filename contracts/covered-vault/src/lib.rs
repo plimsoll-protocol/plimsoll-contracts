@@ -4,8 +4,8 @@
 #![no_std]
 
 use plimsoll_types::{
-    CoverageLedgerClient, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, PERSISTENT_EXTEND_TO,
-    PERSISTENT_THRESHOLD,
+    coverage_bps, CoverageLedgerClient, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
+    PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
@@ -52,6 +52,13 @@ pub struct Withdrawn {
     #[topic]
     pub to: Address,
     pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReserveWarning {
+    pub balance: i128,
+    pub threshold_bps: u32,
 }
 
 #[contract]
@@ -157,12 +164,25 @@ impl CoveredVault {
         let new_balance = current - amount;
         set_balance(&env, &to, new_balance);
         let cfg = config(&env);
-        token::TokenClient::new(&env, &cfg.asset).transfer(
-            &env.current_contract_address(),
-            &to,
-            &amount,
-        );
+        let vault_addr = env.current_contract_address();
+        let token_client = token::TokenClient::new(&env, &cfg.asset);
+        let before_vault_balance = token_client.balance(&vault_addr);
+        token_client.transfer(&vault_addr, &to, &amount);
+        let after_vault_balance = before_vault_balance - amount;
         Withdrawn { to, amount }.publish(&env);
+        let supply = CoverageLedgerClient::new(&env, &cfg.ledger)
+            .get_supply(&cfg.asset)
+            .map(|s| s.amount)
+            .unwrap_or(0);
+        if coverage_bps(before_vault_balance, supply) >= cfg.min_bps
+            && coverage_bps(after_vault_balance, supply) < cfg.min_bps
+        {
+            ReserveWarning {
+                balance: after_vault_balance,
+                threshold_bps: cfg.min_bps,
+            }
+            .publish(&env);
+        }
         new_balance
     }
 
