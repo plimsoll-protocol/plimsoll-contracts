@@ -182,11 +182,13 @@ pub fn coverage_bps(reserves: i128, supply: i128) -> u32 {
 #[contractclient(name = "RegistryClient")]
 pub trait RegistryInterface {
     fn role_of(env: Env, reporter: Address) -> Option<Role>;
+    fn delegator_of(env: Env, delegate: Address) -> Option<Address>;
 }
 
 /// The subset of coverage-ledger that consumers call.
 #[contractclient(name = "CoverageLedgerClient")]
 pub trait CoverageLedgerInterface {
+    fn get_supply(env: Env, sac: Address) -> Option<SupplySnapshot>;
     fn coverage(env: Env, sac: Address, min_tier: Tier) -> Option<Coverage>;
     fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool;
 }
