@@ -98,8 +98,9 @@ The first supply post on testnet was
 | data | `doc_uri` | `String` (at most 256 characters) |
 
 The tier is a topic, so a reader can subscribe to auditor-signed reports alone.
-The contract decides the tier from who signed: the asset's own issuer account,
-a registered auditor, or a registered transcriber. `as_of` is the date the
+The contract decides the tier from who signed: the asset's own issuer account
+or the delegate it appointed, a registered auditor, or a registered
+transcriber. `as_of` is the date the
 reserve figure describes, which is what freshness is judged on; the ledger
 timestamp when it was posted is stored on chain as `posted_at` but is not in the
 event.
@@ -108,6 +109,30 @@ Testnet, issuer-signed, 10,200,000 PUSD as of 2026-10-05:
 [`2b41a94e…`](https://stellar.expert/explorer/testnet/tx/2b41a94efe4cf881ab097ce9b8e0e14f4cf90f9cc4fe38958b9b9d18e7bb9c0c).
 Auditor-signed, 10,150,000 as of 2026-10-04:
 [`b434db8d…`](https://stellar.expert/explorer/testnet/tx/b434db8d240502176ef22f066a1d16ad3e9a4e9c35a283d0e2837bede3a811ce).
+
+### `issuer_delegate_set`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `issuer_delegate_set` | `Symbol` |
+| topic 1 | `sac` | `Address` (contract) |
+| data | `delegate` | `Address` |
+
+Raised by `set_issuer_delegate` with `Some(delegate)`, which the asset's
+issuer must authorise. From then on `delegate` posts at `IssuerSigned` for
+`sac`, and a previous delegate's issuer-signed figures stop counting. No
+testnet example yet.
+
+### `issuer_delegate_cleared`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `issuer_delegate_cleared` | `Symbol` |
+| topic 1 | `sac` | `Address` (contract) |
+
+Raised by `set_issuer_delegate` with `None`. The cleared delegate can no longer
+post for `sac`, and its issuer-signed figures stop counting. No testnet example
+yet.
 
 ### `admin_transferred`
 
