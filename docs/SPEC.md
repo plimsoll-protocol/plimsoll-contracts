@@ -384,7 +384,7 @@ covered. Withdrawals are never blocked.
 | Function | Auth | Returns | Errors | Event |
 | --- | --- | --- | --- | --- |
 | `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
-| `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount` |
+| `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount`, `coverage_dropped {asset}` |
 | `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
@@ -396,6 +396,23 @@ answer. It is true exactly when a positive deposit would pass the coverage
 gate, so a front end can show whether the vault is open without simulating a
 deposit and reading a `NotCovered` failure. It says nothing about the
 depositor's balance or authorisation.
+
+`deposit` publishes `deposited` once the balance is written, then asks
+`is_covered` again with the same config and publishes `coverage_dropped
+{asset}` if that post-deposit answer is `false`. The second read is fresh
+rather than the answer the gate used, so the event reports the coverage of the
+vault's post-deposit state and a keeper watching for it can restate reserves.
+A deposit writes no supply snapshot and no report, so on a ledger that behaves
+as this document specifies the two reads agree and the event is not published;
+it fires when the ledger's answer changes between the gate and the post-deposit
+read — a later ledger version whose `is_covered` depends on live state, for
+instance — which is exactly the case a keeper would otherwise miss. It costs
+one cross-contract call per successful deposit.
+
+A refused deposit publishes nothing at all: the `NotCovered` error rolls the
+transaction back, and a rolled-back transaction keeps no events. A keeper
+therefore cannot learn about a coverage drop from a refused deposit, only from
+the `coverage_dropped` event on one that succeeds, or from `can_deposit()`.
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
 `InsufficientBalance = 3`. Causes and remedies, and the asset-contract errors a
@@ -415,6 +432,7 @@ vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 | Dashboard shows ratio and freshness | `coverage-ledger.coverage`, `get_supply`, `get_reports` |
 | Lending pool refuses an under-backed asset | `coverage-ledger.is_covered` (see `covered-vault`) |
 | Front end shows whether the vault is taking deposits | `covered-vault.can_deposit` |
+| Keeper restates reserves after the vault reports a coverage drop | `covered-vault.deposit` (emits `coverage_dropped`) |
 
 ## Out of scope for v0.1
 
