@@ -30,6 +30,7 @@ contractmeta!(
 enum DataKey {
     Admin,
     Reporter(Address),
+    ReporterIndex,
     PendingUpgrade,
 }
 
@@ -108,6 +109,45 @@ fn pending(env: &Env) -> Option<PendingUpgrade> {
     env.storage().instance().get(&DataKey::PendingUpgrade)
 }
 
+fn read_index(env: &Env) -> Vec<Address> {
+    let key = DataKey::ReporterIndex;
+    match env.storage().persistent().get::<_, Vec<Address>>(&key) {
+        Some(index) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+            index
+        }
+        None => Vec::new(env),
+    }
+}
+
+fn write_index(env: &Env, index: &Vec<Address>) {
+    let key = DataKey::ReporterIndex;
+    env.storage().persistent().set(&key, index);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+}
+
+/// Append `reporter` to the index unless it is already there.
+fn index_add(env: &Env, reporter: &Address) {
+    let mut index = read_index(env);
+    if !index.contains(reporter) {
+        index.push_back(reporter.clone());
+        write_index(env, &index);
+    }
+}
+
+/// Remove `reporter` from the index, keeping the others in order.
+fn index_remove(env: &Env, reporter: &Address) {
+    let mut index = read_index(env);
+    if let Some(position) = index.first_index_of(reporter) {
+        index.remove(position);
+        write_index(env, &index);
+    }
+}
+
 #[contractimpl]
 impl ReporterRegistry {
     pub fn __constructor(env: Env, admin: Address) {
@@ -126,7 +166,6 @@ impl ReporterRegistry {
             panic_with_error!(&env, RegistryError::InvalidName);
         }
         let key = DataKey::Reporter(reporter.clone());
-        let is_new = !env.storage().persistent().has(&key);
         let added_at = env
             .storage()
             .persistent()
@@ -142,9 +181,9 @@ impl ReporterRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
-        if is_new {
-            add_reporter_to_index(&env, &reporter);
-        }
+        // Indexing on every call, not only for new reporters, lets the admin
+        // add reporters registered before the index existed by re-setting them.
+        index_add(&env, &reporter);
         bump_instance(&env);
         ReporterSet {
             reporter,
@@ -161,7 +200,7 @@ impl ReporterRegistry {
             panic_with_error!(&env, RegistryError::ReporterNotFound);
         }
         env.storage().persistent().remove(&key);
-        remove_reporter_from_index(&env, &reporter);
+        index_remove(&env, &reporter);
         bump_instance(&env);
         ReporterRevoked { reporter }.publish(&env);
     }
@@ -181,26 +220,23 @@ impl ReporterRegistry {
         info
     }
 
-    /// Total number of registered reporters.
+    /// Number of reporters in the index.
     pub fn reporter_count(env: Env) -> u32 {
-        ensure_index_backfilled(&env);
         read_index(&env).len()
     }
 
-    /// Paginated list of reporter addresses. `limit` is capped at 100.
+    /// Up to `min(limit, 100)` indexed reporters from position `start`, in
+    /// first-indexed order. Empty when `start` is past the end.
     pub fn reporters(env: Env, start: u32, limit: u32) -> Vec<Address> {
-        ensure_index_backfilled(&env);
         let index = read_index(&env);
         let len = index.len();
         if start >= len {
             return Vec::new(&env);
         }
-        let effective_limit = limit.min(MAX_REPORTERS_PAGE_LIMIT).min(len - start);
-        let mut out = Vec::new(&env);
-        for i in start..start + effective_limit {
-            out.push_back(index.get(i).unwrap());
-        }
-        out
+        let end = start
+            .saturating_add(limit.min(MAX_REPORTERS_PAGE_LIMIT))
+            .min(len);
+        index.slice(start..end)
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) {
@@ -276,6 +312,11 @@ impl ReporterRegistry {
             bump_instance(&env);
         }
         proposed
+    }
+
+    /// The contract version, raised on every behavioural change.
+    pub fn version(_env: Env) -> u32 {
+        VERSION
     }
 }
 

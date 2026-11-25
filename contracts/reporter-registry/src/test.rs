@@ -210,3 +210,134 @@ fn transfer_admin_without_new_admin_auth_fails() {
     assert!(res.is_err());
     assert_eq!(client.admin(), admin);
 }
+
+// ---- reporter index -------------------------------------------------------
+
+fn add(env: &Env, client: &ReporterRegistryClient, role: Role) -> Address {
+    let who = Address::generate(env);
+    client.set_reporter(&who, &role, &String::from_str(env, "reporter"));
+    who
+}
+
+#[test]
+fn index_is_empty_initially() {
+    let (_env, _admin, client) = setup();
+    assert_eq!(client.reporter_count(), 0);
+    assert_eq!(client.reporters(&0, &10).len(), 0);
+}
+
+#[test]
+fn reporters_lists_in_first_indexed_order() {
+    let (env, _admin, client) = setup();
+    let a = add(&env, &client, Role::Auditor);
+    let b = add(&env, &client, Role::Transcriber);
+    let c = add(&env, &client, Role::SupplyPoster);
+    assert_eq!(client.reporter_count(), 3);
+    assert_eq!(client.reporters(&0, &10), Vec::from_array(&env, [a, b, c]));
+}
+
+#[test]
+fn reporters_pages_through_the_index() {
+    let (env, _admin, client) = setup();
+    let all: std::vec::Vec<Address> = (0..5).map(|_| add(&env, &client, Role::Auditor)).collect();
+    assert_eq!(
+        client.reporters(&0, &2),
+        Vec::from_array(&env, [all[0].clone(), all[1].clone()])
+    );
+    assert_eq!(
+        client.reporters(&2, &2),
+        Vec::from_array(&env, [all[2].clone(), all[3].clone()])
+    );
+    assert_eq!(
+        client.reporters(&4, &2),
+        Vec::from_array(&env, [all[4].clone()])
+    );
+    assert_eq!(client.reporters(&5, &2).len(), 0);
+    assert_eq!(client.reporters(&u32::MAX, &u32::MAX).len(), 0);
+    assert_eq!(client.reporters(&0, &0).len(), 0);
+}
+
+#[test]
+fn reporters_caps_a_page_at_100() {
+    let (env, _admin, client) = setup();
+    env.cost_estimate().budget().reset_unlimited();
+    for _ in 0..101 {
+        add(&env, &client, Role::Auditor);
+    }
+    assert_eq!(client.reporter_count(), 101);
+    assert_eq!(client.reporters(&0, &u32::MAX).len(), 100);
+    assert_eq!(client.reporters(&100, &u32::MAX).len(), 1);
+}
+
+#[test]
+fn changing_role_keeps_the_index_position() {
+    let (env, _admin, client) = setup();
+    let a = add(&env, &client, Role::Transcriber);
+    let b = add(&env, &client, Role::Auditor);
+    client.set_reporter(&a, &Role::Auditor, &String::from_str(&env, "promoted"));
+    assert_eq!(client.reporter_count(), 2);
+    assert_eq!(client.reporters(&0, &10), Vec::from_array(&env, [a, b]));
+}
+
+#[test]
+fn revoke_removes_from_the_index_and_keeps_order() {
+    let (env, _admin, client) = setup();
+    let a = add(&env, &client, Role::Auditor);
+    let b = add(&env, &client, Role::Transcriber);
+    let c = add(&env, &client, Role::SupplyPoster);
+    client.revoke(&a);
+    assert_eq!(client.reporter_count(), 2);
+    assert_eq!(client.reporters(&0, &10), Vec::from_array(&env, [b, c]));
+}
+
+#[test]
+fn re_adding_after_revoke_appends_to_the_end() {
+    let (env, _admin, client) = setup();
+    let a = add(&env, &client, Role::Auditor);
+    let b = add(&env, &client, Role::Auditor);
+    client.revoke(&a);
+    client.set_reporter(&a, &Role::Transcriber, &String::from_str(&env, "back"));
+    assert_eq!(client.reporters(&0, &10), Vec::from_array(&env, [b, a]));
+}
+
+#[test]
+fn revoke_unknown_leaves_the_index_alone() {
+    let (env, _admin, client) = setup();
+    let a = add(&env, &client, Role::Auditor);
+    let res = client.try_revoke(&Address::generate(&env));
+    assert_eq!(res, Err(Ok(RegistryError::ReporterNotFound.into())));
+    assert_eq!(client.reporters(&0, &10), Vec::from_array(&env, [a]));
+}
+
+#[test]
+fn reporters_from_before_the_index_join_it_when_re_set() {
+    let (env, _admin, client) = setup();
+    let old = add(&env, &client, Role::Auditor);
+    // A deployment upgraded from a version without the index has the
+    // reporter's entry but no index.
+    env.as_contract(&client.address, || {
+        env.storage().persistent().remove(&DataKey::ReporterIndex);
+    });
+    assert_eq!(client.reporter_count(), 0);
+    let new = add(&env, &client, Role::Transcriber);
+    assert_eq!(
+        client.reporters(&0, &10),
+        Vec::from_array(&env, [new.clone()])
+    );
+
+    client.set_reporter(&old, &Role::Auditor, &String::from_str(&env, "reporter"));
+    assert_eq!(
+        client.reporters(&0, &10),
+        Vec::from_array(&env, [new, old.clone()])
+    );
+    assert_eq!(client.role_of(&old), Some(Role::Auditor));
+}
+
+// ---- version --------------------------------------------------------------
+
+#[test]
+fn version_is_the_constant() {
+    let (_env, _admin, client) = setup();
+    assert_eq!(client.version(), VERSION);
+    assert_eq!(client.version(), 1);
+}
