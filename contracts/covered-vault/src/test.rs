@@ -263,3 +263,55 @@ fn can_deposit_uses_the_stored_min_tier() {
         Err(Ok(VaultError::NotCovered.into()))
     );
 }
+
+// ---- ReserveWarning event snapshot ----------------------------------------
+
+#[test]
+fn withdraw_emits_reserve_warning_only_when_crossing_threshold_downward() {
+    use soroban_sdk::{
+        testutils::Events as _, xdr::ContractEventBody, Map, Symbol, TryFromVal, Val,
+    };
+
+    let f = setup();
+    // Supply is 1_000 units, vault threshold is 10_000 bps (100%).
+    // Mint and deposit 1_200 units so vault starts at 120% (12_000 bps).
+    StellarAssetClient::new(&f.env, &f.sac).mint(&f.user, &(500 * UNIT));
+    report(&f, 1_000 * UNIT, 1_200 * UNIT);
+    f.vault.deposit(&f.user, &(1_200 * UNIT));
+
+    // Withdraw 100 units -> vault holds 1_100 units (11_000 bps >= 10_000 bps): no warning.
+    f.vault.withdraw(&f.user, &(100 * UNIT));
+    let events = f.env.events().all().filter_by_contract(&f.vault.address);
+    assert_eq!(events.events().len(), 1);
+
+    // Withdraw 200 units -> vault drops to 900 units (9_000 bps < 10_000 bps): crosses downward!
+    f.vault.withdraw(&f.user, &(200 * UNIT));
+    let events = f.env.events().all().filter_by_contract(&f.vault.address);
+    assert_eq!(events.events().len(), 2);
+    let warning = events.events().last().unwrap();
+    let ContractEventBody::V0(body) = &warning.body;
+    assert_eq!(
+        Symbol::try_from_val(&f.env, body.topics.first().unwrap()).unwrap(),
+        Symbol::new(&f.env, "reserve_warning")
+    );
+    let data =
+        Map::<Symbol, Val>::try_from_val(&f.env, &Val::try_from_val(&f.env, &body.data).unwrap())
+            .unwrap();
+    assert_eq!(
+        i128::try_from_val(&f.env, &data.get(Symbol::new(&f.env, "balance")).unwrap()).unwrap(),
+        900 * UNIT
+    );
+    assert_eq!(
+        u32::try_from_val(
+            &f.env,
+            &data.get(Symbol::new(&f.env, "threshold_bps")).unwrap()
+        )
+        .unwrap(),
+        10_000
+    );
+
+    // Withdraw another 100 units while already below threshold -> no second warning.
+    f.vault.withdraw(&f.user, &(100 * UNIT));
+    let events = f.env.events().all().filter_by_contract(&f.vault.address);
+    assert_eq!(events.events().len(), 1);
+}
