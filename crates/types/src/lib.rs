@@ -36,15 +36,6 @@ pub const MIN_PLAUSIBLE_BPS: u32 = 1;
 /// says more about the reporter than the reserves.
 pub const MAX_PLAUSIBLE_BPS: u32 = 1_000_000;
 
-/// Pending upgrade information for time-locked upgrades.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingUpgrade {
-    pub wasm_hash: BytesN<32>,
-    pub proposed_at_ledger: u32,
-    pub proposed_by: Address,
-}
-
 /// What a registered address is allowed to say.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
