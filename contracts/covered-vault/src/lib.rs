@@ -188,6 +188,11 @@ impl CoveredVault {
     pub fn can_deposit(env: Env) -> bool {
         is_open(&env, &config(&env))
     }
+
+    /// The contract version, raised on every behavioural change.
+    pub fn version(_env: Env) -> u32 {
+        VERSION
+    }
 }
 
 #[cfg(test)]

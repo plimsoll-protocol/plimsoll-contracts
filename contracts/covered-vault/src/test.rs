@@ -263,3 +263,12 @@ fn can_deposit_uses_the_stored_min_tier() {
         Err(Ok(VaultError::NotCovered.into()))
     );
 }
+
+// ---- version --------------------------------------------------------------
+
+#[test]
+fn version_is_the_constant() {
+    let f = setup();
+    assert_eq!(f.vault.version(), VERSION);
+    assert_eq!(f.vault.version(), 1);
+}
