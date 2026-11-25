@@ -10,7 +10,7 @@ use plimsoll_types::{
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
-    Address, BytesN, ContractExecutable, Env, Executable, String, Vec,
+    Address, Bytes, BytesN, ContractExecutable, Env, Executable, String, Vec,
 };
 
 const MAX_URI_LEN: u32 = 256;
@@ -37,6 +37,8 @@ enum DataKey {
     ReportBy(Address, Tier, Address),
     /// Reporters with a `ReportBy` entry at (sac, tier), in first-post order.
     Reporters(Address, Tier),
+    /// Number of currently open (unresolved) disputes for an asset.
+    DisputeCount(Bytes),
 }
 
 #[contracterror]
@@ -427,13 +429,21 @@ impl CoverageLedger {
     ) -> Tier {
         reporter.require_auth();
         let asset = require_listed(&env, &sac);
-        let tier = if reporter == asset.issuer {
-            Tier::IssuerSigned
+        let (reporter, tier) = if reporter == asset.issuer {
+            (reporter, Tier::IssuerSigned)
         } else {
-            match RegistryClient::new(&env, &registry(&env)).role_of(&reporter) {
-                Some(Role::Auditor) => Tier::AuditorSigned,
-                Some(Role::Transcriber) => Tier::Transcribed,
-                _ => panic_with_error!(&env, LedgerError::NotReporter),
+            let reg = RegistryClient::new(&env, &registry(&env));
+            match reg.role_of(&reporter) {
+                Some(Role::Auditor) => (reporter, Tier::AuditorSigned),
+                Some(Role::Transcriber) => (reporter, Tier::Transcribed),
+                _ => match reg.delegator_of(&reporter) {
+                    Some(delegator) => match reg.role_of(&delegator) {
+                        Some(Role::Auditor) => (delegator, Tier::AuditorSigned),
+                        Some(Role::Transcriber) => (delegator, Tier::Transcribed),
+                        _ => panic_with_error!(&env, LedgerError::NotReporter),
+                    },
+                    None => panic_with_error!(&env, LedgerError::NotReporter),
+                },
             }
         };
         if amount < 0 {
@@ -564,6 +574,11 @@ impl CoverageLedger {
         let now = env.ledger().timestamp();
         let fresh = |t: u64| now.saturating_sub(t) <= max_age;
         fresh(coverage.supply_timestamp) && fresh(coverage.report_as_of) && coverage.bps >= min_bps
+    }
+
+    /// Number of currently open (not yet resolved) disputes for `asset`.
+    pub fn get_dispute_count(env: Env, asset: Bytes) -> u32 {
+        read_persistent::<u32>(&env, &DataKey::DisputeCount(asset)).unwrap_or(0)
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) {
