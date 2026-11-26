@@ -1,10 +1,10 @@
 {
-  "_comment": "Byte ceiling per contract wasm, checked by scripts/check-wasm-sizes.sh after `stellar contract build`. Each was set at the size on 2026-10-30 plus about 20%, rounded up. Raise a budget deliberately, in the commit that needs the room, so growth is argued for rather than absorbed. coverage_ledger raised to 21700 on 2026-11-20 (18017 bytes + 20%) for per-reporter reports and the revoked-reporter check (#26, #27). reporter_registry raised to 7500 on 2026-11-21 (6230 bytes + 20%) for time-locked upgrades (#30). The upgrade_fixture_* budgets equal their real contract's, since each fixture compiles that contract's lib.rs and is the same size (#30). coverage_ledger raised to 26500 on 2026-11-25 for asset aliasing (#80). reporter_registry and upgrade_fixture_registry raised to 9800 on 2026-11-25 (8976 bytes measured + ~9% headroom) for optional reporter metadata fields (#179). coverage_ledger and upgrade_fixture_ledger raised to 32000 on 2026-11-26 (26990 bytes measured + ~18% headroom) for supply-age and retract features (#180).",
+  "_comment": "Byte ceiling per contract wasm, checked by scripts/check-wasm-sizes.sh after `stellar contract build`. Each was set at the size on 2026-10-30 plus about 20%, rounded up. Raise a budget deliberately, in the commit that needs the room, so growth is argued for rather than absorbed. coverage_ledger raised to 21700 on 2026-11-20 (18017 bytes + 20%) for per-reporter reports and the revoked-reporter check (#26, #27). reporter_registry raised to 7500 on 2026-11-21 (6230 bytes + 20%) for time-locked upgrades (#30). The upgrade_fixture_* budgets equal their real contract's, since each fixture compiles that contract's lib.rs and is the same size (#30). coverage_ledger raised to 26500 on 2026-11-25 for asset aliasing (#80). reporter_registry and upgrade_fixture_registry raised to 9800 on 2026-11-25 (8976 bytes measured + ~9% headroom) for optional reporter metadata fields (#179). coverage_ledger and upgrade_fixture_ledger raised to 32000 on 2026-11-26 (26990 bytes measured + ~18% headroom) for supply-age and retract features (#180). reporter_registry and upgrade_fixture_registry raised to 12000 on 2026-11-26 (10851 bytes measured + ~10.6% headroom) for reporter stake tracking and StakeChanged event (#145).",
   "budgets": {
     "coverage_ledger": 32000,
     "covered_vault": 5800,
-    "reporter_registry": 9800,
+    "reporter_registry": 12000,
     "upgrade_fixture_ledger": 32000,
-    "upgrade_fixture_registry": 9800
+    "upgrade_fixture_registry": 12000
   }
 }
