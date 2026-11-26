@@ -21,6 +21,7 @@ enum DataKey {
     Admin,
     Reporter(Address),
     Metadata(Address),
+    Stake(Address),
     PendingUpgrade,
 }
 
@@ -33,6 +34,8 @@ pub enum RegistryError {
     UpgradeNotProposed = 3,
     UpgradeDelayNotElapsed = 4,
     InvalidMetadata = 5,
+    InvalidStakeAmount = 6,
+    InsufficientStake = 7,
 }
 
 #[contractevent]
@@ -59,6 +62,15 @@ pub struct ReporterMetadataUpdated {
 pub struct ReporterRevoked {
     #[topic]
     pub reporter: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakeChanged {
+    #[topic]
+    pub reporter: Address,
+    pub old_stake: i128,
+    pub new_stake: i128,
 }
 
 #[contractevent]
@@ -110,6 +122,46 @@ fn pending(env: &Env) -> Option<PendingUpgrade> {
     env.storage().instance().get(&DataKey::PendingUpgrade)
 }
 
+fn require_registered(env: &Env, reporter: &Address) {
+    if !env
+        .storage()
+        .persistent()
+        .has(&DataKey::Reporter(reporter.clone()))
+    {
+        panic_with_error!(env, RegistryError::ReporterNotFound);
+    }
+}
+
+fn read_stake(env: &Env, reporter: &Address) -> i128 {
+    let key = DataKey::Stake(reporter.clone());
+    let stake = env.storage().persistent().get::<_, i128>(&key);
+    if stake.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+    }
+    stake.unwrap_or(0)
+}
+
+fn write_stake(env: &Env, reporter: &Address, old_stake: i128, new_stake: i128) {
+    let key = DataKey::Stake(reporter.clone());
+    if new_stake == 0 {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &new_stake);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+    }
+    bump_instance(env);
+    StakeChanged {
+        reporter: reporter.clone(),
+        old_stake,
+        new_stake,
+    }
+    .publish(env);
+}
+
 #[contractimpl]
 impl ReporterRegistry {
     pub fn __constructor(env: Env, admin: Address) {
@@ -154,16 +206,63 @@ impl ReporterRegistry {
 
     pub fn revoke(env: Env, reporter: Address) {
         admin(&env).require_auth();
-        let key = DataKey::Reporter(reporter.clone());
-        if !env.storage().persistent().has(&key) {
-            panic_with_error!(&env, RegistryError::ReporterNotFound);
-        }
-        env.storage().persistent().remove(&key);
+        require_registered(&env, &reporter);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Reporter(reporter.clone()));
         env.storage()
             .persistent()
             .remove(&DataKey::Metadata(reporter.clone()));
+        let stake_key = DataKey::Stake(reporter.clone());
+        if let Some(old_stake) = env.storage().persistent().get::<_, i128>(&stake_key) {
+            env.storage().persistent().remove(&stake_key);
+            if old_stake > 0 {
+                StakeChanged {
+                    reporter: reporter.clone(),
+                    old_stake,
+                    new_stake: 0,
+                }
+                .publish(&env);
+            }
+        }
         bump_instance(&env);
         ReporterRevoked { reporter }.publish(&env);
+    }
+
+    /// Top up a registered reporter's tracked stake by `amount`.
+    pub fn top_up_stake(env: Env, reporter: Address, amount: i128) -> i128 {
+        admin(&env).require_auth();
+        require_registered(&env, &reporter);
+        if amount <= 0 {
+            panic_with_error!(&env, RegistryError::InvalidStakeAmount);
+        }
+        let old_stake = read_stake(&env, &reporter);
+        let new_stake = old_stake
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::InvalidStakeAmount));
+        write_stake(&env, &reporter, old_stake, new_stake);
+        new_stake
+    }
+
+    /// Reduce a registered reporter's tracked stake by `amount`.
+    pub fn reduce_stake(env: Env, reporter: Address, amount: i128) -> i128 {
+        admin(&env).require_auth();
+        require_registered(&env, &reporter);
+        if amount <= 0 {
+            panic_with_error!(&env, RegistryError::InvalidStakeAmount);
+        }
+        let old_stake = read_stake(&env, &reporter);
+        if amount > old_stake {
+            panic_with_error!(&env, RegistryError::InsufficientStake);
+        }
+        let new_stake = old_stake - amount;
+        write_stake(&env, &reporter, old_stake, new_stake);
+        new_stake
+    }
+
+    /// A reporter's tracked stake, or `0` when none is recorded.
+    pub fn stake_of(env: Env, reporter: Address) -> i128 {
+        read_stake(&env, &reporter)
     }
 
     /// Replace a registered reporter's optional public metadata. The reporter
@@ -177,13 +276,7 @@ impl ReporterRegistry {
         contact_hash: Option<Bytes>,
     ) {
         reporter.require_auth();
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::Reporter(reporter.clone()))
-        {
-            panic_with_error!(&env, RegistryError::ReporterNotFound);
-        }
+        require_registered(&env, &reporter);
         if let Some(uri) = website_uri.as_ref() {
             if uri.is_empty() || uri.len() > MAX_WEBSITE_URI_LEN {
                 panic_with_error!(&env, RegistryError::InvalidMetadata);

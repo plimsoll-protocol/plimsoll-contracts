@@ -35,10 +35,13 @@ who must sign; reads need no signature.
 | `admin()` | anyone (read) | — |
 | `get_reporter(reporter)` | anyone (read) | — |
 | `get_reporter_metadata(reporter)` | anyone (read) | — |
+| `stake_of(reporter)` | anyone (read) | — |
 | `role_of(reporter)` | anyone (read) | — |
 | `pending_upgrade()` | anyone (read) | — |
 | `set_reporter(reporter, role, name)` | the registry admin | Host auth failure |
 | `revoke(reporter)` | the registry admin | Host auth failure |
+| `top_up_stake(reporter, amount)` | the registry admin | Host auth failure; `ReporterNotFound` / `InvalidStakeAmount` after a valid signature |
+| `reduce_stake(reporter, amount)` | the registry admin | Host auth failure; `ReporterNotFound` / `InvalidStakeAmount` / `InsufficientStake` after a valid signature |
 | `update_reporter_metadata(reporter, name, website_uri, contact_hash)` | `reporter` itself, and it must be registered | Host auth failure; `ReporterNotFound` if the signature is valid but the address is not registered |
 | `transfer_admin(new_admin)` | the current admin **and** `new_admin` | Host auth failure unless both sign |
 | `propose_upgrade(wasm_hash)` | the registry admin | Host auth failure |
