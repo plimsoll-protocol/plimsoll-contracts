@@ -40,6 +40,28 @@ jobs:
       - name: End-to-end scenario against the built wasm
         run: cargo test -p plimsoll-e2e
 
+  toolchain-matrix:
+    name: toolchain (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.toolchain == 'beta' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta]
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ${{ matrix.toolchain }} toolchain
+        run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.toolchain }}
+      - name: Build
+        run: cargo build
+      - name: Test
+        run: cargo test
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest
