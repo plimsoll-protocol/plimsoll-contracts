@@ -127,8 +127,9 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 
 | Entry | Extended by |
 | --- | --- |
-| `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `revoke` |
-| `Reporter(Address)` (persistent) | `set_reporter` (write), `get_reporter` / `role_of` (read) |
+| `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `register_reporter`, `confirm_registration`, `cleanup_expired_registration`, `revoke` |
+| `Reporter(Address)` (persistent) | `set_reporter` / `confirm_registration` (write), `get_reporter` / `role_of` (read) |
+| `PendingReporter(Address)` (persistent) | `register_reporter` (write), `get_pending_reporter` (read), `confirm_registration` / `cleanup_expired_registration` / `revoke` (remove) |
 | `Metadata(Address)` (persistent) | `update_reporter_metadata` (write), `get_reporter_metadata` (read) |
 
 **coverage-ledger**
@@ -146,7 +147,7 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 
 | Entry | Extended by |
 | --- | --- |
-| `Config` (instance) | `__constructor`, `deposit`, `withdraw` |
+| `Config`, `Admin`, `PendingAdmin` (instance) | `__constructor`, `deposit`, `withdraw`, `propose_admin`, `accept_admin` |
 | `Balance(Address)` (persistent) | `deposit` (write), `withdraw` (write), `balance` (read) |
 
 ### Archival behaviour
@@ -192,6 +193,7 @@ Decides who may speak. Holds no money.
 | --- | --- | --- |
 | `Admin` | instance | `Address` |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
+| `PendingReporter(Address)` | persistent, TTL extended on write and read | `PendingReporter` |
 | `Metadata(Address)` | persistent, TTL extended on write and read | `ReporterMetadata` |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 
@@ -202,6 +204,10 @@ Decides who may speak. Holds no money.
 | `__constructor(admin: Address)` | — | — | — | — |
 | `admin()` | — | `Address` | — | — |
 | `set_reporter(reporter: Address, role: Role, name: String)` | admin | `()` | `InvalidName` (len 0 or > 64) | `reporter_set {reporter} role, name` |
+| `register_reporter(reporter: Address, role: Role, name: String, confirm_window_ledgers: u32)` | admin | `()` | `InvalidName` (len 0 or > 64), `InvalidConfirmWindow` (0) | `reporter_registration_proposed {reporter} role, name, expires_at_ledger` |
+| `confirm_registration(reporter: Address)` | reporter | `()` | `PendingRegistrationNotFound`, `RegistrationExpired` | `reporter_registration_confirmed {reporter} role, name` |
+| `cleanup_expired_registration(reporter: Address)` | — | `bool` | — | `reporter_registration_expired {reporter}` (when expired) |
+| `get_pending_reporter(reporter: Address)` | — | `Option<PendingReporter>` | — | — |
 | `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `reporter_revoked {reporter}` |
 | `update_reporter_metadata(reporter: Address, name: Option<Symbol>, website_uri: Option<String>, contact_hash: Option<Bytes>)` | reporter | `()` | `ReporterNotFound`, `InvalidMetadata` (URI empty or > 256 bytes; contact hash > 64 bytes) | `reporter_metadata_updated {reporter} name, website_uri, contact_hash` |
 | `get_reporter_metadata(reporter: Address)` | — | `Option<ReporterMetadata>` | — | — |
@@ -214,7 +220,18 @@ Decides who may speak. Holds no money.
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
-`InvalidMetadata = 5`.
+`UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`, `InvalidMetadata = 5`,
+`InvalidConfirmWindow = 6`, `PendingRegistrationNotFound = 7`,
+`RegistrationExpired = 8`.
+
+Two-factor reporter activation splits onboarding into `register_reporter`
+(admin creates a `PendingReporter` entry expiring at `current_ledger +
+confirm_window_ledgers`) and `confirm_registration` (the reporter themselves
+accepts before expiry, moving the entry to `Reporter(Address)`). While pending,
+`role_of` and `get_reporter` return `None`, so pending entries cannot be used
+for `post_reserve` or `post_supply`. Expired pending entries are cleaned up by
+`cleanup_expired_registration`, which removes the entry and emits
+`reporter_registration_expired`.
 
 Reporter metadata is optional and lives under its own `Metadata(Address)` key,
 not in `ReporterInfo`. A reporter registered before metadata existed therefore
@@ -506,12 +523,16 @@ covered. Withdrawals are never blocked.
 
 | Function | Auth | Returns | Errors | Event |
 | --- | --- | --- | --- | --- |
-| `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
+| `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier, admin: Address)` | — | — | — | — |
 | `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount`, `coverage_dropped {asset}` |
 | `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
 | `can_deposit()` | — | `bool` | — | — |
+| `admin()` | — | `Address` | — | — |
+| `pending_admin()` | — | `Option<Address>` | — | — |
+| `propose_admin(new_admin: Address)` | admin | `()` | — | `vault_admin_proposed {new_admin}` |
+| `accept_admin()` | pending admin | `()` | `NoPendingAdmin` | `vault_admin_transferred {old_admin, new_admin}` |
 
 `can_deposit()` makes the same `is_covered(asset, min_bps, max_age,
 min_tier)` call `deposit` makes, with the stored config, and returns its
@@ -538,7 +559,7 @@ therefore cannot learn about a coverage drop from a refused deposit, only from
 the `coverage_dropped` event on one that succeeds, or from `can_deposit()`.
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
-`InsufficientBalance = 3`. Causes and remedies, and the asset-contract errors a
+`InsufficientBalance = 3`, `NoPendingAdmin = 4`. Causes and remedies, and the asset-contract errors a
 vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 
 ## User flow → function map
