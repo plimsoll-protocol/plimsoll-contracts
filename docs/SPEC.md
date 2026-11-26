@@ -139,8 +139,9 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 | `Asset(Address)` (persistent) | `list_asset` (write), `get_asset` (read) |
 | `Supply(Address)` (persistent) | `post_supply` (write), `get_supply`, `coverage`, `is_covered`, `coverage_status` (read) |
 | `NativeSupply(Address)` (persistent) | `enable_native_supply` (write), `native_supply_token`, `coverage`, `is_covered`, `coverage_status` (read) |
-| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `coverage`, `is_covered`, `coverage_status` (read) |
-| `Assets` (persistent) | `list_asset` (write), `asset_reporter_pairs` (read) |
+| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `last_updated`, `get_all_latest_reports`, `coverage`, `is_covered`, `coverage_status` (read) |
+| `Assets` (persistent) | `list_asset` (write), `asset_reporter_pairs`, `get_all_latest_reports` (read) |
+| `History(Address)` (persistent) | `post_supply`, `post_reserve` (write), `historical_coverage_bps` (read) |
 
 **covered-vault**
 
@@ -244,6 +245,7 @@ Records what was said, and answers coverage questions.
 | `Assets` | persistent | `Vec<Address>`: every listed asset, in listing order. The `asset_reporter_pairs` index |
 | `Report(Address, Tier)` | persistent | `ReserveReport`: the v0.1 layout (one per tier). Read until migrated, never written; see [Upgrading a v0.1 deployment](#upgrading-a-v01-deployment) |
 | `Alias(Address)` | persistent | `Address`: maps a deprecated asset SAC to its successor SAC |
+| `History(Address)` | persistent | `Vec<CoveragePoint>`: the last `MAX_HISTORY_POINTS = 16` figures posted for the asset, oldest first. The backtesting window; not an archive |
 
 Every reporter keeps their own figure. Two auditors' reports coexist, and a
 transcriber who posts a later `as_of` adds a fresher figure without erasing
@@ -275,7 +277,12 @@ fresher report revoked) is `2 * MAX_REPORTERS_PER_TIER` calls. The alternative, 
 maintainer remembers the second step. That gap is what this rule removes.
 
 History lives in events. The indexer keeps the full series. Their topic and
-data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
+data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md). The
+ledger also keeps a short, fixed-size window of the latest figures per asset
+(`History(Address)`) so a backtest can ask what coverage was a few ledgers ago
+without a second data source; it is a ring buffer of the recent past, capped at
+`MAX_HISTORY_POINTS`, not history. See
+[Reading history and backtesting](#reading-history-and-backtesting).
 
 **Functions**
 
@@ -292,9 +299,12 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `get_reports(sac)` | — | `Vec<ReserveReport>` (every stored report that counts: strongest tier first, then first-post order within a tier) | — | — |
 | `reporter_last_post(reporter: Address, asset: Address)` | — | `Option<u64>` (the ledger timestamp of that reporter's most recent post for the asset) | — | — |
 | `asset_reporter_pairs(cursor: Option<u32>, limit: u32)` | — | `Vec<(Address, Address)>` (up to `MAX_PAIRS_PER_CALL = 50` (asset, reporter) pairs) | — | — |
+| `last_updated(asset: Address)` | — | `Option<u64>`: the ledger timestamp of the asset's most recent reserve post, of any tier and however old | — | — |
+| `get_all_latest_reports(cursor: Option<u32>, limit: u32)` | — | `Vec<ReserveReport>`: up to `MAX_PAIRS_PER_CALL = 50`, the freshest report from each (asset, reporter) pair | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | `Paused` | — |
 | `coverage_status(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `CoverageStatus` | — | — |
+| `historical_coverage_bps(asset: Address, max_age: u32, as_of_ledger: u32)` | — | `Option<u128>`: coverage as the posted figures gave it at `as_of_ledger` | — | — |
 | `pause()` / `unpause()` | admin | `()` | — | `paused` / `unpaused` `by` |
 | `is_paused()` | — | `bool` | — | — |
 | `enable_native_supply(sac, token: Address)` | admin | `()` | `AssetNotListed` | `native_supply_enabled {sac} token` |
@@ -378,6 +388,31 @@ Rules:
   `old`).
 - `get_alias(asset)` returns the successor address if one has been registered,
   or `None`.
+- `last_updated(asset)` is the `posted_at` of the most recent reserve post for
+  `asset`, whichever tier or reporter it came from, and regardless of whether
+  that figure still counts or is fresh. It answers "when was this asset last
+  looked at?": a stale figure reports when it was posted, not when it was
+  measured, and a revoked reporter's post still counts as a post. `None` when
+  `asset` is not listed or has never had a report.
+- `get_all_latest_reports(cursor, limit)` returns one report per
+  (asset, reporter) pair, in the order and with the paging of
+  `asset_reporter_pairs`, capped at `MAX_PAIRS_PER_CALL = 50`. For a reporter
+  with figures at more than one tier (a transcriber promoted to auditor, say)
+  the latest `as_of` wins, ties going to the stronger tier. It makes no
+  registry call, so a figure whose reporter no longer counts is still listed;
+  `get_reports` says which figures count now. Cursors are offsets into the pair
+  sequence, so a bootstrap that must be exact should walk from `0` or dedupe by
+  pair: listing assets and posting figures only ever grow the sequence.
+- `historical_coverage_bps(asset, max_age, as_of_ledger)` answers coverage as
+  the posted figures gave it at `as_of_ledger`, from the per-asset window of
+  the most recent `MAX_HISTORY_POINTS = 16` figures. Supply is the newest
+  supply point at or before `as_of_ledger`, and reserves is the reserve point
+  with the latest `as_of` among those, ties to the stronger tier. `max_age` is
+  the largest distance, in ledgers, either side may be behind `as_of_ledger`
+  (inclusive, like `is_covered`'s seconds). It returns `None` when either side
+  is missing, when the older side is more than `max_age` ledgers old at that
+  ledger, or when nothing is retained at or before `as_of_ledger`, which means
+  `as_of_ledger` is outside the ring buffer window.
 
 Errors (`LedgerError`): `NotAStellarAsset = 1`, `AlreadyListed = 2`,
 `AssetNotListed = 3`, `NotSupplyPoster = 4`, `NotReporter = 5`,
@@ -425,6 +460,38 @@ verdict on backing), then under-backed, then covered. `age_ledgers` is derived
 from the supply snapshot's `ledger` and the report's `as_of` timestamp using
 the 5-second ledger close; it is an estimate for display, not a consensus
 value. `is_covered` is exactly `CoverageStatus::Covered` while unpaused.
+
+### Reading history and backtesting
+
+Three views serve readers that are not deciding whether to accept an asset
+today: a dashboard showing when an asset was last looked at, an indexer
+bootstrapping one figure per (asset, reporter) pair, and a backtest asking what
+coverage was at a past ledger.
+
+| Function | Question it answers |
+| --- | --- |
+| `last_updated(asset)` | When was the last reserve figure posted for this asset, whatever its state? |
+| `get_all_latest_reports(cursor, limit)` | What is the latest figure from each reporter, without paging every tier? |
+| `historical_coverage_bps(asset, max_age, as_of_ledger)` | What ratio did the posted figures give at a past ledger? |
+
+`last_updated` and `get_all_latest_reports` read stored state directly: no
+freshness rule, no registry call. A figure whose reporter was revoked is still
+history, and `get_reports` is the function that says which figures count now.
+
+`historical_coverage_bps` reads a per-asset ring buffer of the last
+`MAX_HISTORY_POINTS = 16` figures, written by `post_supply` and `post_reserve`.
+The buffer is deliberately a fixed-size window rather than an archive: history
+lives in events, and the indexer's series stays the source for anything older
+than the window, which is why the function returns `None` outside it instead of
+guessing. Because the window records what was *posted*:
+
+- a retracted figure still appears in the window it was posted into, and
+- a figure whose reporter was revoked is not filtered out.
+
+Replaying the window is therefore a record of activity, not a re-execution of
+the counting rules. A backtest that needs the ledger's exact answer at a past
+ledger should replay the event stream from the indexer instead of relying on
+the window.
 
 ### Native supply source
 
