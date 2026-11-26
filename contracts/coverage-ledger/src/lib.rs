@@ -27,8 +27,15 @@ pub const MAX_REPORTERS_PER_TIER: u32 = 4;
 /// approximately one hour of age.
 pub const MAX_SUPPLY_LEDGER_AGE: u32 = 720;
 
-/// Most asset-reporter pairs one `asset_reporter_pairs` call returns.
+/// Most asset-reporter pairs one `asset_reporter_pairs` or
+/// `get_all_latest_reports` call returns.
 pub const MAX_PAIRS_PER_CALL: u32 = 50;
+
+/// Most coverage points one asset keeps for backtesting. The points are a ring
+/// buffer of recent activity, not an archive: history lives in events, and this
+/// window exists only so `historical_coverage_bps` can answer from the recent
+/// past without a second data source.
+pub const MAX_HISTORY_POINTS: u32 = 16;
 
 #[contracttype]
 #[derive(Clone)]
@@ -52,6 +59,9 @@ enum DataKey {
     Alias(Address),
     /// Index of all listed asset SACs, in listing order.
     Assets,
+    /// Bounded ring buffer of the figures posted for an asset, oldest first:
+    /// the window `historical_coverage_bps` reads.
+    History(Address),
 }
 
 #[contracterror]
@@ -182,6 +192,28 @@ pub struct AssetAliased {
     pub new: Address,
 }
 
+/// A reserve figure as it was posted, with the `as_of` and tier that decide
+/// which of several figures wins when the window is replayed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReportPoint {
+    pub amount: i128,
+    pub as_of: u64,
+    pub tier: Tier,
+}
+
+/// One figure as it was recorded, kept in an asset's ring buffer so coverage
+/// can be replayed at a past ledger. Exactly one side is present: a supply
+/// point carries `supply`, a reserve point carries `reserve`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoveragePoint {
+    /// The ledger at which the figure was recorded.
+    pub ledger: u32,
+    pub supply: Option<i128>,
+    pub reserve: Option<ReportPoint>,
+}
+
 #[contract]
 pub struct CoverageLedger;
 
@@ -280,6 +312,53 @@ fn reporters(env: &Env, sac: &Address, tier: Tier) -> Vec<Address> {
 
 fn assets(env: &Env) -> Vec<Address> {
     read_persistent(env, &DataKey::Assets).unwrap_or_else(|| Vec::new(env))
+}
+
+/// Keep `candidate` as the freshest report seen so far: latest `as_of`, ties to
+/// the stronger tier.
+fn note_fresher(best: &mut Option<ReserveReport>, candidate: ReserveReport) {
+    let fresher = match best {
+        None => true,
+        Some(current) => {
+            candidate.as_of > current.as_of
+                || (candidate.as_of == current.as_of && candidate.tier > current.tier)
+        }
+    };
+    if fresher {
+        *best = Some(candidate);
+    }
+}
+
+/// The freshest report `reporter` has for `sac`, across every tier and any
+/// not-yet-migrated v0.1 entry.
+fn latest_report(env: &Env, sac: &Address, reporter: &Address) -> Option<ReserveReport> {
+    let mut best: Option<ReserveReport> = None;
+    for tier in Tier::ALL_DESC {
+        let legacy_key = DataKey::Report(sac.clone(), tier);
+        if let Some(legacy) = read_persistent::<ReserveReport>(env, &legacy_key) {
+            if legacy.reporter == *reporter {
+                note_fresher(&mut best, legacy);
+            }
+        }
+        let key = DataKey::ReportBy(sac.clone(), tier, reporter.clone());
+        if let Some(report) = read_persistent::<ReserveReport>(env, &key) {
+            note_fresher(&mut best, report);
+        }
+    }
+    best
+}
+
+/// Append one figure to `sac`'s ring buffer, dropping the oldest point when the
+/// buffer is full.
+fn record_point(env: &Env, sac: &Address, point: CoveragePoint) {
+    let key = DataKey::History(sac.clone());
+    let mut points =
+        read_persistent::<Vec<CoveragePoint>>(env, &key).unwrap_or_else(|| Vec::new(env));
+    while points.len() >= MAX_HISTORY_POINTS {
+        points.remove(0);
+    }
+    points.push_back(point);
+    write_persistent(env, &key, &points);
 }
 
 /// Every stored report at `tier`: a not-yet-migrated v0.1 entry first, then
@@ -552,6 +631,12 @@ impl CoverageLedger {
             poster: poster.clone(),
         };
         write_persistent(&env, &key, &snapshot);
+        let point = CoveragePoint {
+            ledger: current_ledger,
+            supply: Some(amount),
+            reserve: None,
+        };
+        record_point(&env, &sac, point);
         bump_instance(&env);
         SupplyPosted {
             sac,
@@ -648,6 +733,16 @@ impl CoverageLedger {
             doc_uri: doc_uri.clone(),
         };
         write_persistent(&env, &key, &report);
+        let point = CoveragePoint {
+            ledger: env.ledger().sequence(),
+            supply: None,
+            reserve: Some(ReportPoint {
+                amount,
+                as_of,
+                tier,
+            }),
+        };
+        record_point(&env, &sac, point);
         bump_instance(&env);
         ReservePosted {
             sac,
@@ -794,6 +889,28 @@ impl CoverageLedger {
         last
     }
 
+    /// When the most recent reserve figure for `asset` was recorded: the ledger
+    /// timestamp of the latest post, whichever tier or reporter it came from.
+    ///
+    /// No freshness or entitlement rule applies, so this answers "when was this
+    /// last looked at?" even when every stored figure has stopped counting:
+    /// `None` means the asset has never had a report, not that its reports are
+    /// old. `None` as well when `asset` is not listed.
+    pub fn last_updated(env: Env, asset: Address) -> Option<u64> {
+        if read_persistent::<AssetRecord>(&env, &DataKey::Asset(asset.clone())).is_none() {
+            return None;
+        }
+        let mut last: Option<u64> = None;
+        for tier in Tier::ALL_DESC {
+            for report in reports_at(&env, &asset, tier).iter() {
+                if last.is_none_or(|seen| report.posted_at > seen) {
+                    last = Some(report.posted_at);
+                }
+            }
+        }
+        last
+    }
+
     /// A page of the (asset, reporter) pairs the ledger holds figures for, so
     /// an indexer can bootstrap its dataset without walking every asset.
     ///
@@ -834,6 +951,60 @@ impl CoverageLedger {
                         continue;
                     }
                     out.push_back((asset.clone(), reporter));
+                    if out.len() == page {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A page of the latest report from each (asset, reporter) pair, so an
+    /// indexer can bootstrap one figure per pair instead of one per tier.
+    ///
+    /// Order and paging are those of `asset_reporter_pairs`: assets in listing
+    /// order, tiers strongest first within an asset, and first-post order within
+    /// a tier. A reporter with figures at more than one tier appears once per
+    /// asset, carrying the freshest of them (latest `as_of`, ties to the stronger
+    /// tier). `cursor` is the index of the first pair to return and defaults to
+    /// `0`; `limit` is capped at `MAX_PAIRS_PER_CALL = 50`. An empty page means
+    /// the cursor is at or past the last pair.
+    ///
+    /// As with `asset_reporter_pairs` the registry is not consulted, so a figure
+    /// whose reporter no longer counts still appears and `get_reports` says which
+    /// figures count now. A reporter whose figure exists only as a not-yet-migrated
+    /// v0.1 entry is listed by neither function: the pair index is the per-tier
+    /// reporter index.
+    pub fn get_all_latest_reports(
+        env: Env,
+        cursor: Option<u32>,
+        limit: u32,
+    ) -> Vec<ReserveReport> {
+        let start = cursor.unwrap_or(0);
+        let page = limit.min(MAX_PAIRS_PER_CALL);
+        let mut out = Vec::new(&env);
+        if page == 0 {
+            return out;
+        }
+        let mut index = 0u32;
+        for asset in assets(&env).iter() {
+            let mut reported = Vec::new(&env);
+            for tier in Tier::ALL_DESC {
+                for reporter in reporters(&env, &asset, tier).iter() {
+                    if reported.contains(&reporter) {
+                        continue;
+                    }
+                    reported.push_back(reporter.clone());
+                    let report = match latest_report(&env, &asset, &reporter) {
+                        Some(report) => report,
+                        None => continue,
+                    };
+                    if index < start {
+                        index += 1;
+                        continue;
+                    }
+                    out.push_back(report);
                     if out.len() == page {
                         return out;
                     }
@@ -911,6 +1082,67 @@ impl CoverageLedger {
             return CoverageStatus::Uncovered;
         }
         CoverageStatus::Covered(CoveredInfo { bps: coverage.bps })
+    }
+
+    /// Coverage as the posted figures gave it at `as_of_ledger`, for
+    /// backtesting: the answer `coverage` would have given at that ledger.
+    ///
+    /// The ring buffer holds the last `MAX_HISTORY_POINTS = 16` figures posted
+    /// for `asset`, supply points and reserve points together. The supply side
+    /// is the newest supply point recorded at or before `as_of_ledger`, and the
+    /// reserve side is the reserve point with the latest `as_of` among those,
+    /// ties going to the stronger tier. Both sides must be in the window and no
+    /// more than `max_age` ledgers behind `as_of_ledger` (inclusive: `max_age`
+    /// equal to the age still answers, as in `is_covered`).
+    ///
+    /// `None` when either side is missing, when the older of the two is more
+    /// than `max_age` ledgers behind `as_of_ledger`, or when nothing at all is
+    /// retained at or before `as_of_ledger`: that is outside the ring buffer
+    /// window, and the events are the only source for it.
+    ///
+    /// Replay is of what was *posted*, so a retracted figure still appears and a
+    /// figure whose reporter no longer counts is not re-adjudicated: this is a
+    /// window of activity, not a re-execution of the ledger's rules.
+    pub fn historical_coverage_bps(
+        env: Env,
+        asset: Address,
+        max_age: u32,
+        as_of_ledger: u32,
+    ) -> Option<u128> {
+        let points = read_persistent::<Vec<CoveragePoint>>(&env, &DataKey::History(asset))?;
+        let mut supply: Option<(u32, i128)> = None;
+        let mut reserve: Option<(u32, ReportPoint)> = None;
+        for point in points.iter() {
+            if point.ledger > as_of_ledger {
+                continue;
+            }
+            if let Some(amount) = point.supply {
+                if supply.is_none_or(|(ledger, _)| point.ledger >= ledger) {
+                    supply = Some((point.ledger, amount));
+                }
+            }
+            if let Some(candidate) = point.reserve {
+                let fresher = match &reserve {
+                    None => true,
+                    Some((_, best)) => {
+                        candidate.as_of > best.as_of
+                            || (candidate.as_of == best.as_of && candidate.tier > best.tier)
+                    }
+                };
+                if fresher {
+                    reserve = Some((point.ledger, candidate));
+                }
+            }
+        }
+        let (supply_ledger, supply_amount) = supply?;
+        let (reserve_ledger, report) = reserve?;
+        let age = as_of_ledger
+            .saturating_sub(supply_ledger)
+            .max(as_of_ledger.saturating_sub(reserve_ledger));
+        if age > max_age {
+            return None;
+        }
+        Some(coverage_bps(report.amount, supply_amount) as u128)
     }
 
     /// Stop recording figures and answering `is_covered` during an incident.
