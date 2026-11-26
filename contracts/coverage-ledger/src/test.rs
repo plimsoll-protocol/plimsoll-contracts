@@ -2020,6 +2020,9 @@ fn a_delegate_speaks_only_for_its_own_asset() {
             &uri(&f.env)
         ),
         Err(Ok(LedgerError::NotReporter.into()))
+    );
+}
+
 // ---- emergency pause (#77) ------------------------------------------------
 
 #[test]
@@ -2146,6 +2149,9 @@ fn version_is_the_constant() {
     let f = setup();
     assert_eq!(f.ledger.version(), VERSION);
     assert_eq!(f.ledger.version(), 1);
+}
+
+#[test]
 fn pause_is_idempotent() {
     let f = listed();
     f.ledger.pause();
