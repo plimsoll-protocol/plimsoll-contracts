@@ -45,6 +45,7 @@ it exists to show the integration in about 100 lines.
 | --- | --- | --- |
 | `Role` | `u32` enum | `Auditor = 1`, `Transcriber = 2`, `SupplyPoster = 3` |
 | `Tier` | `u32` enum | `Transcribed = 1`, `IssuerSigned = 2`, `AuditorSigned = 3` (ordered: higher is stronger) |
+| `CoverageStatus` | `u32` enum | `Uncovered = 0`, `Stale = 1`, `Covered = 2` (ordered: higher is better) |
 | `ReporterInfo` | struct | `role: Role`, `name: String`, `added_at: u64` |
 | `AssetRecord` | struct | `sac: Address`, `code: String`, `issuer: Address`, `listed_at: u64` |
 | `SupplySnapshot` | struct | `amount: i128`, `ledger: u32`, `timestamp: u64`, `breakdown_hash: BytesN<32>`, `poster: Address` |
@@ -217,6 +218,7 @@ Records what was said, and answers coverage questions.
 | `Admin` | instance | `Address` |
 | `Registry` | instance | `Address` |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
+| `TtlGrace` | instance | `u32` (ledger count; default 0) |
 | `Asset(Address)` | persistent | `AssetRecord` |
 | `Supply(Address)` | persistent | `SupplySnapshot` (latest only) |
 | `ReportBy(Address, Tier, Address)` | persistent | `ReserveReport`: the latest from one reporter at one tier for one asset |
@@ -268,7 +270,9 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `get_report(sac, tier: Tier)` | — | `Option<ReserveReport>` (the freshest report at that tier that counts) | — | — |
 | `get_reports(sac)` | — | `Vec<ReserveReport>` (every stored report that counts: strongest tier first, then first-post order within a tier) | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
-| `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | — | — |
+| `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `CoverageStatus` | — | — |
+| `set_ttl_grace(admin: Address, grace_ledgers: u32)` | admin | `()` | — | `ttl_grace_updated grace_ledgers` |
+| `ttl_grace()` | — | `u32` | — | — |
 | `registry()` / `admin()` | — | `Address` | — | — |
 | `transfer_admin(new_admin)` | admin and new_admin | `()` | — | `admin_transferred` |
 | `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
@@ -315,8 +319,18 @@ Rules:
   `>= min_tier` that count, the one with the latest `as_of`. Ties go to the
   higher tier, then to the reporter who first posted at that tier. It returns
   `None` if there is no supply snapshot or no qualifying report.
-- `is_covered` is true only if `coverage` is `Some`, both the supply snapshot
-  and the report are no older than `max_age` seconds, and `bps >= min_bps`.
+- `is_covered` returns `CoverageStatus`:
+  - `Uncovered` when `coverage` returns `None`, or `bps < min_bps`, or age
+    exceeds `max_age + grace_secs` where `grace_secs = ttl_grace_ledgers * 5`.
+  - `Stale` when bps and tier are satisfied but age is in the range
+    `(max_age, max_age + grace_secs]`. Grace secs is zero when `ttl_grace_ledgers`
+    is not set.
+  - `Covered` when bps and tier are satisfied and age does not exceed `max_age`.
+  - Age is the larger of `now - supply_timestamp` and `now - report_as_of`.
+- `set_ttl_grace` sets the TTL grace window in ledgers. Each ledger is 5 seconds.
+  Callers receive `Stale` during the grace window instead of `Uncovered`, which
+  lets them decide whether stale data is acceptable. Zero disables the grace window.
+- `ttl_grace` returns the stored grace window, or `0` when not set.
 
 Errors (`LedgerError`): `NotAStellarAsset = 1`, `AlreadyListed = 2`,
 `AssetNotListed = 3`, `NotSupplyPoster = 4`, `NotReporter = 5`,
@@ -381,21 +395,35 @@ rollback should be followed by each reporter posting again.
 A deposit vault for one asset that refuses deposits while the asset is not
 covered. Withdrawals are never blocked.
 
+**Storage**
+
+| Key | Storage | Value |
+| --- | --- | --- |
+| `Admin` | instance | `Address` |
+| `Config` | instance | `VaultConfig` |
+| `Balance(Address)` | persistent | `i128` |
+
+**Functions**
+
 | Function | Auth | Returns | Errors | Event |
 | --- | --- | --- | --- | --- |
-| `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
+| `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier, admin: Address)` | — | — | — | — |
 | `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount` |
 | `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
+| `admin()` | — | `Address` | — | — |
 | `can_deposit()` | — | `bool` | — | — |
+| `update_thresholds(min_bps: u32, max_age: u64, min_tier: Tier)` | admin | `()` | — | `thresholds_updated old_min_bps, old_max_age, old_min_tier, new_min_bps, new_max_age, new_min_tier` |
 
-`can_deposit()` makes the same `is_covered(asset, min_bps, max_age,
-min_tier)` call `deposit` makes, with the stored config, and returns its
-answer. It is true exactly when a positive deposit would pass the coverage
-gate, so a front end can show whether the vault is open without simulating a
-deposit and reading a `NotCovered` failure. It says nothing about the
-depositor's balance or authorisation.
+`can_deposit()` returns true exactly when a positive deposit would pass the
+coverage gate (`is_covered` returns `Covered`). A front end can call it to
+show whether the vault is open without simulating a deposit and reading a
+`NotCovered` failure.
+
+`update_thresholds` replaces the stored `min_bps`, `max_age`, and `min_tier` in
+one atomic call. The admin's auth is required. Existing deposits are unaffected;
+only future deposit attempts see the new thresholds.
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
 `InsufficientBalance = 3`. Causes and remedies, and the asset-contract errors a
