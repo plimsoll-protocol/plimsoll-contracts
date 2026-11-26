@@ -191,9 +191,11 @@ Decides who may speak. Holds no money.
 | Key | Storage | Value |
 | --- | --- | --- |
 | `Admin` | instance | `Address` |
+| `PendingUpgrade` | instance | `PendingUpgrade` |
+| `DisputeQuorum` | instance | `u32` (absent means `1`) |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
 | `Metadata(Address)` | persistent, TTL extended on write and read | `ReporterMetadata` |
-| `PendingUpgrade` | instance | `PendingUpgrade` |
+| `Dispute(BytesN<32>)` | persistent, TTL extended on write and read | `DisputeRecord` |
 
 **Functions**
 
@@ -207,6 +209,10 @@ Decides who may speak. Holds no money.
 | `get_reporter_metadata(reporter: Address)` | — | `Option<ReporterMetadata>` | — | — |
 | `role_of(reporter: Address)` | — | `Option<Role>` | — | — |
 | `get_reporter(reporter: Address)` | — | `Option<ReporterInfo>` | — | — |
+| `set_dispute_quorum(quorum: u32)` | admin | `()` | `InvalidQuorum` (`quorum == 0`) | `dispute_quorum_set quorum` |
+| `dispute_quorum()` | — | `u32` | — | — |
+| `dispute_report(watcher: Address, report_id: BytesN<32>)` | watcher | `DisputeStatus` | `DuplicateDispute`, `DisputeAlreadyRejected`, `HoldingPeriodElapsed` | `report_disputed {report_id} watcher, dispute_count`, plus `report_rejected {report_id} dispute_count` when quorum is met |
+| `get_dispute(report_id: BytesN<32>)` | — | `Option<DisputeRecord>` | — | — |
 | `transfer_admin(new_admin: Address)` | admin and new_admin | `()` | — | `admin_transferred {new_admin}` |
 | `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
 | `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
@@ -214,7 +220,9 @@ Decides who may speak. Holds no money.
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
-`InvalidMetadata = 5`.
+`UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`, `InvalidMetadata = 5`,
+`InvalidQuorum = 6`, `DuplicateDispute = 7`, `DisputeAlreadyRejected = 8`,
+`HoldingPeriodElapsed = 9`.
 
 Reporter metadata is optional and lives under its own `Metadata(Address)` key,
 not in `ReporterInfo`. A reporter registered before metadata existed therefore
@@ -283,6 +291,7 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | --- | --- | --- | --- | --- |
 | `__constructor(admin: Address, registry: Address)` | — | — | — | — |
 | `list_asset(sac: Address)` | none (permissionless) | `AssetRecord` | `NotAStellarAsset`, `AlreadyListed` | `asset_listed {sac} code, issuer` |
+| `batch_delist(assets: Vec<Address>)` | admin | `()` | — | `asset_delisted {sac}` for each listed asset removed |
 | `post_supply(poster: Address, sac: Address, amount: i128, ledger: u32, breakdown_hash: BytesN<32>)` | poster | `()` | `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger`, `LedgerTooOld` | `supply_posted {sac} amount, ledger, breakdown_hash, poster` |
 | `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `ImplausibleAmount`, `TooManyReporters` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
 | `retract_reserve(reporter: Address, sac: Address)` | reporter | `()` | `AssetNotListed`, `NotReporter`, `NoReportToRetract` | `reserve_retracted {sac, tier} reporter, as_of` |
@@ -390,7 +399,7 @@ Causes, remedies and the order they are checked in: [ERRORS.md](ERRORS.md#ledger
 
 ### Emergency pause
 
-`pause()` and `unpause()` are admin-gated switches for an incident. While the
+`pause()` and `unpause()` are admin-gated switches for an incident. See [pause.md](pause.md) for what happens to in-flight reports during a pause and how to unpause safely. While the
 ledger is paused:
 
 - `post_supply` and `post_reserve` fail with `Paused` before any other check
