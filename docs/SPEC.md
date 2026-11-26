@@ -46,6 +46,7 @@ it exists to show the integration in about 100 lines.
 | `Role` | `u32` enum | `Auditor = 1`, `Transcriber = 2`, `SupplyPoster = 3` |
 | `Tier` | `u32` enum | `Transcribed = 1`, `IssuerSigned = 2`, `AuditorSigned = 3` (ordered: higher is stronger) |
 | `ReporterInfo` | struct | `role: Role`, `name: String`, `added_at: u64` |
+| `ReporterMetadata` | struct | `name: Option<Symbol>`, `website_uri: Option<String>`, `contact_hash: Option<Bytes>` |
 | `AssetRecord` | struct | `sac: Address`, `code: String`, `issuer: Address`, `listed_at: u64` |
 | `SupplySnapshot` | struct | `amount: i128`, `ledger: u32`, `timestamp: u64`, `breakdown_hash: BytesN<32>`, `poster: Address` |
 | `ReserveReport` | struct | `amount: i128`, `as_of: u64`, `posted_at: u64`, `tier: Tier`, `reporter: Address`, `doc_hash: BytesN<32>`, `doc_uri: String` |
@@ -128,6 +129,7 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 | --- | --- |
 | `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `revoke` |
 | `Reporter(Address)` (persistent) | `set_reporter` (write), `get_reporter` / `role_of` (read) |
+| `Metadata(Address)` (persistent) | `update_reporter_metadata` (write), `get_reporter_metadata` (read) |
 
 **coverage-ledger**
 
@@ -190,6 +192,8 @@ Decides who may speak. Holds no money.
 | `Admin` | instance | `Address` |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
 | `ReporterIndex` | persistent, TTL extended on write and read | `Vec<Address>`: every registered reporter, in the order they were first indexed |
+
+| `Metadata(Address)` | persistent, TTL extended on write and read | `ReporterMetadata` |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 
 **Functions**
@@ -200,6 +204,8 @@ Decides who may speak. Holds no money.
 | `admin()` | — | `Address` | — | — |
 | `set_reporter(reporter: Address, role: Role, name: String)` | admin | `()` | `InvalidName` (len 0 or > 64) | `reporter_set {reporter} role, name` |
 | `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `reporter_revoked {reporter}` |
+| `update_reporter_metadata(reporter: Address, name: Option<Symbol>, website_uri: Option<String>, contact_hash: Option<Bytes>)` | reporter | `()` | `ReporterNotFound`, `InvalidMetadata` (URI empty or > 256 bytes; contact hash > 64 bytes) | `reporter_metadata_updated {reporter} name, website_uri, contact_hash` |
+| `get_reporter_metadata(reporter: Address)` | — | `Option<ReporterMetadata>` | — | — |
 | `role_of(reporter: Address)` | — | `Option<Role>` | — | — |
 | `get_reporter(reporter: Address)` | — | `Option<ReporterInfo>` | — | — |
 | `reporter_count()` | — | `u32` | — | — |
@@ -232,6 +238,16 @@ Rules:
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
 `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
+
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
+`InvalidMetadata = 5`.
+
+Reporter metadata is optional and lives under its own `Metadata(Address)` key,
+not in `ReporterInfo`. A reporter registered before metadata existed therefore
+keeps its stored entry, and `get_reporter` keeps its old shape. `revoke`
+removes both entries. `update_reporter_metadata` replaces the whole metadata
+record: a `None` field clears that field, and the reporter must be registered.
+`set_reporter` does not touch metadata.
 Causes and remedies: [ERRORS.md](ERRORS.md#registryerror).
 
 ## coverage-ledger
@@ -518,7 +534,7 @@ covered. Withdrawals are never blocked.
 | Function | Auth | Returns | Errors | Event |
 | --- | --- | --- | --- | --- |
 | `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
-| `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount` |
+| `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount`, `coverage_dropped {asset}` |
 | `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
@@ -531,6 +547,23 @@ answer. It is true exactly when a positive deposit would pass the coverage
 gate, so a front end can show whether the vault is open without simulating a
 deposit and reading a `NotCovered` failure. It says nothing about the
 depositor's balance or authorisation.
+
+`deposit` publishes `deposited` once the balance is written, then asks
+`is_covered` again with the same config and publishes `coverage_dropped
+{asset}` if that post-deposit answer is `false`. The second read is fresh
+rather than the answer the gate used, so the event reports the coverage of the
+vault's post-deposit state and a keeper watching for it can restate reserves.
+A deposit writes no supply snapshot and no report, so on a ledger that behaves
+as this document specifies the two reads agree and the event is not published;
+it fires when the ledger's answer changes between the gate and the post-deposit
+read — a later ledger version whose `is_covered` depends on live state, for
+instance — which is exactly the case a keeper would otherwise miss. It costs
+one cross-contract call per successful deposit.
+
+A refused deposit publishes nothing at all: the `NotCovered` error rolls the
+transaction back, and a rolled-back transaction keeps no events. A keeper
+therefore cannot learn about a coverage drop from a refused deposit, only from
+the `coverage_dropped` event on one that succeeds, or from `can_deposit()`.
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
 `InsufficientBalance = 3`. Causes and remedies, and the asset-contract errors a
@@ -550,6 +583,7 @@ vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 | Dashboard shows ratio and freshness | `coverage-ledger.coverage`, `get_supply`, `get_reports` |
 | Lending pool refuses an under-backed asset | `coverage-ledger.is_covered` (see `covered-vault`) |
 | Front end shows whether the vault is taking deposits | `covered-vault.can_deposit` |
+| Keeper restates reserves after the vault reports a coverage drop | `covered-vault.deposit` (emits `coverage_dropped`) |
 
 ## Out of scope for v0.1
 

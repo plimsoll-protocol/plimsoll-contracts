@@ -4,7 +4,7 @@ use super::*;
 #[allow(unused_imports)]
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
-    Address, Bytes, BytesN, Env, IntoVal, String,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
 };
 
 #[allow(dead_code)]
@@ -197,6 +197,158 @@ fn revoke_without_admin_auth_fails() {
     assert!(res.is_err());
     // Reporter should still exist
     assert_eq!(client.role_of(&who), Some(Role::Auditor));
+}
+
+#[test]
+fn update_metadata_stores_every_field_and_requires_reporter_auth() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(
+        &who,
+        &Role::Auditor,
+        &String::from_str(&env, "Acme Audit LLP"),
+    );
+
+    let name = Symbol::new(&env, "acme_audit");
+    let uri = String::from_str(&env, "https://acme.example/plimsoll");
+    let contact = Bytes::from_slice(&env, &[7u8; 32]);
+    client.update_reporter_metadata(
+        &who,
+        &Some(name.clone()),
+        &Some(uri.clone()),
+        &Some(contact.clone()),
+    );
+
+    assert_eq!(env.auths()[0].0, who);
+    assert_eq!(
+        client.get_reporter_metadata(&who).unwrap(),
+        ReporterMetadata {
+            name: Some(name),
+            website_uri: Some(uri),
+            contact_hash: Some(contact),
+        }
+    );
+}
+
+#[test]
+fn update_metadata_emits_event() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Transcriber, &String::from_str(&env, "vol"));
+    client.update_reporter_metadata(&who, &Some(Symbol::new(&env, "vol")), &None, &None);
+    // The latest invocation published exactly one event.
+    assert_eq!(env.events().all().events().len(), 1);
+}
+
+#[test]
+fn metadata_is_optional_per_field() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+
+    let uri = String::from_str(&env, "https://acme.example");
+    client.update_reporter_metadata(&who, &None, &Some(uri.clone()), &None);
+    let stored = client.get_reporter_metadata(&who).unwrap();
+    assert_eq!(stored.name, None);
+    assert_eq!(stored.website_uri, Some(uri));
+    assert_eq!(stored.contact_hash, None);
+
+    client.update_reporter_metadata(&who, &None, &None, &None);
+    assert_eq!(client.get_reporter_metadata(&who), None);
+}
+
+#[test]
+fn metadata_kept_when_role_changes() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Transcriber, &String::from_str(&env, "vol"));
+    client.update_reporter_metadata(&who, &Some(Symbol::new(&env, "vol")), &None, &None);
+
+    client.set_reporter(
+        &who,
+        &Role::Auditor,
+        &String::from_str(&env, "vol, now audit"),
+    );
+    assert_eq!(
+        client.get_reporter_metadata(&who).unwrap().name,
+        Some(Symbol::new(&env, "vol"))
+    );
+}
+
+#[test]
+fn metadata_on_unregistered_reporter_fails() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    let res = client.try_update_reporter_metadata(&who, &None, &None, &None);
+    assert_eq!(res, Err(Ok(RegistryError::ReporterNotFound.into())));
+}
+
+#[test]
+fn empty_or_long_website_rejected() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+
+    let empty = String::from_str(&env, "");
+    let res = client.try_update_reporter_metadata(&who, &None, &Some(empty), &None);
+    assert_eq!(res, Err(Ok(RegistryError::InvalidMetadata.into())));
+
+    let long = String::from_str(&env, &"x".repeat(257));
+    let res = client.try_update_reporter_metadata(&who, &None, &Some(long), &None);
+    assert_eq!(res, Err(Ok(RegistryError::InvalidMetadata.into())));
+}
+
+#[test]
+fn website_at_limit_and_contact_hash_at_limit_accepted() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+
+    let uri = String::from_str(&env, &"x".repeat(256));
+    let hash = Bytes::from_slice(&env, &[1u8; 64]);
+    client.update_reporter_metadata(&who, &None, &Some(uri), &Some(hash));
+    assert!(client.get_reporter_metadata(&who).is_some());
+}
+
+#[test]
+fn empty_or_long_contact_hash_rejected() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+
+    let empty = Bytes::from_slice(&env, &[]);
+    let res = client.try_update_reporter_metadata(&who, &None, &None, &Some(empty));
+    assert_eq!(res, Err(Ok(RegistryError::InvalidMetadata.into())));
+
+    let long = Bytes::from_slice(&env, &[1u8; 65]);
+    let res = client.try_update_reporter_metadata(&who, &None, &None, &Some(long));
+    assert_eq!(res, Err(Ok(RegistryError::InvalidMetadata.into())));
+}
+
+#[test]
+fn revoke_removes_metadata() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+    client.update_reporter_metadata(&who, &Some(Symbol::new(&env, "acme")), &None, &None);
+
+    client.revoke(&who);
+    assert_eq!(client.get_reporter_metadata(&who), None);
+}
+
+#[test]
+fn update_metadata_without_reporter_auth_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+    env.mock_auths(&[]);
+
+    let res = client.try_update_reporter_metadata(&who, &None, &None, &None);
+    assert!(res.is_err());
 }
 
 #[test]

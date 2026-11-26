@@ -9,7 +9,12 @@ compiles and tests it. A test also fails if the copy on this page drifts from
 the file.
 
 [covered-vault](../contracts/covered-vault/src/lib.rs) is a complete deposit
-vault built the same way. [SPEC.md](SPEC.md) is the full specification.
+vault built the same way. [SPEC.md](SPEC.md) is the full specification, and
+[auth-model.md](auth-model.md) maps every entry point to the role that may call
+it.
+
+Who may call what — including who can post a report and what an unauthorised
+call returns — is in [auth-model.md](auth-model.md).
 
 ## What the call gives you
 

@@ -54,9 +54,9 @@ codes as literal numbers, so a renumbering fails CI.
 | ---: | --- | --- | --- |
 | 1 | [`ReporterNotFound`](#1-reporternotfound) | [`NotAStellarAsset`](#1-notastellarasset) | [`InvalidAmount`](#1-invalidamount) |
 | 2 | [`InvalidName`](#2-invalidname) | [`AlreadyListed`](#2-alreadylisted) | [`NotCovered`](#2-notcovered) |
-| 3 | | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
-| 4 | | [`NotSupplyPoster`](#4-notsupplyposter) | |
-| 5 | | [`NotReporter`](#5-notreporter) | |
+| 3 | `UpgradeNotProposed` | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
+| 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | |
+| 5 | [`InvalidMetadata`](#5-invalidmetadata) | [`NotReporter`](#5-notreporter) | |
 | 6 | | [`InvalidAmount`](#6-invalidamount) | |
 | 7 | | [`FutureLedger`](#7-futureledger) | |
 | 8 | | [`StaleLedger`](#8-staleledger) | |
@@ -71,8 +71,9 @@ codes as literal numbers, so a renumbering fails CI.
 
 ## RegistryError
 
-Raised by `reporter-registry`. Both functions that can fail are admin-only,
-so these errors reach maintainers rather than end users.
+Raised by `reporter-registry`. The role and upgrade errors are admin-only, so
+they reach maintainers rather than end users; `InvalidMetadata` is raised to a
+registered reporter updating their own entry.
 
 ### 1 `ReporterNotFound`
 
@@ -90,6 +91,16 @@ so these errors reach maintainers rather than end users.
   bytes, not characters, so a 30-character name in a non-Latin script can
   exceed it.
 - **Remedy:** Use a short, non-empty display name of 1 to 64 bytes.
+
+### 5 `InvalidMetadata`
+
+- **Raised by:** `update_reporter_metadata(reporter, name, website_uri,
+  contact_hash)`.
+- **Cause:** `Some(website_uri)` is empty or longer than 256 bytes, or
+  `Some(contact_hash)` is empty or longer than 64 bytes. A `None` field is not
+  an error; it clears that field.
+- **Remedy:** Shorten the URL or omit those fields. The `name` field is a
+  `Symbol` and is already limited to 32 bytes by the host.
 
 ## LedgerError
 

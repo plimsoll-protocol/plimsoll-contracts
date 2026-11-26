@@ -64,6 +64,15 @@ pub struct Withdrawn {
     pub amount: i128,
 }
 
+/// The asset is not covered by the vault's config after a deposit that
+/// succeeded, so a keeper watching this vault can restate reserves.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoverageDropped {
+    #[topic]
+    pub asset: Address,
+}
+
 #[contract]
 pub struct CoveredVault;
 
@@ -74,7 +83,7 @@ fn config(env: &Env) -> VaultConfig {
         .expect("config is set in the constructor")
 }
 
-/// The coverage gate `deposit` applies, with the stored config.
+/// The coverage check `deposit` makes, with the stored config.
 fn is_open(env: &Env, cfg: &VaultConfig) -> bool {
     CoverageLedgerClient::new(env, &cfg.ledger).is_covered(
         &cfg.asset,
@@ -152,6 +161,16 @@ impl CoveredVault {
             .instance()
             .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
         Deposited { from, amount }.publish(&env);
+        // Ask again now that the deposit is in the books. A deposit writes no
+        // figure `is_covered` reads, so a ledger that behaves as SPEC.md says
+        // answers as it did at the gate; this fires only when the answer moves
+        // between the two reads, which is what a keeper needs to hear about.
+        if !is_open(&env, &cfg) {
+            CoverageDropped {
+                asset: cfg.asset.clone(),
+            }
+            .publish(&env);
+        }
         new_balance
     }
 

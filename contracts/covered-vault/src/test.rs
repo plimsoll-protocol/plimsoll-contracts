@@ -5,9 +5,10 @@ use coverage_ledger::{CoverageLedger, CoverageLedgerClient as LedgerClient, Ledg
 use plimsoll_types::Role;
 use reporter_registry::{ReporterRegistry, ReporterRegistryClient};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    testutils::{Address as _, Events as _, Ledger as _},
     token::{StellarAssetClient, TokenClient},
-    Address, BytesN, Env, String,
+    xdr::{ContractEvent, ContractEventBody},
+    Address, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
 const T0: u64 = 1_700_000_000;
@@ -171,6 +172,101 @@ fn config_round_trips() {
     assert_eq!(cfg.min_bps, 10_000);
     assert_eq!(cfg.max_age, DAY);
     assert_eq!(cfg.min_tier, Tier::IssuerSigned);
+}
+
+// ---- coverage_dropped -----------------------------------------------------
+
+/// The topics and the data of one event, as an off-chain reader decodes them.
+fn decode_event(env: &Env, event: &ContractEvent) -> (Vec<Val>, Val) {
+    let ContractEventBody::V0(body) = &event.body;
+    let mut topics = Vec::new(env);
+    for topic in body.topics.iter() {
+        topics.push_back(Val::try_from_val(env, topic).unwrap());
+    }
+    (topics, Val::try_from_val(env, &body.data).unwrap())
+}
+
+/// A ledger stand-in whose `is_covered` answer changes from one call to the
+/// next. The real ledger answers from the stored supply snapshot and reports,
+/// and a deposit writes neither, so this is the only way to make the
+/// post-deposit read disagree with the gate: the case the event is for.
+#[contract]
+pub struct FlakyLedger;
+
+#[contractimpl]
+impl FlakyLedger {
+    pub fn is_covered(
+        env: Env,
+        _sac: Address,
+        _min_bps: u32,
+        _max_age: u64,
+        _min_tier: Tier,
+    ) -> bool {
+        let key = Symbol::new(&env, "calls");
+        let calls: u32 = env.storage().instance().get(&key).unwrap_or(0);
+        env.storage().instance().set(&key, &(calls + 1));
+        calls == 0
+    }
+}
+
+#[test]
+fn deposit_emits_coverage_dropped_when_post_deposit_coverage_is_false() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let sac = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    let ledger = env.register(FlakyLedger, ());
+    let vault_id = env.register(
+        CoveredVault,
+        (ledger, sac.clone(), 10_000u32, DAY, Tier::IssuerSigned),
+    );
+    let vault = CoveredVaultClient::new(&env, &vault_id);
+    let user = Address::generate(&env);
+    StellarAssetClient::new(&env, &sac).mint(&user, &(100 * UNIT));
+
+    // The deposit commits: the gate said yes and the balance is recorded.
+    assert_eq!(vault.deposit(&user, &(40 * UNIT)), 40 * UNIT);
+
+    // `all()` reports the events of the last invocation, so read them before
+    // any other contract call.
+    let events = env.events().all().filter_by_contract(&vault_id);
+    let events = events.events();
+    assert_eq!(events.len(), 2);
+    let (topics, data) = decode_event(&env, events.last().unwrap());
+    let expected: Vec<Val> = (Symbol::new(&env, "coverage_dropped"), sac.clone()).into_val(&env);
+    assert_eq!(topics, expected);
+    let data = Map::<Symbol, Val>::try_from_val(&env, &data).unwrap();
+    assert!(data.is_empty());
+
+    assert_eq!(vault.balance(&user), 40 * UNIT);
+    assert_eq!(TokenClient::new(&env, &sac).balance(&vault_id), 40 * UNIT);
+}
+
+#[test]
+fn a_covered_deposit_publishes_only_deposited() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    f.vault.deposit(&f.user, &(100 * UNIT));
+
+    let events = f.env.events().all().filter_by_contract(&f.vault.address);
+    let events = events.events();
+    assert_eq!(events.len(), 1);
+    let (topics, _) = decode_event(&f.env, events.last().unwrap());
+    let expected: Vec<Val> = (Symbol::new(&f.env, "deposited"), f.user.clone()).into_val(&f.env);
+    assert_eq!(topics, expected);
+}
+
+#[test]
+fn a_refused_deposit_publishes_no_event() {
+    let f = setup();
+    // Not covered. The error rolls the transaction back, events included, so a
+    // keeper cannot learn about a drop from the refusal itself.
+    assert_eq!(
+        f.vault.try_deposit(&f.user, &UNIT),
+        Err(Ok(VaultError::NotCovered.into()))
+    );
+    assert_eq!(f.env.events().all().events().len(), 0);
 }
 
 // ---- can_deposit ----------------------------------------------------------

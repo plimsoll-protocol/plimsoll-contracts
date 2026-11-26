@@ -234,6 +234,22 @@ Testnet: the indexer's supply poster was registered in
 [`6f9bce5a…`](https://stellar.expert/explorer/testnet/tx/6f9bce5af1b52dc53058c3d172591a36cb3b4e1839c726a56aca0a83ae3fd4ee)
 (`role = 2`).
 
+### `reporter_metadata_updated`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reporter_metadata_updated` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `name` | `Option<Symbol>` |
+| data | `website_uri` | `Option<String>` |
+| data | `contact_hash` | `Option<Bytes>` |
+
+Raised by `update_reporter_metadata` when a registered reporter replaces their
+optional public metadata. An absent field is encoded as ScVal void, so a reader
+must treat "no key" and "void" as the same thing. The preimage of
+`contact_hash` is never published on-chain. `revoke` removes the metadata
+entry without a separate event; treat `reporter_revoked` as clearing it.
+
 ### `reporter_revoked`
 
 | | Name | Type |
@@ -284,6 +300,28 @@ a deposit of an under-backed asset never reaches this event.
 Testnet:
 [`f86eecaa…`](https://stellar.expert/explorer/testnet/tx/f86eecaa2eb6252bd4e79708966fc510573b8a9878771641b8f8b514d2804b5b).
 
+### `coverage_dropped`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `coverage_dropped` | `Symbol` |
+| topic 1 | `asset` | `Address` (contract) |
+
+No data map. Raised by `deposit` after its own `deposited` event, when a
+second `is_covered` call, made once the deposit is recorded, answers `false`
+with the vault's stored config. The gate that let the deposit through asked
+the same question before the transfer, and a deposit writes no supply snapshot
+and no report, so on the ledger described in [SPEC.md](SPEC.md) the two
+answers agree and this event is not published. It appears when the ledger's
+answer changes between the two reads, which is the case a keeper watching the
+vault needs in order to restate reserves; subscribe by topic and filter on
+`contract_id` when several vaults share an asset.
+
+A refused deposit publishes nothing at all: the `NotCovered` error rolls the
+transaction back, and a rolled-back transaction keeps no events, so this is
+the only vault event a keeper can learn a drop from. No testnet example: no
+deposit has been made while coverage was failing.
+
 ### `withdrawn`
 
 | | Name | Type |
@@ -320,6 +358,7 @@ pasted:
 | `supply_posted` | `AAAADwAAAA1zdXBwbHlfcG9zdGVkAAAA` |
 | `reserve_posted` | `AAAADwAAAA5yZXNlcnZlX3Bvc3RlZAAA` |
 | `reporter_set` | `AAAADwAAAAxyZXBvcnRlcl9zZXQ=` |
+| `reporter_metadata_updated` | `AAAADwAAABlyZXBvcnRlcl9tZXRhZGF0YV91cGRhdGVk` |
 | `reporter_revoked` | `AAAADwAAABByZXBvcnRlcl9yZXZva2Vk` |
 | `admin_transferred` | `AAAADwAAABFhZG1pbl90cmFuc2ZlcnJlZAAAAA==` |
 | `upgrade_proposed` | `AAAADwAAABB1cGdyYWRlX3Byb3Bvc2Vk` |

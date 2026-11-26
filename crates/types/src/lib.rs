@@ -2,7 +2,7 @@
 //! cross-contract calls between them.
 #![no_std]
 
-use soroban_sdk::{contractclient, contracttype, Address, BytesN, Env, String};
+use soroban_sdk::{contractclient, contracttype, Address, Bytes, BytesN, Env, String, Symbol};
 
 /// One day of ledgers at a 5-second close time.
 pub const DAY_IN_LEDGERS: u32 = 17_280;
@@ -74,6 +74,23 @@ pub struct ReporterInfo {
     pub role: Role,
     pub name: String,
     pub added_at: u64,
+}
+
+/// Optional public details a reporter publishes about themselves.
+///
+/// Kept in its own storage key rather than added to `ReporterInfo`: changing
+/// that struct's field list would change the encoding of every existing
+/// reporter entry. A reporter with no metadata simply has no entry.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReporterMetadata {
+    /// A short display handle. `Symbol` limits it to 32 bytes of letters,
+    /// digits and underscores, so it is not the registered legal name.
+    pub name: Option<Symbol>,
+    pub website_uri: Option<String>,
+    /// Hash of the reporter's preferred contact details. The preimage is
+    /// never stored on-chain.
+    pub contact_hash: Option<Bytes>,
 }
 
 #[contracttype]
