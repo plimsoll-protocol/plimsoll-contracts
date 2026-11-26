@@ -44,9 +44,16 @@ So a variant's number is fixed for good once it ships:
   anything else.
 - No existing variant is renumbered, whatever the reason.
 
-[AGENTS.md](../AGENTS.md) makes this a rule for every change, and the
-end-to-end test in [tests/e2e](../tests/e2e/tests/scenario.rs) asserts several
-codes as literal numbers, so a renumbering fails CI.
+[AGENTS.md](../AGENTS.md) makes this a rule for every change. The end-to-end
+test in [tests/e2e](../tests/e2e/tests/scenario.rs) asserts several codes as
+literal numbers, and CI runs [scripts/check_error_codes.py](../scripts/check_error_codes.py),
+which compares every `#[contracterror]` enum with the base branch and fails on a
+renumbering, a removal or a new variant that is not appended after the last
+one. Run it yourself before pushing:
+
+```bash
+python3 scripts/check_error_codes.py --base origin/main
+```
 
 ## Quick lookup
 
