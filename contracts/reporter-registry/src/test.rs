@@ -362,3 +362,96 @@ fn transfer_admin_without_new_admin_auth_fails() {
     assert!(res.is_err());
     assert_eq!(client.admin(), admin);
 }
+
+#[test]
+fn register_and_confirm_reporter_activates_within_window() {
+    let (env, admin, client) = setup();
+    env.ledger().set_sequence_number(100);
+    let who = Address::generate(&env);
+    let name = String::from_str(&env, "TwoFactorAudit");
+
+    client.register_reporter(&who, &Role::Auditor, &name, &50);
+    assert_eq!(env.auths()[0].0, admin);
+    assert_eq!(env.events().all().events().len(), 1);
+    // Pending entry is not active yet.
+    assert_eq!(client.role_of(&who), None);
+    assert_eq!(client.get_reporter(&who), None);
+    let pending = client.get_pending_reporter(&who).unwrap();
+    assert_eq!(pending.role, Role::Auditor);
+    assert_eq!(pending.name, name);
+    assert_eq!(pending.expires_at_ledger, 150);
+
+    // Confirm on the exact boundary ledger (150).
+    env.ledger().set_sequence_number(150);
+    client.confirm_registration(&who);
+    assert_eq!(env.auths()[0].0, who);
+    assert_eq!(env.events().all().events().len(), 1);
+    assert_eq!(client.get_pending_reporter(&who), None);
+    assert_eq!(client.role_of(&who), Some(Role::Auditor));
+    let info = client.get_reporter(&who).unwrap();
+    assert_eq!(info.name, name);
+}
+
+#[test]
+fn register_reporter_rejects_invalid_name_or_zero_window() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+
+    let res = client.try_register_reporter(&who, &Role::Auditor, &String::from_str(&env, ""), &10);
+    assert_eq!(res, Err(Ok(RegistryError::InvalidName.into())));
+
+    let res = client.try_register_reporter(
+        &who,
+        &Role::Auditor,
+        &String::from_str(&env, "ValidName"),
+        &0,
+    );
+    assert_eq!(res, Err(Ok(RegistryError::InvalidConfirmWindow.into())));
+}
+
+#[test]
+fn confirm_registration_fails_when_missing_or_expired() {
+    let (env, _admin, client) = setup();
+    env.ledger().set_sequence_number(100);
+    let who = Address::generate(&env);
+
+    let res = client.try_confirm_registration(&who);
+    assert_eq!(
+        res,
+        Err(Ok(RegistryError::PendingRegistrationNotFound.into()))
+    );
+
+    client.register_reporter(
+        &who,
+        &Role::Transcriber,
+        &String::from_str(&env, "Vol"),
+        &10,
+    );
+    env.ledger().set_sequence_number(111);
+    let res = client.try_confirm_registration(&who);
+    assert_eq!(res, Err(Ok(RegistryError::RegistrationExpired.into())));
+    assert_eq!(client.role_of(&who), None);
+    assert_eq!(client.get_pending_reporter(&who), None);
+}
+
+#[test]
+fn cleanup_expired_registration_removes_expired_entry_and_emits_event() {
+    let (env, _admin, client) = setup();
+    env.ledger().set_sequence_number(100);
+    let who = Address::generate(&env);
+
+    assert!(!client.cleanup_expired_registration(&who));
+
+    client.register_reporter(&who, &Role::Auditor, &String::from_str(&env, "Exp"), &10);
+    // Not expired yet at ledger 110.
+    env.ledger().set_sequence_number(110);
+    assert!(!client.cleanup_expired_registration(&who));
+    assert!(client.get_pending_reporter(&who).is_some());
+
+    // Expired at ledger 111.
+    env.ledger().set_sequence_number(111);
+    assert!(client.cleanup_expired_registration(&who));
+    assert_eq!(env.events().all().events().len(), 1);
+    // Second cleanup is a no-op.
+    assert!(!client.cleanup_expired_registration(&who));
+}

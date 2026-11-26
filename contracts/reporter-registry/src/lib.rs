@@ -3,8 +3,8 @@
 #![no_std]
 
 use plimsoll_types::{
-    PendingUpgrade, ReporterInfo, ReporterMetadata, Role, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
-    PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
+    PendingReporter, PendingUpgrade, ReporterInfo, ReporterMetadata, Role, INSTANCE_EXTEND_TO,
+    INSTANCE_THRESHOLD, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
@@ -22,6 +22,7 @@ enum DataKey {
     Reporter(Address),
     Metadata(Address),
     PendingUpgrade,
+    PendingReporter(Address),
 }
 
 #[contracterror]
@@ -33,6 +34,9 @@ pub enum RegistryError {
     UpgradeNotProposed = 3,
     UpgradeDelayNotElapsed = 4,
     InvalidMetadata = 5,
+    InvalidConfirmWindow = 6,
+    PendingRegistrationNotFound = 7,
+    RegistrationExpired = 8,
 }
 
 #[contractevent]
@@ -42,6 +46,32 @@ pub struct ReporterSet {
     pub reporter: Address,
     pub role: Role,
     pub name: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReporterRegistrationProposed {
+    #[topic]
+    pub reporter: Address,
+    pub role: Role,
+    pub name: String,
+    pub expires_at_ledger: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReporterRegistrationConfirmed {
+    #[topic]
+    pub reporter: Address,
+    pub role: Role,
+    pub name: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReporterRegistrationExpired {
+    #[topic]
+    pub reporter: Address,
 }
 
 #[contractevent]
@@ -152,6 +182,115 @@ impl ReporterRegistry {
         .publish(&env);
     }
 
+    /// Create a pending reporter registration that the reporter must confirm
+    /// within `confirm_window_ledgers` before becoming active.
+    pub fn register_reporter(
+        env: Env,
+        reporter: Address,
+        role: Role,
+        name: String,
+        confirm_window_ledgers: u32,
+    ) {
+        admin(&env).require_auth();
+        if name.is_empty() || name.len() > MAX_NAME_LEN {
+            panic_with_error!(&env, RegistryError::InvalidName);
+        }
+        if confirm_window_ledgers == 0 {
+            panic_with_error!(&env, RegistryError::InvalidConfirmWindow);
+        }
+        let expires_at_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(confirm_window_ledgers);
+        let key = DataKey::PendingReporter(reporter.clone());
+        let entry = PendingReporter {
+            role,
+            name: name.clone(),
+            expires_at_ledger,
+        };
+        env.storage().persistent().set(&key, &entry);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        bump_instance(&env);
+        ReporterRegistrationProposed {
+            reporter,
+            role,
+            name,
+            expires_at_ledger,
+        }
+        .publish(&env);
+    }
+
+    /// Confirm a pending reporter registration. Must be called by the reporter
+    /// themselves before `expires_at_ledger`.
+    pub fn confirm_registration(env: Env, reporter: Address) {
+        reporter.require_auth();
+        let pending_key = DataKey::PendingReporter(reporter.clone());
+        let pending = env
+            .storage()
+            .persistent()
+            .get::<_, PendingReporter>(&pending_key)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::PendingRegistrationNotFound));
+        if env.ledger().sequence() > pending.expires_at_ledger {
+            panic_with_error!(&env, RegistryError::RegistrationExpired);
+        }
+        env.storage().persistent().remove(&pending_key);
+
+        let key = DataKey::Reporter(reporter.clone());
+        let added_at = env
+            .storage()
+            .persistent()
+            .get::<_, ReporterInfo>(&key)
+            .map(|existing| existing.added_at)
+            .unwrap_or_else(|| env.ledger().timestamp());
+        let info = ReporterInfo {
+            role: pending.role,
+            name: pending.name.clone(),
+            added_at,
+        };
+        env.storage().persistent().set(&key, &info);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        bump_instance(&env);
+        ReporterRegistrationConfirmed {
+            reporter,
+            role: pending.role,
+            name: pending.name,
+        }
+        .publish(&env);
+    }
+
+    /// Remove an expired pending registration. Returns true if an expired
+    /// entry was removed, false otherwise.
+    pub fn cleanup_expired_registration(env: Env, reporter: Address) -> bool {
+        let key = DataKey::PendingReporter(reporter.clone());
+        let Some(pending) = env.storage().persistent().get::<_, PendingReporter>(&key) else {
+            return false;
+        };
+        if env.ledger().sequence() <= pending.expires_at_ledger {
+            return false;
+        }
+        env.storage().persistent().remove(&key);
+        bump_instance(&env);
+        ReporterRegistrationExpired { reporter }.publish(&env);
+        true
+    }
+
+    /// Read a pending reporter registration if one exists and has not expired.
+    pub fn get_pending_reporter(env: Env, reporter: Address) -> Option<PendingReporter> {
+        let key = DataKey::PendingReporter(reporter);
+        let pending = env.storage().persistent().get::<_, PendingReporter>(&key)?;
+        if env.ledger().sequence() > pending.expires_at_ledger {
+            return None;
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        Some(pending)
+    }
+
     pub fn revoke(env: Env, reporter: Address) {
         admin(&env).require_auth();
         let key = DataKey::Reporter(reporter.clone());
@@ -162,6 +301,9 @@ impl ReporterRegistry {
         env.storage()
             .persistent()
             .remove(&DataKey::Metadata(reporter.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingReporter(reporter.clone()));
         bump_instance(&env);
         ReporterRevoked { reporter }.publish(&env);
     }
