@@ -247,6 +247,19 @@ entry without a separate event; treat `reporter_revoked` as clearing it.
 | topic 0 | `reporter_revoked` | `Symbol` |
 | topic 1 | `reporter` | `Address` (account) |
 
+### `stake_changed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `stake_changed` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `old_stake` | `i128` |
+| data | `new_stake` | `i128` |
+
+Raised by `top_up_stake` and `reduce_stake` whenever a reporter's tracked stake
+is updated, and by `revoke` (with `new_stake = 0`) if the revoked reporter held
+a positive tracked stake.
+
 No data map. Revocation does not delete the reports a reporter already posted,
 but from that transaction on the coverage ledger stops counting them:
 `coverage`, `is_covered`, `get_report` and `get_reports` skip an auditor or

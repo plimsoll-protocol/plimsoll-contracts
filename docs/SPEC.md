@@ -127,9 +127,10 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 
 | Entry | Extended by |
 | --- | --- |
-| `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `revoke` |
+| `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `revoke`, `top_up_stake`, `reduce_stake` |
 | `Reporter(Address)` (persistent) | `set_reporter` (write), `get_reporter` / `role_of` (read) |
 | `Metadata(Address)` (persistent) | `update_reporter_metadata` (write), `get_reporter_metadata` (read) |
+| `Stake(Address)` (persistent) | `top_up_stake`, `reduce_stake` (write), `stake_of` (read) |
 
 **coverage-ledger**
 
@@ -193,6 +194,7 @@ Decides who may speak. Holds no money.
 | `Admin` | instance | `Address` |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
 | `Metadata(Address)` | persistent, TTL extended on write and read | `ReporterMetadata` |
+| `Stake(Address)` | persistent, TTL extended on write and read | `i128` |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 
 **Functions**
@@ -202,7 +204,10 @@ Decides who may speak. Holds no money.
 | `__constructor(admin: Address)` | — | — | — | — |
 | `admin()` | — | `Address` | — | — |
 | `set_reporter(reporter: Address, role: Role, name: String)` | admin | `()` | `InvalidName` (len 0 or > 64) | `reporter_set {reporter} role, name` |
-| `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `reporter_revoked {reporter}` |
+| `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `stake_changed {reporter} old_stake, new_stake` (if stake > 0), `reporter_revoked {reporter}` |
+| `top_up_stake(reporter: Address, amount: i128)` | admin | `i128` (new stake) | `ReporterNotFound`, `InvalidStakeAmount` | `stake_changed {reporter} old_stake, new_stake` |
+| `reduce_stake(reporter: Address, amount: i128)` | admin | `i128` (new stake) | `ReporterNotFound`, `InvalidStakeAmount`, `InsufficientStake` | `stake_changed {reporter} old_stake, new_stake` |
+| `stake_of(reporter: Address)` | — | `i128` | — | — |
 | `update_reporter_metadata(reporter: Address, name: Option<Symbol>, website_uri: Option<String>, contact_hash: Option<Bytes>)` | reporter | `()` | `ReporterNotFound`, `InvalidMetadata` (URI empty or > 256 bytes; contact hash > 64 bytes) | `reporter_metadata_updated {reporter} name, website_uri, contact_hash` |
 | `get_reporter_metadata(reporter: Address)` | — | `Option<ReporterMetadata>` | — | — |
 | `role_of(reporter: Address)` | — | `Option<Role>` | — | — |
@@ -214,14 +219,20 @@ Decides who may speak. Holds no money.
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
-`InvalidMetadata = 5`.
+`InvalidMetadata = 5`, `InvalidStakeAmount = 6`, `InsufficientStake = 7`.
 
 Reporter metadata is optional and lives under its own `Metadata(Address)` key,
 not in `ReporterInfo`. A reporter registered before metadata existed therefore
 keeps its stored entry, and `get_reporter` keeps its old shape. `revoke`
-removes both entries. `update_reporter_metadata` replaces the whole metadata
+removes both entries (and clears any tracked `Stake(Address)` entry, emitting
+`stake_changed` to `0` when the previous stake was positive). `update_reporter_metadata` replaces the whole metadata
 record: a `None` field clears that field, and the reporter must be registered.
-`set_reporter` does not touch metadata.
+`set_reporter` does not touch metadata or stake.
+
+Tracked stake lives under `Stake(Address)` and defaults to `0` when absent.
+`top_up_stake` and `reduce_stake` require positive `amount` (`> 0`), and
+`reduce_stake` removes the key when the balance reaches `0`. Both emit
+`stake_changed {reporter} old_stake, new_stake` after the state change.
 Causes and remedies: [ERRORS.md](ERRORS.md#registryerror).
 
 ## coverage-ledger

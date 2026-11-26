@@ -57,8 +57,8 @@ codes as literal numbers, so a renumbering fails CI.
 | 3 | `UpgradeNotProposed` | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
 | 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | |
 | 5 | [`InvalidMetadata`](#5-invalidmetadata) | [`NotReporter`](#5-notreporter) | |
-| 6 | | [`InvalidAmount`](#6-invalidamount) | |
-| 7 | | [`FutureLedger`](#7-futureledger) | |
+| 6 | [`InvalidStakeAmount`](#6-invalidstakeamount) | [`InvalidAmount`](#6-invalidamount) | |
+| 7 | [`InsufficientStake`](#7-insufficientstake) | [`FutureLedger`](#7-futureledger) | |
 | 8 | | [`StaleLedger`](#8-staleledger) | |
 | 9 | | [`FutureTimestamp`](#9-futuretimestamp) | |
 | 10 | | [`StaleReport`](#10-stalereport) | |
@@ -104,6 +104,19 @@ registered reporter updating their own entry.
   an error; it clears that field.
 - **Remedy:** Shorten the URL or omit those fields. The `name` field is a
   `Symbol` and is already limited to 32 bytes by the host.
+
+### 6 `InvalidStakeAmount`
+
+- **Raised by:** `top_up_stake(reporter, amount)`, `reduce_stake(reporter, amount)`.
+- **Cause:** `amount` is zero or negative, or adding `amount` to the existing
+  stake would overflow `i128`.
+- **Remedy:** Pass a strictly positive `amount` within `i128` bounds.
+
+### 7 `InsufficientStake`
+
+- **Raised by:** `reduce_stake(reporter, amount)`.
+- **Cause:** `amount` exceeds the reporter's currently tracked stake (`stake_of`).
+- **Remedy:** Query `stake_of(reporter)` and reduce by at most that amount.
 
 ## LedgerError
 
