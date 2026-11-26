@@ -1,32 +1,23 @@
 name: Commit lint
 
 on:
-  pull_request:
-    types: [opened, edited, reopened, synchronize]
   push:
     branches: [main]
+  pull_request:
 
 jobs:
   commitlint:
-    name: commitlint
+    name: conventional commits
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
+          # Only the commits being merged are linted: existing history on main
+          # is not re-checked, and GitHub merge-commit metadata falls outside
+          # the diffed range. fetch-depth 0 gives commitlint the full history.
           fetch-depth: 0
-      - uses: actions/setup-node@v7
+      - name: Validate commit messages and pull request title
+        uses: wagoid/commitlint-github-action@v2
         with:
-          node-version: "20"
-      - name: Install commitlint
-        run: npm install --no-save @commitlint/cli@latest @commitlint/config-conventional@latest
-      - name: Lint pull request title
-        if: github.event_name == 'pull_request'
-        env:
-          COMMITLINT_PR_TITLE: ${{ github.event.pull_request.title }}
-        run: ./.github/scripts/validate-commits.sh --pr-title "$COMMITLINT_PR_TITLE"
-      - name: Lint commits in pull request
-        if: github.event_name == 'pull_request'
-        run: ./.github/scripts/validate-commits.sh --range "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
-      - name: Lint commits pushed to main
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: ./.github/scripts/validate-commits.sh --range "${{ github.event.before }}" "${{ github.event.after }}"
+          configPath: ./.commitlintrc.json
+          fail_on_pr_title: true

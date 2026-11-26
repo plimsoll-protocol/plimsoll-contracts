@@ -18,7 +18,8 @@
       "vault",
       "spec",
       "deploy",
-      "ci"
+      "ci",
+      "deps"
     ]],
     "header-max-length": [2, "always", 100]
   }
