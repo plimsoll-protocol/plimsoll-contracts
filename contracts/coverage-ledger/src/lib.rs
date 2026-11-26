@@ -4,9 +4,10 @@
 #![no_std]
 
 use plimsoll_types::{
-    coverage_bps, AssetRecord, Coverage, PendingUpgrade, RegistryClient, ReserveReport, Role,
-    SupplySnapshot, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, MAX_PLAUSIBLE_BPS,
-    MIN_PLAUSIBLE_BPS, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
+    coverage_bps, AssetRecord, Coverage, CoverageStatus, PendingUpgrade, RegistryClient,
+    ReserveReport, Role, SupplySnapshot, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
+    MAX_PLAUSIBLE_BPS, MIN_PLAUSIBLE_BPS, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
+    UPGRADE_DELAY_LEDGERS,
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
@@ -29,6 +30,7 @@ enum DataKey {
     Admin,
     Registry,
     PendingUpgrade,
+    TtlGrace,
     Asset(Address),
     Supply(Address),
     /// v0.1 layout, one report per tier. Read until migrated, never written.
@@ -121,6 +123,12 @@ pub struct UpgradeExecuted {
 pub struct UpgradeCancelled {
     #[topic]
     pub wasm_hash: BytesN<32>,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtlGraceUpdated {
+    pub grace_ledgers: u32,
 }
 
 #[contract]
@@ -554,16 +562,67 @@ impl CoverageLedger {
         })
     }
 
-    /// True when both the supply snapshot and the chosen report are at most
-    /// `max_age` seconds old and coverage is at least `min_bps`.
-    pub fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool {
+    /// Returns `Covered` when both the supply snapshot and the chosen report
+    /// are at most `max_age` seconds old and coverage meets `min_bps`.
+    /// Returns `Stale` when bps is met but age falls in the grace window
+    /// `(max_age, max_age + ttl_grace_ledgers * 5]`. Returns `Uncovered`
+    /// otherwise, including when there is no data.
+    pub fn is_covered(
+        env: Env,
+        sac: Address,
+        min_bps: u32,
+        max_age: u64,
+        min_tier: Tier,
+    ) -> CoverageStatus {
         let coverage = match Self::coverage(env.clone(), sac, min_tier) {
             Some(c) => c,
-            None => return false,
+            None => return CoverageStatus::Uncovered,
         };
+        if coverage.bps < min_bps {
+            return CoverageStatus::Uncovered;
+        }
         let now = env.ledger().timestamp();
-        let fresh = |t: u64| now.saturating_sub(t) <= max_age;
-        fresh(coverage.supply_timestamp) && fresh(coverage.report_as_of) && coverage.bps >= min_bps
+        let supply_age = now.saturating_sub(coverage.supply_timestamp);
+        let report_age = now.saturating_sub(coverage.report_as_of);
+        let age = supply_age.max(report_age);
+        if age <= max_age {
+            return CoverageStatus::Covered;
+        }
+        let grace_ledgers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TtlGrace)
+            .unwrap_or(0);
+        let grace_secs = (grace_ledgers as u64).saturating_mul(5);
+        if age <= max_age.saturating_add(grace_secs) {
+            return CoverageStatus::Stale;
+        }
+        CoverageStatus::Uncovered
+    }
+
+    /// Set the TTL grace window in ledgers (1 ledger ≈ 5 seconds). Callers
+    /// receive `Stale` during this window instead of `Uncovered`. Zero disables
+    /// the grace window.
+    pub fn set_ttl_grace(env: Env, grace_ledgers: u32) {
+        admin(&env).require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::TtlGrace, &grace_ledgers);
+        bump_instance(&env);
+        TtlGraceUpdated { grace_ledgers }.publish(&env);
+    }
+
+    /// The current TTL grace window in ledgers. Zero means no grace period.
+    pub fn ttl_grace(env: Env) -> u32 {
+        let grace = env
+            .storage()
+            .instance()
+            .get(&DataKey::TtlGrace)
+            .unwrap_or(0u32);
+        if grace > 0 {
+            bump_instance(&env);
+        }
+        grace
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) {
