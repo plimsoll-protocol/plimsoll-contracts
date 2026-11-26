@@ -1,0 +1,146 @@
+{
+  "contract": "coverage-ledger",
+  "events": [
+    {
+      "name": "asset_listed",
+      "topics": [
+        "asset_listed",
+        "<contract>"
+      ],
+      "data": {
+        "code": "<string>",
+        "issuer": "<account>"
+      }
+    },
+    {
+      "name": "supply_posted",
+      "topics": [
+        "supply_posted",
+        "<contract>"
+      ],
+      "data": {
+        "amount": 10000000000,
+        "breakdown_hash": "<bytes32>",
+        "ledger": 1000,
+        "poster": "<account>"
+      }
+    },
+    {
+      "name": "reserve_posted",
+      "topics": [
+        "reserve_posted",
+        "<contract>",
+        2
+      ],
+      "data": {
+        "amount": 10000000000,
+        "as_of": 1700000000,
+        "doc_hash": "<bytes32>",
+        "doc_uri": "<string>",
+        "reporter": "<account>"
+      }
+    },
+    {
+      "name": "reserve_posted",
+      "topics": [
+        "reserve_posted",
+        "<contract>",
+        3
+      ],
+      "data": {
+        "amount": 9900000000,
+        "as_of": 1700000000,
+        "doc_hash": "<bytes32>",
+        "doc_uri": "<string>",
+        "reporter": "<account>"
+      }
+    },
+    {
+      "name": "reserve_posted",
+      "topics": [
+        "reserve_posted",
+        "<contract>",
+        1
+      ],
+      "data": {
+        "amount": 9800000000,
+        "as_of": 1700000000,
+        "doc_hash": "<bytes32>",
+        "doc_uri": "<string>",
+        "reporter": "<account>"
+      }
+    },
+    {
+      "name": "native_supply_enabled",
+      "topics": [
+        "native_supply_enabled",
+        "<contract>"
+      ],
+      "data": {
+        "token": "<contract>"
+      }
+    },
+    {
+      "name": "paused",
+      "topics": [
+        "paused"
+      ],
+      "data": {
+        "by": "<account>"
+      }
+    },
+    {
+      "name": "unpaused",
+      "topics": [
+        "unpaused"
+      ],
+      "data": {
+        "by": "<account>"
+      }
+    },
+    {
+      "name": "admin_transferred",
+      "topics": [
+        "admin_transferred",
+        "<account>"
+      ],
+      "data": {}
+    },
+    {
+      "name": "upgrade_proposed",
+      "topics": [
+        "upgrade_proposed",
+        "<bytes32>"
+      ],
+      "data": {
+        "executable_at_ledger": 18280
+      }
+    },
+    {
+      "name": "upgrade_cancelled",
+      "topics": [
+        "upgrade_cancelled",
+        "<bytes32>"
+      ],
+      "data": {}
+    },
+    {
+      "name": "upgrade_proposed",
+      "topics": [
+        "upgrade_proposed",
+        "<bytes32>"
+      ],
+      "data": {
+        "executable_at_ledger": 18280
+      }
+    },
+    {
+      "name": "upgrade_executed",
+      "topics": [
+        "upgrade_executed",
+        "<bytes32>"
+      ],
+      "data": {}
+    }
+  ]
+}

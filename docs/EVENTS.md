@@ -145,6 +145,39 @@ Raised by `transfer_admin`, which requires both the outgoing and incoming
 admin to authorise. No testnet example: admin has never been transferred on the
 demo deployment.
 
+### `paused`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `paused` | `Symbol` |
+| data | `by` | `Address` (account) |
+
+Raised by `pause()` after the flag is set. The ledger stops recording figures
+and `is_covered` raises `Paused`; see [SPEC.md](SPEC.md#emergency-pause).
+Idempotent: calling `pause()` while already paused still emits the event, so a
+watcher sees the admin asserting the state either way.
+
+### `unpaused`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `unpaused` | `Symbol` |
+| data | `by` | `Address` (account) |
+
+Raised by `unpause()` after the flag is cleared.
+
+### `native_supply_enabled`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `native_supply_enabled` | `Symbol` |
+| topic 1 | `sac` | `Address` (contract) |
+| data | `token` | `Address` (contract) |
+
+Raised by `enable_native_supply`, which opts an asset in to reading supply
+from a SEP-41 token's `total_supply()` instead of the posted snapshot. The
+snapshot is kept and is used again if the token call fails.
+
 ### `upgrade_proposed`
 
 | | Name | Type |
@@ -292,6 +325,9 @@ pasted:
 | `upgrade_proposed` | `AAAADwAAABB1cGdyYWRlX3Byb3Bvc2Vk` |
 | `upgrade_executed` | `AAAADwAAABB1cGdyYWRlX2V4ZWN1dGVk` |
 | `upgrade_cancelled` | `AAAADwAAABF1cGdyYWRlX2NhbmNlbGxlZA==` |
+| `paused` | `AAAADwAAAAZwYXVzZWQAAA==` |
+| `unpaused` | `AAAADwAAAAh1bnBhdXNlZA==` |
+| `native_supply_enabled` | `AAAADwAAABVuYXRpdmVfc3VwcGx5X2VuYWJsZWQAAAA=` |
 
 ```bash
 # supply posts for any asset: name, then any sac
@@ -306,3 +342,24 @@ stellar events --network testnet \
   --start-ledger 5466000 --output json \
   --topic 'AAAADwAAAA5yZXNlcnZlX3Bvc3RlZAAA,*,AAAAAwAAAAM='
 ```
+
+## Snapshot tests
+
+The shape of every event above is pinned by
+[`tests/events`](../tests/events/tests/snapshots.rs). It drives the ledger and
+the vault through every event they can emit, normalises addresses, byte arrays
+and strings to type placeholders, and compares the resulting topics and data
+to the checked-in files under [`tests/snapshots`](snapshots). A change to an
+event name, a topic's position or type, a data key, or a field's type fails
+that test, which is what makes an unintentional event-schema change fail CI.
+
+When a change is intentional, update [SPEC.md](SPEC.md) and this file, then
+regenerate and review the snapshot:
+
+```bash
+UPDATE_SNAPSHOTS=1 cargo test -p plimsoll-event-snapshots
+```
+
+The snapshot records field **types and values that are not caller-specific**
+(numbers, symbols, the tier topic), not addresses or hashes, because those are
+random in the test host and are not part of the schema.

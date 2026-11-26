@@ -27,8 +27,12 @@ one that comes back. In practice:
 - `coverage-ledger` calls `reporter-registry.role_of` and the SAC's `name`,
   but neither can fail on a valid deployment, so a ledger call only ever
   fails with a ledger code.
-- `coverage-ledger.is_covered` and `coverage` never fail. Every reason an
-  asset might not qualify comes back as `false` or `None`.
+- `coverage-ledger.is_covered` fails only with `Paused`, and only while an
+  admin has paused the ledger. Every other reason an asset might not qualify
+  comes back as `false`. `coverage` never fails; it returns `None`.
+- `covered-vault.deposit` propagates the ledger's `Paused` error unchanged
+  when the ledger is paused, so a pause is distinguishable from
+  `NotCovered`.
 
 ### Numbers are never reused or renumbered
 
@@ -61,6 +65,9 @@ codes as literal numbers, so a renumbering fails CI.
 | 11 | | [`InvalidUri`](#11-invaliduri) | |
 | 12 | | [`ImplausibleAmount`](#12-implausibleamount) | |
 | 13 | | [`TooManyReporters`](#13-toomanyreporters) | |
+| 14 | | [`UpgradeNotProposed`](#14-upgradenotproposed) | |
+| 15 | | [`UpgradeDelayNotElapsed`](#15-upgradedelaynotelapsed) | |
+| 16 | | [`Paused`](#16-paused) | |
 
 ## RegistryError
 
@@ -92,8 +99,9 @@ when several apply the caller sees the first:
 | Function | Order checked |
 | --- | --- |
 | `list_asset` | `NotAStellarAsset` (not a SAC), `AlreadyListed`, `NotAStellarAsset` (SAC name has no issuer) |
-| `post_supply` | auth, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` |
-| `post_reserve` | auth, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+| `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` |
+| `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+| `enable_native_supply` | auth, `AssetNotListed` |
 
 ### 1 `NotAStellarAsset`
 
@@ -225,6 +233,37 @@ when several apply the caller sees the first:
   `reporter-registry.revoke`. Their slot is reclaimed by the next
   `post_reserve` at that tier.
 
+### 14 `UpgradeNotProposed`
+
+- **Raised by:** `execute_upgrade`, `cancel_upgrade`.
+- **Cause:** Nothing is awaiting execution. The proposal was never made, was
+  already executed, or was cancelled. A new proposal also replaces the old
+  one, so only the latest hash is ever pending.
+- **Remedy:** Read `pending_upgrade()`. If it is `None`, call
+  `propose_upgrade(wasm_hash)` and wait `UPGRADE_DELAY_LEDGERS` before
+  executing.
+
+### 15 `UpgradeDelayNotElapsed`
+
+- **Raised by:** `execute_upgrade`.
+- **Cause:** The pending proposal's `executable_at_ledger` has not been
+  reached yet. The delay is `UPGRADE_DELAY_LEDGERS` ledgers from the proposal.
+- **Remedy:** Wait until the current ledger sequence is at least
+  `pending_upgrade().executable_at_ledger`, then execute. Watching
+  `upgrade_proposed` is the intended signal to raise an alarm before that
+  ledger closes.
+
+### 16 `Paused`
+
+- **Raised by:** `post_supply`, `post_reserve`, `is_covered`.
+- **Cause:** An admin called `pause()` and has not called `unpause()` yet.
+  Pausing stops new figures from being recorded and stops `is_covered` from
+  answering, so a consumer never reads a pause as an under-backed asset.
+- **Remedy:** Nothing is wrong with the caller's request. Wait for the admin
+  to `unpause()`, or read `is_paused()` and `coverage_status(...)` first and
+  show the paused state in the UI. `coverage`, `get_supply`, `get_reports`
+  and `coverage_status` keep working while paused.
+
 ## VaultError
 
 Raised by `covered-vault`, the reference consumer. These are the errors end
@@ -248,8 +287,10 @@ users meet most.
   - The chosen report's `as_of` is more than `max_age` seconds ago.
   - Coverage is below `min_bps`.
 - **Remedy:** Users should wait. The asset will be accepted again once fresh
-  figures show it is covered, and withdrawals are never blocked. Front ends
-  should call `can_deposit()` before offering a deposit, and to explain the
+  figures show it is covered, and withdrawals are never blocked. A paused
+  ledger raises `Paused` from `deposit` instead of `NotCovered`, so check
+  `coverage-ledger.is_paused()` to tell the two apart. Front ends should call
+  `can_deposit()` before offering a deposit, and to explain the
   refusal, read `config()` and then
   `coverage-ledger.coverage(asset, min_tier)`:
   - `None` means a figure is missing.

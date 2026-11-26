@@ -4,9 +4,10 @@
 #![no_std]
 
 use plimsoll_types::{
-    coverage_bps, AssetRecord, Coverage, PendingUpgrade, RegistryClient, ReserveReport, Role,
-    SupplySnapshot, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, MAX_PLAUSIBLE_BPS,
-    MIN_PLAUSIBLE_BPS, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
+    coverage_bps, AssetRecord, Coverage, CoverageStatus, CoveredInfo, PendingUpgrade,
+    RegistryClient, ReserveReport, Role, StaleInfo, SupplySnapshot, SupplyTokenClient, Tier,
+    INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, MAX_PLAUSIBLE_BPS, MIN_PLAUSIBLE_BPS,
+    PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, SECONDS_PER_LEDGER, UPGRADE_DELAY_LEDGERS,
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype,
@@ -49,6 +50,12 @@ enum DataKey {
     Reporters(Address, Tier),
     /// The account the asset's issuer appointed to post `IssuerSigned` for it.
     IssuerDelegate(Address),
+    /// Incident switch. Absent means not paused.
+    Paused,
+    /// The SEP-41 token whose `total_supply()` replaces the posted snapshot.
+    NativeSupply(Address),
+    /// Maps a deprecated asset SAC to its successor SAC (at most one hop).
+    Alias(Address),
 }
 
 #[contracterror]
@@ -70,6 +77,8 @@ pub enum LedgerError {
     TooManyReporters = 13,
     UpgradeNotProposed = 14,
     UpgradeDelayNotElapsed = 15,
+    SelfAlias = 16,
+    Paused = 17,
 }
 
 #[contractevent]
@@ -130,6 +139,26 @@ pub struct IssuerDelegateCleared {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeSupplyEnabled {
+    #[topic]
+    pub sac: Address,
+    pub token: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Paused {
+    pub by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Unpaused {
+    pub by: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpgradeProposed {
     #[topic]
     pub wasm_hash: BytesN<32>,
@@ -148,6 +177,15 @@ pub struct UpgradeExecuted {
 pub struct UpgradeCancelled {
     #[topic]
     pub wasm_hash: BytesN<32>,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetAliased {
+    #[topic]
+    pub old: Address,
+    #[topic]
+    pub new: Address,
 }
 
 #[contract]
@@ -175,6 +213,22 @@ fn bump_instance(env: &Env) {
 
 fn pending(env: &Env) -> Option<PendingUpgrade> {
     env.storage().instance().get(&DataKey::PendingUpgrade)
+}
+
+fn paused_flag(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+}
+
+/// Stop a write at the door while the incident switch is on. Checked after
+/// authentication and before every other write error, so the pause is the
+/// reason callers see.
+fn require_not_paused(env: &Env) {
+    if paused_flag(env) {
+        panic_with_error!(env, LedgerError::Paused);
+    }
 }
 
 fn read_persistent<V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
@@ -282,6 +336,47 @@ fn speaks_for_issuer(env: &Env, sac: &Address, issuer: &Address, reporter: &Addr
             .is_some_and(|delegate| delegate == *reporter)
 }
 
+/// The supply figure coverage is judged against, from either the native source
+/// or the posted snapshot.
+struct SupplyFigure {
+    amount: i128,
+    ledger: u32,
+    timestamp: u64,
+}
+
+/// The token opted in to as this asset's native supply source, if any.
+fn native_token(env: &Env, sac: &Address) -> Option<Address> {
+    read_persistent(env, &DataKey::NativeSupply(sac.clone()))
+}
+
+/// The native figure, or `None` when the opt-in is absent or the call fails.
+/// A failure is not an error: callers fall back to the posted snapshot.
+fn native_supply(env: &Env, sac: &Address) -> Option<SupplyFigure> {
+    let token = native_token(env, sac)?;
+    match SupplyTokenClient::new(env, &token).try_total_supply() {
+        Ok(Ok(amount)) if amount >= 0 => Some(SupplyFigure {
+            amount,
+            ledger: env.ledger().sequence(),
+            timestamp: env.ledger().timestamp(),
+        }),
+        _ => None,
+    }
+}
+
+/// Native supply when opted in and answering, otherwise the latest snapshot.
+fn effective_supply(env: &Env, sac: &Address) -> Option<SupplyFigure> {
+    if let Some(native) = native_supply(env, sac) {
+        return Some(native);
+    }
+    read_persistent::<SupplySnapshot>(env, &DataKey::Supply(sac.clone())).map(|snapshot| {
+        SupplyFigure {
+            amount: snapshot.amount,
+            ledger: snapshot.ledger,
+            timestamp: snapshot.timestamp,
+        }
+    })
+}
+
 /// Whether a stored report still counts: its reporter must still be entitled
 /// to its tier. An issuer-signed report counts while its reporter is the
 /// issuer, which the asset record fixes, or the current delegate. A revoked
@@ -299,29 +394,47 @@ fn counts(env: &Env, registry: &RegistryClient, sac: &Address, report: &ReserveR
     registry.role_of(&report.reporter) == Some(needed)
 }
 
-/// The freshest report in `candidates` that still counts. Candidates come in
-/// priority order (strongest tier first, then first-post order), so on equal
-/// `as_of` the earlier one wins. The registry is asked only about the report
-/// that would win, and again only if that one no longer counts, so a fresh
-/// issuer-signed report costs no cross-contract call at all.
-fn pick_counting(
-    env: &Env,
-    sac: &Address,
-    mut candidates: Vec<ReserveReport>,
-) -> Option<ReserveReport> {
+/// The freshest counting report in `candidates`.
+///
+/// Two-phase per iteration: (1) a single O(n) index scan that finds the
+/// globally freshest non-rejected candidate without touching the registry,
+/// then (2) one `counts` call. If that report is revoked the index is marked
+/// and the loop repeats. This avoids Vec::remove (O(n) element shift) and
+/// keeps registry calls at most equal to the number of revoked reporters.
+/// A bitmask tracks rejected positions; `candidates` is never mutated.
+/// We have at most 3 tiers × (1 legacy + MAX_REPORTERS_PER_TIER) = 15
+/// entries, so a u32 bitmask is always sufficient.
+fn pick_counting(env: &Env, sac: &Address, candidates: Vec<ReserveReport>) -> Option<ReserveReport> {
     let registry = RegistryClient::new(env, &registry(env));
+    let n = candidates.len();
+    let mut skip: u32 = 0;
     loop {
-        let mut best: Option<(u32, ReserveReport)> = None;
-        for (i, report) in candidates.iter().enumerate() {
-            if best.as_ref().is_none_or(|(_, b)| report.as_of > b.as_of) {
-                best = Some((i as u32, report));
+        // Phase 1: find the freshest non-skipped candidate (no registry call).
+        let mut best_i: Option<u32> = None;
+        for i in 0..n {
+            if skip & (1u32 << i) != 0 {
+                continue;
             }
+            let r = candidates.get(i).unwrap();
+            best_i = Some(match best_i {
+                None => i,
+                Some(bi) => {
+                    let b = candidates.get(bi).unwrap();
+                    if r.as_of > b.as_of || (r.as_of == b.as_of && r.tier > b.tier) {
+                        i
+                    } else {
+                        bi
+                    }
+                }
+            });
         }
-        let (i, report) = best?;
+        // Phase 2: check only the winner.
+        let i = best_i?;
+        let report = candidates.get(i).unwrap();
         if counts(env, &registry, sac, &report) {
             return Some(report);
         }
-        candidates.remove(i);
+        skip |= 1u32 << i;
     }
 }
 
@@ -420,6 +533,7 @@ impl CoverageLedger {
         breakdown_hash: BytesN<32>,
     ) {
         poster.require_auth();
+        require_not_paused(&env);
         let role = RegistryClient::new(&env, &registry(&env)).role_of(&poster);
         if role != Some(Role::SupplyPoster) {
             panic_with_error!(&env, LedgerError::NotSupplyPoster);
@@ -469,6 +583,7 @@ impl CoverageLedger {
         doc_uri: String,
     ) -> Tier {
         reporter.require_auth();
+        require_not_paused(&env);
         let asset = require_listed(&env, &sac);
         let tier = if speaks_for_issuer(&env, &sac, &asset.issuer, &reporter) {
             Tier::IssuerSigned
@@ -562,6 +677,27 @@ impl CoverageLedger {
         read_persistent(&env, &DataKey::Supply(sac))
     }
 
+    /// Register `new` as the successor of the deprecated asset `old`.
+    /// Both must already be listed. At most one alias hop is ever followed:
+    /// `is_covered(old, ...)` and `coverage(old, ...)` will resolve `old` to
+    /// `new`, but `new`'s own alias (if any) is ignored.
+    pub fn alias_asset(env: Env, old: Address, new: Address) {
+        admin(&env).require_auth();
+        if old == new {
+            panic_with_error!(&env, LedgerError::SelfAlias);
+        }
+        require_listed(&env, &old);
+        require_listed(&env, &new);
+        write_persistent(&env, &DataKey::Alias(old.clone()), &new);
+        bump_instance(&env);
+        AssetAliased { old, new }.publish(&env);
+    }
+
+    /// The registered successor of `asset`, if one exists.
+    pub fn get_alias(env: Env, asset: Address) -> Option<Address> {
+        read_persistent(&env, &DataKey::Alias(asset))
+    }
+
     /// The freshest report at `tier` that still counts.
     pub fn get_report(env: Env, sac: Address, tier: Tier) -> Option<ReserveReport> {
         freshest_at(&env, &sac, tier)
@@ -583,9 +719,13 @@ impl CoverageLedger {
     }
 
     /// Latest supply against the freshest report at `min_tier` or stronger.
+    /// If `sac` has a registered alias its successor is used transparently
+    /// (at most one hop — the successor's own alias, if any, is not followed).
     pub fn coverage(env: Env, sac: Address, min_tier: Tier) -> Option<Coverage> {
-        let supply = read_persistent::<SupplySnapshot>(&env, &DataKey::Supply(sac.clone()))?;
-        let report = best_report(&env, &sac, min_tier)?;
+        let resolved = read_persistent::<Address>(&env, &DataKey::Alias(sac.clone()))
+            .unwrap_or_else(|| sac.clone());
+        let supply = effective_supply(&env, &resolved)?;
+        let report = best_report(&env, &resolved, min_tier)?;
         Some(Coverage {
             bps: coverage_bps(report.amount, supply.amount),
             supply: supply.amount,
@@ -598,15 +738,92 @@ impl CoverageLedger {
     }
 
     /// True when both the supply snapshot and the chosen report are at most
-    /// `max_age` seconds old and coverage is at least `min_bps`.
+    /// `max_age` seconds old and coverage is at least `min_bps` (inclusive).
+    ///
+    /// If `sac` has a registered alias its successor is used transparently
+    /// (at most one hop). See `alias_asset` and `get_alias`.
+    ///
+    /// Performance note: the supply snapshot is loaded first. When it is
+    /// absent or already older than `max_age` the function returns false
+    /// immediately, before reading any reserve reports. This is the common
+    /// early-exit path: a stale supply avoids all subsequent storage reads.
     pub fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool {
+        match Self::coverage_status(env.clone(), sac, min_bps, max_age, min_tier) {
+            CoverageStatus::Paused => panic_with_error!(&env, LedgerError::Paused),
+            CoverageStatus::Covered(_) => true,
+            CoverageStatus::Stale(_) | CoverageStatus::Uncovered => false,
+        }
+    }
+
+    /// `coverage` with the reason attached, in one call. Precedence: paused,
+    /// then stale (the last ratio is not a verdict on backing), then
+    /// under-backed, then covered.
+    pub fn coverage_status(
+        env: Env,
+        sac: Address,
+        min_bps: u32,
+        max_age: u64,
+        min_tier: Tier,
+    ) -> CoverageStatus {
+        if paused_flag(&env) {
+            return CoverageStatus::Paused;
+        }
         let coverage = match Self::coverage(env.clone(), sac, min_tier) {
             Some(c) => c,
-            None => return false,
+            None => return CoverageStatus::Uncovered,
         };
         let now = env.ledger().timestamp();
-        let fresh = |t: u64| now.saturating_sub(t) <= max_age;
-        fresh(coverage.supply_timestamp) && fresh(coverage.report_as_of) && coverage.bps >= min_bps
+        let age = now
+            .saturating_sub(coverage.supply_timestamp)
+            .max(now.saturating_sub(coverage.report_as_of));
+        if age > max_age {
+            return CoverageStatus::Stale(StaleInfo {
+                last_bps: coverage.bps,
+                age_ledgers: (age / SECONDS_PER_LEDGER).min(u32::MAX as u64) as u32,
+            });
+        }
+        if coverage.bps < min_bps {
+            return CoverageStatus::Uncovered;
+        }
+        CoverageStatus::Covered(CoveredInfo { bps: coverage.bps })
+    }
+
+    /// Stop recording figures and answering `is_covered` during an incident.
+    /// Idempotent, and the event names the admin that asserted the state.
+    pub fn pause(env: Env) {
+        let by = admin(&env);
+        by.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        bump_instance(&env);
+        Paused { by }.publish(&env);
+    }
+
+    /// Clear the incident switch.
+    pub fn unpause(env: Env) {
+        let by = admin(&env);
+        by.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        bump_instance(&env);
+        Unpaused { by }.publish(&env);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        paused_flag(&env)
+    }
+
+    /// Opt `sac` in to reading supply from `token.total_supply()` instead of
+    /// the posted snapshot. The snapshot is kept as the fallback.
+    pub fn enable_native_supply(env: Env, sac: Address, token: Address) {
+        admin(&env).require_auth();
+        require_listed(&env, &sac);
+        write_persistent(&env, &DataKey::NativeSupply(sac.clone()), &token);
+        bump_instance(&env);
+        NativeSupplyEnabled { sac, token }.publish(&env);
+    }
+
+    /// The opted-in token, or `None` when the asset reads the snapshot.
+    pub fn native_supply_token(env: Env, sac: Address) -> Option<Address> {
+        native_token(&env, &sac)
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) {

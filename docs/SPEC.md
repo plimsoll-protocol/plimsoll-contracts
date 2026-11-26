@@ -51,6 +51,9 @@ it exists to show the integration in about 100 lines.
 | `ReserveReport` | struct | `amount: i128`, `as_of: u64`, `posted_at: u64`, `tier: Tier`, `reporter: Address`, `doc_hash: BytesN<32>`, `doc_uri: String` |
 | `Coverage` | struct | `bps: u32`, `supply: i128`, `reserves: i128`, `tier: Tier`, `supply_ledger: u32`, `supply_timestamp: u64`, `report_as_of: u64` |
 | `PendingUpgrade` | struct | `wasm_hash: BytesN<32>`, `executable_at_ledger: u32` |
+| `CoveredInfo` | struct | `bps: u32` |
+| `StaleInfo` | struct | `last_bps: u32`, `age_ledgers: u32` |
+| `CoverageStatus` | enum | `Covered(CoveredInfo)`, `Stale(StaleInfo)`, `Uncovered`, `Paused` |
 
 Amounts are in the asset's smallest unit (Stellar classic assets: 7 decimals,
 so `1_0000000` is one unit). No floats anywhere. Coverage is basis points:
@@ -130,10 +133,11 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 
 | Entry | Extended by |
 | --- | --- |
-| `Admin`, `Registry` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `list_asset`, `post_supply`, `post_reserve` |
+| `Admin`, `Registry`, `Paused` (instance) | `__constructor`, `transfer_admin`, `list_asset`, `post_supply`, `post_reserve`, `pause`, `unpause`, `propose_upgrade`, `execute_upgrade`, `cancel_upgrade` |
 | `Asset(Address)` (persistent) | `list_asset` (write), `get_asset` (read) |
-| `Supply(Address)` (persistent) | `post_supply` (write), `get_supply`, `coverage`, `is_covered` (read) |
-| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `coverage`, `is_covered` (read) |
+| `Supply(Address)` (persistent) | `post_supply` (write), `get_supply`, `coverage`, `is_covered`, `coverage_status` (read) |
+| `NativeSupply(Address)` (persistent) | `enable_native_supply` (write), `native_supply_token`, `coverage`, `is_covered`, `coverage_status` (read) |
+| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `coverage`, `is_covered`, `coverage_status` (read) |
 
 **covered-vault**
 
@@ -241,13 +245,15 @@ Records what was said, and answers coverage questions.
 | `Admin` | instance | `Address` |
 | `Registry` | instance | `Address` |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
+| `Paused` | instance | `bool` (absent means not paused) |
 | `Asset(Address)` | persistent | `AssetRecord` |
 | `Supply(Address)` | persistent | `SupplySnapshot` (latest only) |
+| `NativeSupply(Address)` | persistent | `Address`: the SEP-41 token queried for supply when the opt-in is set |
 | `ReportBy(Address, Tier, Address)` | persistent | `ReserveReport`: the latest from one reporter at one tier for one asset |
 | `Reporters(Address, Tier)` | persistent | `Vec<Address>`: the reporters with a `ReportBy` entry at that tier, in the order they first posted; at most `MAX_REPORTERS_PER_TIER = 4` |
 | `Report(Address, Tier)` | persistent | `ReserveReport`: the v0.1 layout (one per tier). Read until migrated, never written; see [Upgrading a v0.1 deployment](#upgrading-a-v01-deployment) |
 | `IssuerDelegate(Address)` | persistent | `Address`: the account the asset's issuer appointed to post `IssuerSigned` reports for it; absent when none is set |
-
+| `Alias(Address)` | persistent | `Address`: maps a deprecated asset SAC to its successor SAC |
 Every reporter keeps their own figure. Two auditors' reports coexist, and a
 transcriber who posts a later `as_of` adds a fresher figure without erasing
 anyone else's. The key includes the tier as well as the reporter so that a
@@ -299,7 +305,14 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `get_report(sac, tier: Tier)` | — | `Option<ReserveReport>` (the freshest report at that tier that counts) | — | — |
 | `get_reports(sac)` | — | `Vec<ReserveReport>` (every stored report that counts: strongest tier first, then first-post order within a tier) | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
-| `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | — | — |
+| `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | `Paused` | — |
+| `coverage_status(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `CoverageStatus` | — | — |
+| `pause()` / `unpause()` | admin | `()` | — | `paused` / `unpaused` `by` |
+| `is_paused()` | — | `bool` | — | — |
+| `enable_native_supply(sac, token: Address)` | admin | `()` | `AssetNotListed` | `native_supply_enabled {sac} token` |
+| `native_supply_token(sac)` | — | `Option<Address>` | — | — |
+| `alias_asset(old: Address, new: Address)` | admin | `()` | `AssetNotListed` (either SAC unlisted), `SelfAlias` | `asset_aliased {old, new}` |
+| `get_alias(asset: Address)` | — | `Option<Address>` | — | — |
 | `registry()` / `admin()` | — | `Address` | — | — |
 | `transfer_admin(new_admin)` | admin and new_admin | `()` | — | `admin_transferred` |
 | `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
@@ -356,16 +369,95 @@ Rules:
 - `coverage(sac, min_tier)` picks, among the stored reports at tiers
   `>= min_tier` that count, the one with the latest `as_of`. Ties go to the
   higher tier, then to the reporter who first posted at that tier. It returns
-  `None` if there is no supply snapshot or no qualifying report.
-- `is_covered` is true only if `coverage` is `Some`, both the supply snapshot
+  `None` if there is no supply figure or no qualifying report. The supply
+  figure is the latest snapshot, or the token's `total_supply()` when the
+  asset has opted in to a native supply source (see below).
+- `is_covered` is true only if `coverage` is `Some`, both the supply figure
   and the report are no older than `max_age` seconds, and `bps >= min_bps`.
+  It raises `Paused` rather than answering while the ledger is paused.
+  The comparison is **inclusive**: a coverage ratio exactly equal to `min_bps`
+  returns `true`. This matters at exact round numbers such as `min_bps = 10_000`
+  (100 %): an asset with reserves equal to its circulating supply passes the
+  gate.
+
+- `alias_asset(old, new)` creates or replaces the alias mapping `old → new`.
+  Both `old` and `new` must be listed assets; `old == new` is rejected with
+  `SelfAlias`. Only one alias hop is ever followed: `is_covered(old, ...)` and
+  `coverage(old, ...)` resolve to `new`, but if `new` itself has an alias it is
+  ignored (no chaining). The admin may call `alias_asset` a second time with the
+  same `old` to point it at a different successor, or to `old` itself (which
+  would be rejected with `SelfAlias`; to remove an alias, use a new listing for
+  `old`).
+- `get_alias(asset)` returns the successor address if one has been registered,
+  or `None`.
 
 Errors (`LedgerError`): `NotAStellarAsset = 1`, `AlreadyListed = 2`,
 `AssetNotListed = 3`, `NotSupplyPoster = 4`, `NotReporter = 5`,
 `InvalidAmount = 6`, `FutureLedger = 7`, `StaleLedger = 8`,
 `FutureTimestamp = 9`, `StaleReport = 10`, `InvalidUri = 11`,
-`ImplausibleAmount = 12`, `TooManyReporters = 13`.
+`ImplausibleAmount = 12`, `TooManyReporters = 13`, `UpgradeNotProposed = 14`,
+`UpgradeDelayNotElapsed = 15`, `SelfAlias = 16`, `Paused = 17`.
 Causes, remedies and the order they are checked in: [ERRORS.md](ERRORS.md#ledgererror).
+
+### Emergency pause
+
+`pause()` and `unpause()` are admin-gated switches for an incident. While the
+ledger is paused:
+
+- `post_supply` and `post_reserve` fail with `Paused` before any other check
+  except authentication, so no figure is recorded from either side.
+- `is_covered` raises `Paused` instead of returning false. A consumer such as
+  `covered-vault.deposit` propagates that error, so a pause reads as a pause
+  and not as an under-backed asset.
+- `coverage`, `coverage_status`, all views and `list_asset` keep working. A
+  dashboard can still show the last recorded state, and `coverage_status`
+  returns `Paused`.
+
+Both calls are idempotent and publish an event every time: `paused {by}` or
+`unpaused {by}`, where `by` is the admin that signed. Keeping `unpause`
+non-failing means an admin who is unsure of the current state can still assert
+the state they want. The flag lives in instance storage and defaults to false
+when absent, so an upgrade from a deployment without it starts unpaused.
+
+### Coverage status
+
+`coverage_status(sac, min_bps, max_age, min_tier)` answers the same question as
+`is_covered` with enough detail for a UI, in one call:
+
+| Variant | Meaning |
+| --- | --- |
+| `Paused` | The ledger is paused. Nothing is being recorded or gated. |
+| `Uncovered` | There is no supply figure, no qualifying report, or fresh figures give `bps < min_bps`. |
+| `Stale(StaleInfo { last_bps, age_ledgers })` | Figures exist and at least one of supply or report is older than `max_age` seconds. `last_bps` is the ratio they last gave; `age_ledgers` is the age of the older of the two in whole ledgers (seconds divided by the 5-second close time, rounded down). |
+| `Covered(CoveredInfo { bps })` | Fresh figures give at least `min_bps`. |
+
+The order is deliberate: paused first, stale second (a stale ratio is not a
+verdict on backing), then under-backed, then covered. `age_ledgers` is derived
+from the supply snapshot's `ledger` and the report's `as_of` timestamp using
+the 5-second ledger close; it is an estimate for display, not a consensus
+value. `is_covered` is exactly `CoverageStatus::Covered` while unpaused.
+
+### Native supply source
+
+By default the liability side is a posted snapshot. An asset can opt in to
+reading supply directly from a SEP-41 token contract instead:
+`enable_native_supply(sac, token)` is admin-gated and requires `sac` to be
+listed. It stores the token under `NativeSupply(sac)` and publishes
+`native_supply_enabled {sac} token`; `native_supply_token(sac)` returns it.
+
+When the opt-in is set, `coverage`, `is_covered` and `coverage_status` call
+`token.total_supply()` and treat the result as a supply figure stamped at the
+current ledger and timestamp, so it is always fresh. If the call fails (the
+token does not implement SEP-41 `total_supply`, traps, or returns a negative
+amount), those functions fall back to the posted `Supply(sac)` snapshot. The
+fallback is silent by design: a token that stops answering degrades to the
+last published figure rather than making every consumer fail. `post_supply`
+is unaffected, so a poster can keep publishing snapshots as a backstop.
+
+The snapshot itself is not deleted when the opt-in is enabled, and
+`get_supply` still returns it. `post_reserve`'s plausibility check also keeps
+using the posted snapshot: the check exists to catch a reporter's unit slip,
+and the native figure is not a statement the reporter made.
 
 ### Upgrading a v0.1 deployment
 
@@ -461,7 +553,9 @@ vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 
 ## Out of scope for v0.1
 
-- Soroban-native SEP-41 tokens (no standard total-supply function).
+- Listing a Soroban-native SEP-41 token as an asset. Its supply can be read
+  through `enable_native_supply`, but `list_asset` still accepts only a
+  Stellar Asset Contract, because the issuer and code come from the SAC name.
 - On-chain dispute of supply figures. Watchers recompute off-chain; disputes
   are tracked as an open issue.
 - Zero-knowledge proof of individual holder inclusion.

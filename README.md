@@ -2,6 +2,8 @@
   <img src="docs/banner.svg" alt="Plimsoll" width="100%" />
 </p>
 
+
+
 <p align="center">
   <a href="https://github.com/plimsoll-protocol/plimsoll-contracts/actions/workflows/ci.yml"><img src="https://github.com/plimsoll-protocol/plimsoll-contracts/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/soroban--sdk-28.0.0-0f1d2b" alt="soroban-sdk 28" />
@@ -335,3 +337,6 @@ Trust assumptions per actor: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 ## License
 
 [Apache-2.0](LICENSE)
+
+
+

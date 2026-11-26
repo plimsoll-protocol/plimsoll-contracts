@@ -8,6 +8,7 @@ members = [
   "contracts/upgrade-fixture-registry",
   "contracts/upgrade-fixture-ledger",
   "tests/e2e",
+  "tests/events",
   "examples/coverage-gate",
 ]
 # `tests/e2e` imports the built wasm, so it only compiles after
@@ -21,6 +22,7 @@ default-members = [
   "contracts/covered-vault",
   "contracts/upgrade-fixture-registry",
   "contracts/upgrade-fixture-ledger",
+  "tests/events",
   "examples/coverage-gate",
 ]
 

@@ -35,6 +35,9 @@ advisory has a comment explaining why it cannot be fixed yet.
 
 - [ ] One logical change per pull request. Link the issue (`Closes #12`).
 - [ ] `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and `cargo deny check` pass.
+- [ ] If an event changed, `tests/snapshots/` is regenerated with
+      `UPDATE_SNAPSHOTS=1 cargo test -p plimsoll-event-snapshots` and the diff
+      is reviewed alongside [docs/EVENTS.md](docs/EVENTS.md).
 - [ ] New public functions have tests for the success path **and** every error they can return.
 - [ ] If behaviour changed, [docs/SPEC.md](docs/SPEC.md) is updated in the same pull request.
 - [ ] `version()` constant is bumped in the affected contract(s) when behaviour changes.
@@ -50,6 +53,9 @@ advisory has a comment explaining why it cannot be fixed yet.
 - Every persistent write extends TTL with the constants in `plimsoll-types`.
 - Every state change emits a `#[contractevent]`. The indexer depends on them;
   changing an event's fields is a breaking change and needs an issue first.
+  `tests/events` pins the topic and data shape of every ledger and vault event
+  against the files in `tests/snapshots/`; an unintentional change fails
+  `cargo test`.
 - `require_auth()` on the address whose authority is used, before any write.
 
 ## AI-assisted contributions

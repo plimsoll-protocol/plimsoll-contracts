@@ -1,0 +1,25 @@
+{
+  "contract": "covered-vault",
+  "events": [
+    {
+      "name": "deposited",
+      "topics": [
+        "deposited",
+        "<account>"
+      ],
+      "data": {
+        "amount": 400000000
+      }
+    },
+    {
+      "name": "withdrawn",
+      "topics": [
+        "withdrawn",
+        "<account>"
+      ],
+      "data": {
+        "amount": 100000000
+      }
+    }
+  ]
+}

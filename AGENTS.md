@@ -26,6 +26,8 @@ crates/types/src/lib.rs              shared types, bps math, TTL constants, clie
 contracts/reporter-registry/src/     lib.rs + test.rs
 contracts/coverage-ledger/src/       lib.rs + test.rs
 contracts/covered-vault/src/         lib.rs + test.rs
+tests/events/                        event-schema snapshot harness
+tests/snapshots/                     checked-in event schemas
 scripts/deploy-testnet.sh            dependency-ordered deployment
 deployments/testnet.json             current ids
 ```
@@ -53,6 +55,12 @@ Every public function: one success test and one test per error it can return,
 using `client.try_*` and `Err(Ok(Error::X.into()))`. Use
 `env.register_stellar_asset_contract_v2(admin)` for assets and take the issuer
 from `handle.issuer().address()` (a G-account), not `Address::generate`.
+
+Every event a contract emits must appear in `tests/events`, which compares the
+normalised topics and data map with `tests/snapshots/`. If an event change is
+intentional, update SPEC.md and EVENTS.md first, then regenerate with
+`UPDATE_SNAPSHOTS=1 cargo test -p plimsoll-event-snapshots` and commit the
+diff with the change.
 
 ## Before every commit
 
