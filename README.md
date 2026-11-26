@@ -330,6 +330,28 @@ and comment on an issue to have it assigned.
 Security reports: see [SECURITY.md](SECURITY.md). Do not open public issues for vulnerabilities.
 Trust assumptions per actor: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
+## Commit conventions
+
+Commit messages and pull request titles follow [Conventional
+Commits](https://www.conventionalcommits.org/) and are validated in CI with
+[commitlint](https://commitlint.js.org/) (`.commitlintrc.json`), run by the
+[Commit lint](.github/workflows/commitlint.yml) workflow on every pull request
+and on pushes to `main`.
+
+Format: `type(scope): subject`
+
+| Part | Rule |
+| --- | --- |
+| `type` | one of `feat`, `fix`, `docs`, `ci`, `test`, `chore`, `perf`, `security` |
+| `scope` | one of `types`, `registry`, `ledger`, `vault`, `spec`, `ci`, `deps` |
+| `subject` | lower-case, no trailing period, imperative mood |
+| Example | `feat(ledger): add supply age endpoint` |
+
+Only the commits introduced by a pull request are linted; existing history on
+`main` is not re-checked, and GitHub merge-commit metadata is skipped. If a PR
+title or commit is not conventional, the Commit lint check fails and the PR
+cannot be merged.
+
 ## Contributors
 
 <a href="https://github.com/plimsoll-protocol/plimsoll-contracts/graphs/contributors">
