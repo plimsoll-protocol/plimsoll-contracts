@@ -97,7 +97,7 @@ fn admin(env: &Env) -> Address {
     env.storage()
         .instance()
         .get(&DataKey::Admin)
-        .expect("admin is set in the constructor")
+        .unwrap_or_else(|| unreachable!("admin is set in the constructor"))
 }
 
 fn bump_instance(env: &Env) {

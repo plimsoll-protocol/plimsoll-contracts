@@ -100,6 +100,25 @@ pub struct AssetRecord {
     pub code: String,
     pub issuer: Address,
     pub listed_at: u64,
+    /// Optional display name set by the admin when listing the asset.
+    pub display_name: Option<Symbol>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalRequest {
+    pub requester: Address,
+    pub amount: i128,
+    pub unlock_ledger: u32,
+}
+
+/// Optional display name set by the admin when listing the asset.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetMeta {
+    pub issuer: Address,
+    pub code: Symbol,
+    pub display_name: Option<Symbol>,
 }
 
 #[contracttype]

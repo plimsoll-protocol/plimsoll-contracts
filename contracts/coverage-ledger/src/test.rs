@@ -127,7 +127,7 @@ fn last_ledger_topics(f: &Fixture) -> Vec<Val> {
 
 fn listed() -> Fixture {
     let f = setup();
-    f.ledger.list_asset(&f.sac);
+    f.ledger.list_asset(&f.sac, &None);
     f
 }
 
@@ -136,7 +136,7 @@ fn listed() -> Fixture {
 #[test]
 fn list_asset_reads_code_and_issuer_from_sac() {
     let f = setup();
-    let record = f.ledger.list_asset(&f.sac);
+    let record = f.ledger.list_asset(&f.sac, &None);
     assert_eq!(record.issuer, f.issuer);
     assert_eq!(record.sac, f.sac);
     assert_eq!(record.listed_at, T0);
@@ -147,7 +147,7 @@ fn list_asset_reads_code_and_issuer_from_sac() {
 #[test]
 fn list_asset_twice_fails() {
     let f = listed();
-    let res = f.ledger.try_list_asset(&f.sac);
+    let res = f.ledger.try_list_asset(&f.sac, &None);
     assert_eq!(res, Err(Ok(LedgerError::AlreadyListed.into())));
 }
 
@@ -155,14 +155,14 @@ fn list_asset_twice_fails() {
 fn list_asset_rejects_wasm_contract() {
     let f = setup();
     // The registry is a Wasm-style contract, not a Stellar Asset Contract.
-    let res = f.ledger.try_list_asset(&f.registry.address);
+    let res = f.ledger.try_list_asset(&f.registry.address, &None);
     assert_eq!(res, Err(Ok(LedgerError::NotAStellarAsset.into())));
 }
 
 #[test]
 fn list_asset_rejects_account_address() {
     let f = setup();
-    let res = f.ledger.try_list_asset(&Address::generate(&f.env));
+    let res = f.ledger.try_list_asset(&Address::generate(&f.env), &None);
     assert!(res.is_err());
 }
 
@@ -197,7 +197,7 @@ fn parse_accepts_real_name() {
 #[test]
 fn asset_listed_event_matches_the_documented_layout() {
     let f = setup();
-    let record = f.ledger.list_asset(&f.sac);
+    let record = f.ledger.list_asset(&f.sac, &None);
 
     let (topics, data) = last_ledger_event(&f);
     let expected_topics: Vec<Val> =
@@ -885,7 +885,7 @@ fn second_sac(f: &Fixture) -> Address {
         .env
         .register_stellar_asset_contract_v2(Address::generate(&f.env));
     let sac = handle.address();
-    f.ledger.list_asset(&sac);
+    f.ledger.list_asset(&sac, &None::<Symbol>);
     sac
 }
 
@@ -967,7 +967,7 @@ fn alias_follows_at_most_one_hop() {
         .env
         .register_stellar_asset_contract_v2(Address::generate(&f.env));
     let end = handle.address();
-    f.ledger.list_asset(&end);
+    f.ledger.list_asset(&end, &None);
 
     // Supply + reserve only on `end` (use auditor since we don't have end's issuer).
     f.ledger
@@ -1272,7 +1272,7 @@ fn reporters_per_tier_are_capped_per_asset() {
         .env
         .register_stellar_asset_contract_v2(Address::generate(&f.env))
         .address();
-    f.ledger.list_asset(&other);
+    f.ledger.list_asset(&other, &None);
     let late = add_reporter(&f, Role::Auditor);
     f.ledger
         .post_reserve(&late, &other, &UNIT, &T0, &hash(&f.env, 6), &uri(&f.env));
@@ -2029,7 +2029,7 @@ fn reporter_last_post_returns_the_post_timestamp_not_the_as_of() {
 fn reporter_last_post_is_per_reporter_and_per_asset() {
     let f = listed();
     let other = another_asset(&f);
-    f.ledger.list_asset(&other);
+    f.ledger.list_asset(&other, &None);
     post(&f, &f.issuer, UNIT, T0 - 10);
 
     assert_eq!(f.ledger.reporter_last_post(&f.issuer, &f.sac), Some(T0));
@@ -2132,7 +2132,7 @@ fn asset_reporter_pairs_keeps_a_report_whose_reporter_no_longer_counts() {
 fn asset_reporter_pairs_pages_with_a_cursor() {
     let f = listed();
     let other = another_asset(&f);
-    f.ledger.list_asset(&other);
+    f.ledger.list_asset(&other, &None);
     post(&f, &f.auditor, UNIT, T0 - 300);
     post(&f, &f.issuer, UNIT, T0 - 200);
     f.ledger.post_reserve(
@@ -2192,7 +2192,7 @@ fn asset_reporter_pairs_caps_a_page_at_fifty() {
             .register_stellar_asset_contract_v2(Address::generate(&f.env));
         let sac = handle.address();
         let issuer = handle.issuer().address();
-        f.ledger.list_asset(&sac);
+        f.ledger.list_asset(&sac, &None::<Symbol>);
         for (i, who) in auditors.iter().enumerate() {
             f.ledger.post_reserve(
                 who,
@@ -2303,6 +2303,59 @@ fn unpause_requires_the_admin() {
     let stranger = Address::generate(&f.env);
     authorise_only(&f, &[(&stranger, "unpause", ().into_val(&f.env))]);
     assert_eq!(f.ledger.try_unpause(), Err(Ok(auth_failure())));
+}
+
+#[test]
+fn pause_blocks_post_report_from_all_callers() {
+    let f = listed();
+    // Post supply and reserve so the asset has data, then pause.
+    let _seq = f.env.ledger().sequence();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    f.ledger.pause();
+
+    // Admin cannot post after pause.
+    assert_eq!(
+        f.ledger
+            .try_post_reserve(&f.admin, &f.sac, &UNIT, &T0, &hash(&f.env, 1), &uri(&f.env)),
+        Err(Ok(LedgerError::Paused.into()))
+    );
+
+    // Reporter cannot post after pause.
+    assert_eq!(
+        f.ledger.try_post_reserve(
+            &f.auditor,
+            &f.sac,
+            &UNIT,
+            &T0,
+            &hash(&f.env, 1),
+            &uri(&f.env)
+        ),
+        Err(Ok(LedgerError::Paused.into()))
+    );
+
+    // Random address cannot post after pause.
+    let random = Address::generate(&f.env);
+    assert_eq!(
+        f.ledger
+            .try_post_reserve(&random, &f.sac, &UNIT, &T0, &hash(&f.env, 1), &uri(&f.env)),
+        Err(Ok(LedgerError::Paused.into()))
+    );
+
+    // is_covered returns Paused status.
+    assert_eq!(
+        f.ledger
+            .try_is_covered(&f.sac, &10_000, &86_400, &Tier::Transcribed),
+        Err(Ok(LedgerError::Paused.into()))
+    );
 }
 
 #[test]
