@@ -76,6 +76,16 @@ pub struct ReporterInfo {
     pub added_at: u64,
 }
 
+/// A pending reporter registration awaiting confirmation by the reporter
+/// before `expires_at_ledger`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingReporter {
+    pub role: Role,
+    pub name: String,
+    pub expires_at_ledger: u32,
+}
+
 /// Optional public details a reporter publishes about themselves.
 ///
 /// Kept in its own storage key rather than added to `ReporterInfo`: changing
