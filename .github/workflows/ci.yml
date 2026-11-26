@@ -31,6 +31,11 @@ jobs:
         run: python3 scripts/check_wasm_sizes.py
       - name: Shellcheck scripts
         run: shellcheck scripts/*.sh
+      - name: Security audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2026-0387
       - name: Test
         run: cargo test
       # tests/e2e loads the wasm built above with contractimport!, so it is not
