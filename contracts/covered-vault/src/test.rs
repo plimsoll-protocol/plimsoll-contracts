@@ -20,6 +20,7 @@ struct Fixture {
     vault: CoveredVaultClient<'static>,
     ledger: LedgerClient<'static>,
     token: TokenClient<'static>,
+    admin: Address,
     sac: Address,
     issuer: Address,
     poster: Address,
@@ -55,7 +56,14 @@ fn setup() -> Fixture {
 
     let vault_id = env.register(
         CoveredVault,
-        (ledger_id, sac.clone(), 10_000u32, DAY, Tier::IssuerSigned),
+        (
+            admin.clone(),
+            ledger_id,
+            sac.clone(),
+            10_000u32,
+            DAY,
+            Tier::IssuerSigned,
+        ),
     );
     let vault = CoveredVaultClient::new(&env, &vault_id);
 
@@ -68,6 +76,7 @@ fn setup() -> Fixture {
         vault,
         ledger,
         token,
+        admin,
         sac,
         issuer,
         poster,
@@ -371,5 +380,63 @@ fn deposit_propagates_a_paused_ledger() {
     assert_eq!(
         f.vault.try_deposit(&f.user, &UNIT),
         Err(Ok(LedgerError::Paused.into()))
+    );
+}
+
+#[test]
+fn propose_and_accept_vault_admin_transfers_the_role() {
+    let f = setup();
+    let new_admin = Address::generate(&f.env);
+
+    f.vault.propose_vault_admin(&new_admin);
+    assert_eq!(f.vault.pending_vault_admin(), Some(new_admin.clone()));
+
+    f.vault.accept_vault_admin();
+    assert_eq!(f.vault.admin(), new_admin);
+    assert_eq!(f.vault.pending_vault_admin(), None);
+}
+
+#[test]
+fn only_current_admin_can_propose_vault_admin() {
+    let f = setup();
+    let new_admin = Address::generate(&f.env);
+    f.vault.propose_vault_admin(&new_admin);
+
+    let auths = f.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, f.admin);
+}
+
+#[test]
+fn propose_vault_admin_without_admin_auth_fails() {
+    let f = setup();
+    let new_admin = Address::generate(&f.env);
+    // Clear mocked auths so require_auth() has nothing to satisfy.
+    f.env.mock_auths(&[]);
+    let res = f.vault.try_propose_vault_admin(&new_admin);
+    assert!(res.is_err());
+    assert_eq!(f.vault.pending_vault_admin(), None);
+}
+
+#[test]
+fn a_new_proposal_cancels_the_pending_one() {
+    let f = setup();
+    let first = Address::generate(&f.env);
+    let second = Address::generate(&f.env);
+
+    f.vault.propose_vault_admin(&first);
+    f.vault.propose_vault_admin(&second);
+    assert_eq!(f.vault.pending_vault_admin(), Some(second.clone()));
+
+    f.vault.accept_vault_admin();
+    assert_eq!(f.vault.admin(), second);
+}
+
+#[test]
+fn accept_vault_admin_without_a_pending_proposal_fails() {
+    let f = setup();
+    assert_eq!(
+        f.vault.try_accept_vault_admin(),
+        Err(Ok(VaultError::NoPendingAdmin.into()))
     );
 }
