@@ -4,6 +4,7 @@ use super::*;
 use plimsoll_types::DAY_IN_LEDGERS;
 use plimsoll_types::ReporterEntry;
 use plimsoll_types::CoverageStatus;
+use plimsoll_types::ReporterEntry;
 use reporter_registry::{ReporterRegistry, ReporterRegistryClient};
 use soroban_sdk::{
     testutils::{Address as _, AuthorizedFunction, Events, Ledger as _, MockAuth, MockAuthInvoke},
@@ -4791,4 +4792,192 @@ fn historical_coverage_bps_is_per_asset() {
         f.ledger.historical_coverage_bps(&other, &u32::MAX, &1_000),
         None
     );
+}
+
+// ---- the registry-level per-asset reporter cap (#109) --------------------
+
+#[test]
+fn a_new_reporter_is_refused_at_the_asset_cap() {
+    let f = listed();
+    f.registry.set_max_reporters(&2);
+    post(&f, &f.auditor, UNIT, T0 - 100);
+    post(&f, &f.transcriber, UNIT, T0 - 100);
+
+    // Two reporters are the whole cap; a third is refused.
+    let newcomer = add_reporter(&f, Role::Auditor);
+    let res = f.ledger.try_post_reserve(
+        &newcomer,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 5),
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::TooManyReportersPerAsset.into())));
+}
+
+#[test]
+fn the_asset_cap_counts_reporters_not_entries() {
+    let f = listed();
+    f.registry.set_max_reporters(&1);
+    post(&f, &f.transcriber, UNIT, T0 - 100);
+    // A role change starts a new entry at a new tier, but it is still the same
+    // reporter: the slot is theirs at both tiers.
+    f.registry.set_reporter(
+        &f.transcriber,
+        &Role::Auditor,
+        &String::from_str(&f.env, "promoted"),
+    );
+    let tier = post(&f, &f.transcriber, 2 * UNIT, T0 - 100);
+    assert_eq!(tier, Tier::AuditorSigned);
+}
+
+#[test]
+fn the_asset_cap_applies_to_the_issuer_too() {
+    let f = listed();
+    f.registry.set_max_reporters(&1);
+    post(&f, &f.issuer, UNIT, T0 - 100);
+
+    let newcomer = add_reporter(&f, Role::Auditor);
+    let res = f.ledger.try_post_reserve(
+        &newcomer,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 5),
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::TooManyReportersPerAsset.into())));
+}
+
+#[test]
+fn a_revoked_reporter_frees_its_slot_at_the_asset_cap() {
+    let f = listed();
+    f.registry.set_max_reporters(&1);
+    post(&f, &f.auditor, UNIT, T0 - 100);
+    f.registry.revoke(&f.auditor);
+
+    let newcomer = add_reporter(&f, Role::Auditor);
+    post(&f, &newcomer, UNIT, T0);
+
+    let reports = f.ledger.get_reports(&f.sac);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports.get(0).unwrap().reporter, newcomer);
+}
+
+#[test]
+fn the_asset_cap_is_per_asset() {
+    let f = listed();
+    f.registry.set_max_reporters(&1);
+    post(&f, &f.auditor, UNIT, T0 - 100);
+
+    let other = f
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&f.env))
+        .address();
+    f.ledger.list_asset(&other);
+    let second = add_reporter(&f, Role::Auditor);
+    f.ledger
+        .post_reserve(&second, &other, &UNIT, &T0, &hash(&f.env, 6), &uri(&f.env));
+    assert_eq!(f.ledger.get_reports(&other).len(), 1);
+}
+
+#[test]
+fn a_legacy_report_counts_toward_the_asset_cap() {
+    let f = listed();
+    f.registry.set_max_reporters(&1);
+    write_legacy(
+        &f,
+        &legacy_report(&f, &f.auditor, Tier::AuditorSigned, UNIT, T0 - 50),
+    );
+
+    let newcomer = add_reporter(&f, Role::Auditor);
+    let res = f.ledger.try_post_reserve(
+        &newcomer,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 5),
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::TooManyReportersPerAsset.into())));
+}
+
+#[test]
+fn the_default_cap_clears_the_most_reporters_the_tier_caps_allow() {
+    let f = listed();
+    let mut reporters = std::vec![f.auditor.clone(), f.transcriber.clone()];
+    for _ in 1..MAX_REPORTERS_PER_TIER {
+        reporters.push(add_reporter(&f, Role::Auditor));
+        reporters.push(add_reporter(&f, Role::Transcriber));
+    }
+    for (i, reporter) in reporters.iter().enumerate() {
+        post(&f, reporter, UNIT, T0 - 100 + i as u64);
+    }
+
+    // Four auditors and four transcribers: eight distinct reporters, and the
+    // tier caps allow at most twelve entries across the three tiers, both
+    // under the default cap of 20.
+    assert_eq!(
+        f.ledger.get_reports(&f.sac).len(),
+        2 * MAX_REPORTERS_PER_TIER,
+    );
+}
+
+#[test]
+fn a_full_tier_is_refused_before_the_asset_cap() {
+    let f = listed();
+    let mut auditors = std::vec![f.auditor.clone()];
+    for _ in 1..MAX_REPORTERS_PER_TIER {
+        auditors.push(add_reporter(&f, Role::Auditor));
+    }
+    for (i, auditor) in auditors.iter().enumerate() {
+        post(&f, auditor, UNIT, T0 - 100 + i as u64);
+    }
+
+    // The tier cap is tighter than the asset cap, so it is the one reported.
+    let one_too_many = add_reporter(&f, Role::Auditor);
+    let res = f.ledger.try_post_reserve(
+        &one_too_many,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 5),
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::TooManyReporters.into())));
+}
+
+#[test]
+fn a_batch_registered_reporter_still_hits_the_asset_cap() {
+    let f = listed();
+    f.registry.set_max_reporters(&1);
+    let first = Address::generate(&f.env);
+    let second = Address::generate(&f.env);
+    f.registry.batch_register(&Vec::from_array(
+        &f.env,
+        [
+            ReporterEntry {
+                reporter: first.clone(),
+                role: Role::Auditor,
+                name: String::from_str(&f.env, "first"),
+            },
+            ReporterEntry {
+                reporter: second.clone(),
+                role: Role::Auditor,
+                name: String::from_str(&f.env, "second"),
+            },
+        ],
+    ));
+    post(&f, &first, UNIT, T0 - 100);
+
+    let res = f.ledger.try_post_reserve(
+        &second,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 5),
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::TooManyReportersPerAsset.into())));
 }
