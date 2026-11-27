@@ -225,10 +225,18 @@ fn deposit_emits_coverage_dropped_when_post_deposit_coverage_is_false() {
     let sac = env
         .register_stellar_asset_contract_v2(Address::generate(&env))
         .address();
+    let admin = Address::generate(&env);
     let ledger = env.register(FlakyLedger, ());
     let vault_id = env.register(
         CoveredVault,
-        (ledger, sac.clone(), 10_000u32, DAY, Tier::IssuerSigned),
+        (
+            admin,
+            ledger,
+            sac.clone(),
+            10_000u32,
+            DAY,
+            Tier::IssuerSigned,
+        ),
     );
     let vault = CoveredVaultClient::new(&env, &vault_id);
     let user = Address::generate(&env);

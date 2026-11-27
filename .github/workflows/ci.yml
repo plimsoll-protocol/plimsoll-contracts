@@ -83,6 +83,8 @@ jobs:
         run: |
           git fetch --depth=1 origin "$BASE_SHA"
           git worktree add /tmp/base-ref "$BASE_SHA"
+          mkdir -p /tmp/base-ref/scripts
+          cp scripts/wasm_size_diff.py /tmp/base-ref/scripts/wasm_size_diff.py
           cd /tmp/base-ref
           stellar contract build --locked
           python3 scripts/wasm_size_diff.py measure /tmp/base-sizes.json

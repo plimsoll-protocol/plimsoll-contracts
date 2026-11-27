@@ -179,7 +179,10 @@ fn asset_count_increments_per_listed_asset() {
     assert_eq!(f.ledger.asset_count(), 1);
 
     let second_admin = Address::generate(&f.env);
-    let second_sac = f.env.register_stellar_asset_contract_v2(second_admin).address();
+    let second_sac = f
+        .env
+        .register_stellar_asset_contract_v2(second_admin)
+        .address();
     f.ledger.list_asset(&second_sac);
     assert_eq!(f.ledger.asset_count(), 2);
 }
