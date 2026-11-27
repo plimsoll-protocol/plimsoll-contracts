@@ -599,6 +599,9 @@ impl ReporterRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        // Indexing on every call, not only for new reporters, lets the admin
+        // add reporters registered before the index existed by re-setting them.
+        index_add(&env, &reporter);
         bump_instance(&env);
         ReporterSet {
             reporter,

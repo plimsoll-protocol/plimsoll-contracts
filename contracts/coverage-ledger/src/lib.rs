@@ -33,6 +33,8 @@ use soroban_sdk::{
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
     Address, BytesN, ContractExecutable, Env, Executable, String, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype,
+    panic_with_error, token, Address, BytesN, ContractExecutable, Env, Executable, String, Vec,
 };
 
 const MAX_URI_LEN: u32 = 256;
@@ -116,6 +118,16 @@ pub struct DisputeRecord {
     pub disputer: Address,
     pub hold_until_ledger: u32,
 }
+
+/// Contract version. Increment on every behavioural change.
+const VERSION: u32 = 1;
+
+// Contract metadata for `stellar contract info meta`
+contractmeta!(key = "description", val = "Plimsoll Coverage Ledger");
+contractmeta!(
+    key = "repository",
+    val = "https://github.com/plimsoll-protocol/plimsoll-contracts"
+);
 
 #[contracttype]
 #[derive(Clone)]
@@ -597,6 +609,17 @@ fn posted_supply_at_ledger(env: &Env, sac: &Address, as_of_ledger: u32) -> Optio
 fn counts_for_tier(registry: &RegistryClient, tier: Tier, reporter: &Address) -> bool {
     let needed = match tier {
         Tier::IssuerSigned => return true,
+/// Whether a stored report still counts: its reporter must still be entitled
+/// to its tier. An issuer-signed report counts while its reporter is the
+/// issuer, which the asset record fixes, or the current delegate. A revoked
+/// auditor or transcriber, one whose role changed, or a delegate the issuer
+/// cleared or replaced, no longer speaks for the figures they posted.
+fn counts(env: &Env, registry: &RegistryClient, sac: &Address, report: &ReserveReport) -> bool {
+    let needed = match report.tier {
+        Tier::IssuerSigned => {
+            return read_persistent::<AssetRecord>(env, &DataKey::Asset(sac.clone()))
+                .is_some_and(|asset| speaks_for_issuer(env, sac, &asset.issuer, &report.reporter))
+        }
         Tier::AuditorSigned => Role::Auditor,
         Tier::Transcribed => Role::Transcriber,
     };
