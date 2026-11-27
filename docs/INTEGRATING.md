@@ -19,10 +19,10 @@ call returns — is in [auth-model.md](auth-model.md).
 ## What the call gives you
 
 ```rust
-is_covered(sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool
+is_covered(sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> CoverageStatus
 ```
 
-`is_covered` answers `true` when all of these hold:
+`is_covered` returns `CoverageStatus::Covered` when all of these hold:
 
 - the asset has a supply snapshot and a reserve report at `min_tier` or
   stronger;
@@ -70,7 +70,7 @@ pub enum Tier {
 
 #[contractclient(name = "CoverageLedgerClient")]
 pub trait CoverageLedgerInterface {
-    fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool;
+    fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> CoverageStatus;
 }
 ```
 
@@ -108,7 +108,7 @@ covered, and `is_open` lets a front end ask in advance:
 //! also fails if the guide's copy of this file drifts from it.
 #![no_std]
 
-use plimsoll_types::{CoverageLedgerClient, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD};
+use plimsoll_types::{CoverageLedgerClient, CoverageStatus, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env,
 };
@@ -154,16 +154,15 @@ fn policy(env: &Env) -> Policy {
         .expect("policy is set in the constructor")
 }
 
-/// One cross-contract call. `is_covered` never fails: every reason the asset
-/// might not qualify (no figures, stale figures, too weak a signer, not
-/// enough reserves) comes back as `false`.
+/// One cross-contract call. Returns true only when `is_covered` returns
+/// `Covered`; `Stale` and `Uncovered` both block acceptance.
 fn covered(env: &Env, p: &Policy) -> bool {
     CoverageLedgerClient::new(env, &p.ledger).is_covered(
         &p.asset,
         &p.min_bps,
         &p.max_age,
         &p.min_tier,
-    )
+    ) == CoverageStatus::Covered
 }
 
 #[contractimpl]
@@ -339,14 +338,18 @@ is the ledger close time (`is_covered` in
 - **Snapshot:** `supply_timestamp` is the snapshot's `timestamp`, which
   `post_supply` sets to the ledger close time when it was posted. It is
   **not** derived from the snapshot's `ledger` field (the ledger the supply was
-  computed at).
+  computed at). To prevent an old figure from being stamped as fresh,
+  `post_supply` also rejects a snapshot computed more than 720 ledgers
+  (approximately one hour) before the current ledger; the exact boundary is
+  accepted.
 
 Neither can be in the future: the ledger refuses an `as_of` later than the
 ledger close time (`FutureTimestamp`) and a `ledger` later than the current
 one (`FutureLedger`).
 
 *Tests: `report_freshness_uses_as_of_not_post_time`,
-`snapshot_freshness_uses_post_time_not_its_ledger`, `max_age_is_inclusive`.*
+`snapshot_freshness_uses_post_time_within_the_ledger_age_bound`,
+`max_age_is_inclusive`.*
 
 ### Revoked reporters stop counting at once
 

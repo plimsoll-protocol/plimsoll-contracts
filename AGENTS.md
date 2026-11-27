@@ -15,9 +15,9 @@ without an issue that says so: the indexer decodes them.
 | Item | Version |
 | --- | --- |
 | Rust | 1.100.0, pinned in `rust-toolchain.toml` (edition 2021) |
-| soroban-sdk | 28.0.0 (workspace dependency) |
+| soroban-sdk | 29.0.1 (workspace dependency) |
 | Target | `wasm32v1-none` |
-| Stellar CLI | 28.1.0 (`stellar contract build` is required by soroban-sdk 28) |
+| Stellar CLI | 28.1.0 (`stellar contract build` is required by soroban-sdk 28+) |
 
 ## Layout
 
@@ -68,6 +68,7 @@ diff with the change.
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 cargo test
+python3 scripts/check_error_coverage.py
 stellar contract build
 ```
 

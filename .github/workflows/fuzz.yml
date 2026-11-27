@@ -1,0 +1,22 @@
+name: Fuzz is_covered
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  is-covered:
+    name: is_covered fuzz (60s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+      - name: Fuzz is_covered
+        run: cargo +nightly fuzz run is_covered -- -max_total_time=60
