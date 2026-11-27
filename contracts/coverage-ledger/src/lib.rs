@@ -1249,6 +1249,20 @@ impl CoverageLedger {
         validate_post_reserve(&env, &reporter, &sac, amount, as_of, &doc_uri).map(|_| ())
     }
 
+    /// Check whether the reporter's complete reserve post would pass validation.
+    pub fn can_post_report(
+        env: Env,
+        reporter: Address,
+        sac: Address,
+        amount: i128,
+        as_of: u64,
+        doc_hash: BytesN<32>,
+        doc_uri: String,
+    ) -> Result<(), LedgerError> {
+        let _ = doc_hash;
+        validate_post_reserve(&env, &reporter, &sac, amount, as_of, &doc_uri).map(|_| ())
+    }
+
     /// Record a reserve figure for `sac`. The reporter's identity sets the
     /// tier: the asset's issuer account, an issuer-appointed delegate, a
     /// registered auditor, or a registered transcriber.
