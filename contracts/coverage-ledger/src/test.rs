@@ -1,6 +1,7 @@
 extern crate std;
 
 use super::*;
+use plimsoll_types::CoverageStatus;
 use reporter_registry::{ReporterRegistry, ReporterRegistryClient};
 use soroban_sdk::{
     testutils::{Address as _, AuthorizedFunction, Events, Ledger as _, MockAuth, MockAuthInvoke},
@@ -832,24 +833,29 @@ fn is_covered_checks_ratio_age_and_tier() {
         &uri(&f.env),
     );
     let day = 86_400;
-    assert!(f
-        .ledger
-        .is_covered(&f.sac, &10_000, &day, &Tier::Transcribed));
-    assert!(!f
-        .ledger
-        .is_covered(&f.sac, &10_001, &day, &Tier::Transcribed));
-    assert!(!f
-        .ledger
-        .is_covered(&f.sac, &10_000, &day, &Tier::AuditorSigned));
+    assert_eq!(
+        f.ledger.is_covered(&f.sac, &10_000, &day, &Tier::Transcribed),
+        CoverageStatus::Covered
+    );
+    assert_eq!(
+        f.ledger.is_covered(&f.sac, &10_001, &day, &Tier::Transcribed),
+        CoverageStatus::Uncovered
+    );
+    assert_eq!(
+        f.ledger.is_covered(&f.sac, &10_000, &day, &Tier::AuditorSigned),
+        CoverageStatus::Uncovered
+    );
 
-    // Two days later both inputs are stale.
+    // Two days later both inputs are stale (no grace set → Uncovered).
     f.env.ledger().set_timestamp(T0 + 2 * day);
-    assert!(!f
-        .ledger
-        .is_covered(&f.sac, &10_000, &day, &Tier::Transcribed));
-    assert!(f
-        .ledger
-        .is_covered(&f.sac, &10_000, &(3 * day), &Tier::Transcribed));
+    assert_eq!(
+        f.ledger.is_covered(&f.sac, &10_000, &day, &Tier::Transcribed),
+        CoverageStatus::Uncovered
+    );
+    assert_eq!(
+        f.ledger.is_covered(&f.sac, &10_000, &(3 * day), &Tier::Transcribed),
+        CoverageStatus::Covered
+    );
 }
 
 /// is_covered uses `bps >= min_bps` (inclusive boundary).
@@ -959,9 +965,63 @@ fn is_covered_exact_bps_boundary_is_inclusive() {
 #[test]
 fn is_covered_false_for_unlisted() {
     let f = setup();
-    assert!(!f
-        .ledger
-        .is_covered(&f.sac, &0, &u64::MAX, &Tier::Transcribed));
+    assert_eq!(
+        f.ledger.is_covered(&f.sac, &0, &u64::MAX, &Tier::Transcribed),
+        CoverageStatus::Uncovered
+    );
+}
+
+#[test]
+fn is_covered_stale_within_grace_window() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    // Set a 1-day grace window (17_280 ledgers × 5 s = 86_400 s).
+    f.ledger.set_ttl_grace(&f.admin, &17_280u32);
+
+    let day = 86_400u64;
+    // Exactly at max_age → still Covered.
+    f.env.ledger().set_timestamp(T0 + day);
+    assert_eq!(
+        f.ledger.is_covered(&f.sac, &10_000, &day, &Tier::Transcribed),
+        CoverageStatus::Covered
+    );
+    // One second past max_age, within grace → Stale.
+    f.env.ledger().set_timestamp(T0 + day + 1);
+    assert_eq!(
+        f.ledger.is_covered(&f.sac, &10_000, &day, &Tier::Transcribed),
+        CoverageStatus::Stale
+    );
+    // Exactly at max_age + grace_secs → still Stale.
+    f.env.ledger().set_timestamp(T0 + 2 * day);
+    assert_eq!(
+        f.ledger.is_covered(&f.sac, &10_000, &day, &Tier::Transcribed),
+        CoverageStatus::Stale
+    );
+    // One second beyond grace → Uncovered.
+    f.env.ledger().set_timestamp(T0 + 2 * day + 1);
+    assert_eq!(
+        f.ledger.is_covered(&f.sac, &10_000, &day, &Tier::Transcribed),
+        CoverageStatus::Uncovered
+    );
+}
+
+#[test]
+fn set_ttl_grace_stores_and_ttl_grace_reads_back() {
+    let f = setup();
+    assert_eq!(f.ledger.ttl_grace(), 0);
+    f.ledger.set_ttl_grace(&f.admin, &1_000u32);
+    assert_eq!(f.ledger.ttl_grace(), 1_000);
+    f.ledger.set_ttl_grace(&f.admin, &0u32);
+    assert_eq!(f.ledger.ttl_grace(), 0);
 }
 
 #[test]
@@ -1496,9 +1556,11 @@ fn a_legacy_report_is_read_before_migration() {
     assert_eq!(f.ledger.get_reports(&f.sac).len(), 1);
     let c = f.ledger.coverage(&f.sac, &Tier::AuditorSigned).unwrap();
     assert_eq!(c.bps, 10_100);
-    assert!(f
-        .ledger
-        .is_covered(&f.sac, &10_000, &86_400, &Tier::AuditorSigned));
+    assert_eq!(
+        f.ledger
+            .is_covered(&f.sac, &10_000, &86_400, &Tier::AuditorSigned),
+        CoverageStatus::Covered
+    );
 }
 
 #[test]
@@ -1570,15 +1632,19 @@ fn revoking_the_auditor_drops_its_report_at_every_tier() {
     f.registry.revoke(&f.auditor);
 
     assert_eq!(f.ledger.coverage(&f.sac, &Tier::AuditorSigned), None);
-    assert!(!f
-        .ledger
-        .is_covered(&f.sac, &10_000, &DAY, &Tier::AuditorSigned));
+    assert_eq!(
+        f.ledger
+            .is_covered(&f.sac, &10_000, &DAY, &Tier::AuditorSigned),
+        CoverageStatus::Uncovered
+    );
     // Weaker floors are still met by the reports that count.
     let issuer = f.ledger.coverage(&f.sac, &Tier::IssuerSigned).unwrap();
     assert_eq!(issuer.tier, Tier::IssuerSigned);
-    assert!(f
-        .ledger
-        .is_covered(&f.sac, &10_000, &DAY, &Tier::IssuerSigned));
+    assert_eq!(
+        f.ledger
+            .is_covered(&f.sac, &10_000, &DAY, &Tier::IssuerSigned),
+        CoverageStatus::Covered
+    );
     let any = f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap();
     assert_eq!(any.tier, Tier::Transcribed);
 
@@ -1621,14 +1687,18 @@ fn a_revoked_transcribers_bad_figure_stops_satisfying_is_covered() {
     post(&f, &f.issuer, 80 * UNIT, T0 - 1_000);
     // A bad actor posts a fresher, flattering figure.
     post(&f, &f.transcriber, 120 * UNIT, T0);
-    assert!(f
-        .ledger
-        .is_covered(&f.sac, &10_000, &DAY, &Tier::Transcribed));
+    assert_eq!(
+        f.ledger
+            .is_covered(&f.sac, &10_000, &DAY, &Tier::Transcribed),
+        CoverageStatus::Covered
+    );
     f.registry.revoke(&f.transcriber);
     // Immediately, with no action on the ledger.
-    assert!(!f
-        .ledger
-        .is_covered(&f.sac, &10_000, &DAY, &Tier::Transcribed));
+    assert_eq!(
+        f.ledger
+            .is_covered(&f.sac, &10_000, &DAY, &Tier::Transcribed),
+        CoverageStatus::Uncovered
+    );
     assert_eq!(
         f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap().bps,
         8_000
@@ -1653,7 +1723,10 @@ fn issuer_signed_reports_are_unaffected_by_the_registry() {
     for min_tier in [Tier::Transcribed, Tier::IssuerSigned] {
         let c = f.ledger.coverage(&f.sac, &min_tier).unwrap();
         assert_eq!(c.tier, Tier::IssuerSigned);
-        assert!(f.ledger.is_covered(&f.sac, &10_000, &DAY, &min_tier));
+        assert_eq!(
+            f.ledger.is_covered(&f.sac, &10_000, &DAY, &min_tier),
+            CoverageStatus::Covered
+        );
     }
     assert_eq!(f.ledger.coverage(&f.sac, &Tier::AuditorSigned), None);
     let reports = f.ledger.get_reports(&f.sac);
@@ -1707,9 +1780,11 @@ fn reinstating_a_reporter_restores_its_report() {
         &Role::Auditor,
         &String::from_str(&f.env, "Acme Audit"),
     );
-    assert!(f
-        .ledger
-        .is_covered(&f.sac, &10_000, &DAY, &Tier::AuditorSigned));
+    assert_eq!(
+        f.ledger
+            .is_covered(&f.sac, &10_000, &DAY, &Tier::AuditorSigned),
+        CoverageStatus::Covered
+    );
 }
 
 #[test]

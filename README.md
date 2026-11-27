@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/network-testnet-c8341f" alt="testnet" />
   <a href="https://plimsoll-protocol.gitbook.io/plimsoll-protocol-docs/"><img src="https://img.shields.io/badge/docs-gitbook-0f1d2b" alt="Docs" /></a>
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" />
-  <img src="https://img.shields.io/badge/audit-none-lightgrey" alt="unaudited" />
+  <a href="https://github.com/plimsoll-protocol/plimsoll-contracts/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/cargo--audit-enabled-green" alt="cargo-audit" /></a>
 </p>
 
 # Plimsoll contracts
@@ -24,7 +24,7 @@ account, a registered auditor, or a registered transcriber, and the signer sets
 the report's tier. Any contract can then call:
 
 ```rust
-is_covered(asset, min_bps, max_age, min_tier) -> bool
+is_covered(asset, min_bps, max_age, min_tier) -> CoverageStatus
 ```
 
 and refuse an asset that is under-backed or whose figures are out of date.

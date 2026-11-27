@@ -45,6 +45,7 @@ it exists to show the integration in about 100 lines.
 | --- | --- | --- |
 | `Role` | `u32` enum | `Auditor = 1`, `Transcriber = 2`, `SupplyPoster = 3` |
 | `Tier` | `u32` enum | `Transcribed = 1`, `IssuerSigned = 2`, `AuditorSigned = 3` (ordered: higher is stronger) |
+| `CoverageStatus` | `u32` enum | `Uncovered = 0`, `Stale = 1`, `Covered = 2` (ordered: higher is better) |
 | `ReporterInfo` | struct | `role: Role`, `name: String`, `added_at: u64` |
 | `ReporterMetadata` | struct | `name: Option<Symbol>`, `website_uri: Option<String>`, `contact_hash: Option<Bytes>` |
 | `AssetRecord` | struct | `sac: Address`, `code: String`, `issuer: Address`, `listed_at: u64` |
@@ -262,6 +263,7 @@ Records what was said, and answers coverage questions.
 | `Admin` | instance | `Address` |
 | `Registry` | instance | `Address` |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
+| `TtlGrace` | instance | `u32` (ledger count; default 0) |
 | `Paused` | instance | `bool` (absent means not paused) |
 | `Asset(Address)` | persistent | `AssetRecord` |
 | `Supply(Address)` | persistent | `SupplySnapshot` (latest only) |
@@ -325,6 +327,9 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `reporter_last_post(reporter: Address, asset: Address)` | — | `Option<u64>` (the ledger timestamp of that reporter's most recent post for the asset) | — | — |
 | `asset_reporter_pairs(cursor: Option<u32>, limit: u32)` | — | `Vec<(Address, Address)>` (up to `MAX_PAIRS_PER_CALL = 50` (asset, reporter) pairs) | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
+| `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `CoverageStatus` | — | — |
+| `set_ttl_grace(admin: Address, grace_ledgers: u32)` | admin | `()` | — | `ttl_grace_updated grace_ledgers` |
+| `ttl_grace()` | — | `u32` | — | — |
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | `Paused` | — |
 | `is_covered_at(sac, min_bps: u32, max_age: u64, min_tier: Tier, as_of_ledger: u32)` | — | `bool` | `FutureLedger`, `Paused` | — |
 | `coverage_status(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `CoverageStatus` | — | — |
@@ -399,6 +404,19 @@ Rules:
 - `coverage(sac, min_tier)` picks, among the stored reports at tiers
   `>= min_tier` that count, the one with the latest `as_of`. Ties go to the
   higher tier, then to the reporter who first posted at that tier. It returns
+  `None` if there is no supply snapshot or no qualifying report.
+- `is_covered` returns `CoverageStatus`:
+  - `Uncovered` when `coverage` returns `None`, or `bps < min_bps`, or age
+    exceeds `max_age + grace_secs` where `grace_secs = ttl_grace_ledgers * 5`.
+  - `Stale` when bps and tier are satisfied but age is in the range
+    `(max_age, max_age + grace_secs]`. Grace secs is zero when `ttl_grace_ledgers`
+    is not set.
+  - `Covered` when bps and tier are satisfied and age does not exceed `max_age`.
+  - Age is the larger of `now - supply_timestamp` and `now - report_as_of`.
+- `set_ttl_grace` sets the TTL grace window in ledgers. Each ledger is 5 seconds.
+  Callers receive `Stale` during the grace window instead of `Uncovered`, which
+  lets them decide whether stale data is acceptable. Zero disables the grace window.
+- `ttl_grace` returns the stored grace window, or `0` when not set.
   `None` if there is no supply figure or no qualifying report. The supply
   figure is the latest snapshot, or the token's `total_supply()` when the
   asset has opted in to a native supply source (see below).
@@ -590,8 +608,21 @@ covered. The deployer supplies the vault admin, who can configure a withdrawal d
 Withdrawals are never gated on coverage, but when the delay is non-zero they
 must be requested before they can be executed.
 
+**Storage**
+
+| Key | Storage | Value |
+| --- | --- | --- |
+| `Admin` | instance | `Address` |
+| `Config` | instance | `VaultConfig` |
+| `Balance(Address)` | persistent | `i128` |
+
+**Functions**
+
 | Function | Auth | Returns | Errors | Event |
 | --- | --- | --- | --- | --- |
+| `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier, admin: Address)` | — | — | — | — |
+| `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount` |
+| `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
 | `__constructor(admin: Address, ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
 | `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount, balance_after`, `coverage_dropped {asset}` |
 | `request_withdraw(to: Address, amount: i128)` | to | `u64 available_at` | `InvalidAmount`, `InsufficientBalance`, `InvalidDelay` | `withdrawal_queued {to} amount, available_at` |
@@ -600,8 +631,18 @@ must be requested before they can be executed.
 | `withdrawal_delay_seconds()` | — | `u64` | — | — |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
+| `admin()` | — | `Address` | — | — |
 | `can_deposit()` | — | `bool` | — | — |
+| `update_thresholds(min_bps: u32, max_age: u64, min_tier: Tier)` | admin | `()` | — | `thresholds_updated old_min_bps, old_max_age, old_min_tier, new_min_bps, new_max_age, new_min_tier` |
 
+`can_deposit()` returns true exactly when a positive deposit would pass the
+coverage gate (`is_covered` returns `Covered`). A front end can call it to
+show whether the vault is open without simulating a deposit and reading a
+`NotCovered` failure.
+
+`update_thresholds` replaces the stored `min_bps`, `max_age`, and `min_tier` in
+one atomic call. The admin's auth is required. Existing deposits are unaffected;
+only future deposit attempts see the new thresholds.
 `request_withdraw` replaces any existing request for the same address and
 restarts its delay. It checks the current balance, stores the requested amount
 and `available_at = current timestamp + withdrawal_delay_seconds`, then emits

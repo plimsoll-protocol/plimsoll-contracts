@@ -25,6 +25,7 @@ struct Fixture {
     issuer: Address,
     poster: Address,
     user: Address,
+    vault_admin: Address,
 }
 
 fn setup() -> Fixture {
@@ -54,6 +55,7 @@ fn setup() -> Fixture {
         &String::from_str(&env, "indexer"),
     );
 
+    let vault_admin = Address::generate(&env);
     let vault_id = env.register(
         CoveredVault,
         (
@@ -63,6 +65,7 @@ fn setup() -> Fixture {
             10_000u32,
             DAY,
             Tier::IssuerSigned,
+            vault_admin.clone(),
         ),
     );
     let vault = CoveredVaultClient::new(&env, &vault_id);
@@ -81,6 +84,7 @@ fn setup() -> Fixture {
         issuer,
         poster,
         user,
+        vault_admin,
     }
 }
 
@@ -469,6 +473,53 @@ fn can_deposit_uses_the_stored_min_tier() {
     );
 }
 
+// ---- admin / update_thresholds -------------------------------------------
+
+#[test]
+fn admin_round_trips() {
+    let f = setup();
+    assert_eq!(f.vault.admin(), f.vault_admin);
+}
+
+#[test]
+fn update_thresholds_changes_config() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    // Raise min_bps above 100% → vault closes.
+    f.vault
+        .update_thresholds(&f.vault_admin, &10_001u32, &DAY, &Tier::IssuerSigned);
+    assert!(!f.vault.can_deposit());
+    // Restore to 100% → vault opens again.
+    f.vault
+        .update_thresholds(&f.vault_admin, &10_000u32, &DAY, &Tier::IssuerSigned);
+    assert!(f.vault.can_deposit());
+    let cfg = f.vault.config();
+    assert_eq!(cfg.min_bps, 10_000);
+    assert_eq!(cfg.max_age, DAY);
+    assert_eq!(cfg.min_tier, Tier::IssuerSigned);
+}
+
+#[test]
+fn update_thresholds_emits_event() {
+    let f = setup();
+    f.vault
+        .update_thresholds(&f.vault_admin, &9_000u32, &(2 * DAY), &Tier::Transcribed);
+    let cfg = f.vault.config();
+    assert_eq!(cfg.min_bps, 9_000);
+    assert_eq!(cfg.max_age, 2 * DAY);
+    assert_eq!(cfg.min_tier, Tier::Transcribed);
+}
+
+#[test]
+fn update_thresholds_tightens_deposit_gate() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    // Currently open (IssuerSigned satisfied).
+    assert!(f.vault.can_deposit());
+    // Require AuditorSigned — no such report exists.
+    f.vault
+        .update_thresholds(&f.vault_admin, &10_000u32, &DAY, &Tier::AuditorSigned);
+    assert!(!f.vault.can_deposit());
 #[test]
 fn deposit_propagates_a_paused_ledger() {
     let f = setup();

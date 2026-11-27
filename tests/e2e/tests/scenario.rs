@@ -95,6 +95,7 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     let issuer = handle.issuer().address();
     let token = TokenClient::new(&env, &sac);
 
+    let vault_admin = Address::generate(&env);
     let vault_id = env.register(
         vault::WASM,
         (
@@ -104,6 +105,7 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
             MIN_BPS,
             MAX_AGE,
             vault::Tier::IssuerSigned,
+            vault_admin.clone(),
         ),
     );
     let vault = vault::Client::new(&env, &vault_id);
@@ -200,10 +202,16 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     assert_eq!(coverage.reserves, 1_020 * UNIT);
     assert_eq!(coverage.tier, ledger::Tier::IssuerSigned);
     assert_eq!(coverage.report_as_of, T0);
-    assert!(ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::IssuerSigned));
+    assert_eq!(
+        ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::IssuerSigned),
+        ledger::CoverageStatus::Covered
+    );
     // The vault's policy demands no more than the issuer tier, so an auditor
     // requirement is a different question with a different answer.
-    assert!(!ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::AuditorSigned));
+    assert_eq!(
+        ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::AuditorSigned),
+        ledger::CoverageStatus::Uncovered
+    );
 
     // ---- 4. deposit -------------------------------------------------------
     let user = Address::generate(&env);
@@ -235,7 +243,10 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     assert_eq!(coverage.bps, 10_200);
     assert_eq!(coverage.supply_timestamp, now);
     assert_eq!(now - coverage.report_as_of, MAX_AGE + 1);
-    assert!(!ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::IssuerSigned));
+    assert_eq!(
+        ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::IssuerSigned),
+        ledger::CoverageStatus::Uncovered
+    );
     assert!(!vault.can_deposit());
 
     // ---- 6. deposit refused -----------------------------------------------
