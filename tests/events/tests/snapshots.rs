@@ -411,6 +411,8 @@ fn covered_vault_event_schema_matches_the_snapshot() {
     let vault_id = f.env.register(
         CoveredVault,
         (
+            vault_admin,
+            Address::generate(&f.env),
             f.ledger_id.clone(),
             f.sac.clone(),
             10_000u32,
@@ -428,7 +430,9 @@ fn covered_vault_event_schema_matches_the_snapshot() {
     vault.deposit(&user, &(40 * UNIT));
     events.extend(take(&f.env, &vault_id));
 
-    vault.withdraw(&user, &(10 * UNIT));
+    vault.request_withdraw(&user, &(10 * UNIT));
+    events.extend(take(&f.env, &vault_id));
+    vault.execute_withdraw(&user);
     events.extend(take(&f.env, &vault_id));
 
     let next_vault_admin = Address::generate(&f.env);
@@ -445,6 +449,7 @@ fn covered_vault_event_schema_matches_the_snapshot() {
         "vault_admin_proposed",
         "vault_admin_transferred",
     ] {
+    for expected in ["deposited", "withdrawal_queued", "withdrawn"] {
         assert!(
             names.contains(&expected),
             "the harness did not emit {expected}; events: {names:?}"

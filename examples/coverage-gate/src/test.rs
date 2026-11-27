@@ -3,6 +3,8 @@
 extern crate std;
 
 use super::*;
+use coverage_ledger::{CoverageLedger, CoverageLedgerClient as LedgerClient};
+use plimsoll_types::{CoverageStatus, Role, PERSISTENT_EXTEND_TO};
 use coverage_ledger::{
     CoverageLedger, CoverageLedgerClient as LedgerClient, MAX_SUPPLY_LEDGER_AGE,
 };
@@ -228,9 +230,11 @@ fn unlisted_asset_is_not_covered() {
         .env
         .register_stellar_asset_contract_v2(Address::generate(&f.env))
         .address();
-    assert!(!f
-        .ledger
-        .is_covered(&other, &0, &u64::MAX, &Tier::Transcribed));
+    assert_eq!(
+        f.ledger
+            .is_covered(&other, &0, &u64::MAX, &Tier::Transcribed),
+        CoverageStatus::Uncovered
+    );
 }
 
 // ---- max_age --------------------------------------------------------------
@@ -278,9 +282,11 @@ fn weaker_tier_does_not_count() {
     f.supply(1_000 * UNIT);
     f.reserve(&f.transcriber, 1_000 * UNIT, f.now());
     assert!(!f.gate.is_open());
-    assert!(f
-        .ledger
-        .is_covered(&f.sac, &10_000, &DAY, &Tier::Transcribed));
+    assert_eq!(
+        f.ledger
+            .is_covered(&f.sac, &10_000, &DAY, &Tier::Transcribed),
+        CoverageStatus::Covered
+    );
 }
 
 #[test]
@@ -335,9 +341,11 @@ fn archived_report_is_restored_and_judged_by_its_age() {
     // The host restores the entry and the figure still counts...
     assert!(f.gate.is_open());
     // ...but it is now over 90 days old, so any shorter max_age refuses it.
-    assert!(!f
-        .ledger
-        .is_covered(&f.sac, &10_000, &(89 * DAY), &Tier::IssuerSigned));
+    assert_eq!(
+        f.ledger
+            .is_covered(&f.sac, &10_000, &(89 * DAY), &Tier::IssuerSigned),
+        CoverageStatus::Uncovered
+    );
 }
 
 // ---- the guide ------------------------------------------------------------

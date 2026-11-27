@@ -117,6 +117,8 @@ if [ -n "$ASSET_SAC" ]; then
     --source "$ADMIN_IDENTITY" "${NETWORK_ARGS[@]}" -- \
     --ledger "$LEDGER" --asset "$ASSET_SAC" --min_bps "$MIN_BPS" \
     --max_age "$MAX_AGE" --min_tier "$MIN_TIER" --admin "$ADMIN")
+    --admin "$ADMIN" --ledger "$LEDGER" --asset "$ASSET_SAC" --min_bps "$MIN_BPS" \
+    --max_age "$MAX_AGE" --min_tier "$MIN_TIER")
   echo "vault    $VAULT"
 fi
 

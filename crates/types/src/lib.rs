@@ -40,6 +40,16 @@ pub const MIN_PLAUSIBLE_BPS: u32 = 1;
 /// says more about the reporter than the reserves.
 pub const MAX_PLAUSIBLE_BPS: u32 = 1_000_000;
 
+/// Whether an asset is covered, stale, or uncovered. Ordered: higher is better.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum CoverageStatus {
+    Uncovered = 0,
+    Stale = 1,
+    Covered = 2,
+}
+
 /// What a registered address is allowed to say.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -244,6 +254,7 @@ pub fn coverage_bps(reserves: i128, supply: i128) -> u32 {
 #[contractclient(name = "RegistryClient")]
 pub trait RegistryInterface {
     fn role_of(env: Env, reporter: Address) -> Option<Role>;
+    fn record_report_outcome(env: Env, ledger: Address, reporter: Address, accepted: bool);
 }
 
 /// The subset of a SEP-41 token that coverage-ledger calls when an asset opts
@@ -257,7 +268,16 @@ pub trait SupplyTokenInterface {
 #[contractclient(name = "CoverageLedgerClient")]
 pub trait CoverageLedgerInterface {
     fn coverage(env: Env, sac: Address, min_tier: Tier) -> Option<Coverage>;
+    fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> CoverageStatus;
     fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool;
+    fn is_covered_at(
+        env: Env,
+        sac: Address,
+        min_bps: u32,
+        max_age: u64,
+        min_tier: Tier,
+        as_of_ledger: u32,
+    ) -> bool;
     fn coverage_status(
         env: Env,
         sac: Address,
