@@ -319,6 +319,14 @@ impl CoveredVault {
         balance_of(&env, &of)
     }
 
+    /// The vault's actual on-chain token balance, read straight from the
+    /// asset's SAC rather than the internally tracked per-depositor sum.
+    /// A pure read: touches no vault storage, so no TTL is extended.
+    pub fn get_balance(env: Env) -> i128 {
+        let cfg = config(&env);
+        token::TokenClient::new(&env, &cfg.asset).balance(&env.current_contract_address())
+    }
+
     pub fn config(env: Env) -> VaultConfig {
         config(&env)
     }

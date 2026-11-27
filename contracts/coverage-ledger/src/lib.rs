@@ -721,6 +721,14 @@ impl CoverageLedger {
             &env.ledger().sequence(),
         );
         bump_instance(&env);
+        // Best-effort: a registry with no trusted ledger configured (or any
+        // other failure) must never block a reserve report from landing, so
+        // this uses `try_` and swallows the result.
+        let _ = RegistryClient::new(&env, &registry(&env)).try_record_report_outcome(
+            &env.current_contract_address(),
+            &reporter,
+            &true,
+        );
         ReservePosted {
             sac,
             tier,
@@ -829,6 +837,11 @@ impl CoverageLedger {
             write_persistent(&env, &index_key, &index);
         }
         bump_instance(&env);
+        let _ = RegistryClient::new(&env, &registry(&env)).try_record_report_outcome(
+            &env.current_contract_address(),
+            &reporter,
+            &false,
+        );
         ReserveRetracted {
             sac,
             tier,
