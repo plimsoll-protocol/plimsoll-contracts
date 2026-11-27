@@ -426,6 +426,9 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `reporter_last_post(reporter: Address, asset: Address)` | — | `Option<u64>` (the ledger timestamp of that reporter's most recent post for the asset) | — | — |
 | `asset_reporter_pairs(cursor: Option<u32>, limit: u32)` | — | `Vec<(Address, Address)>` (up to `MAX_PAIRS_PER_CALL = 50` (asset, reporter) pairs) | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
+| `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | — | — |
+| `sign_coverage(asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `Bytes` | — | — |
+
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `CoverageStatus` | — | — |
 | `set_ttl_grace(admin: Address, grace_ledgers: u32)` | admin | `()` | — | `ttl_grace_updated grace_ledgers` |
 | `ttl_grace()` | — | `u32` | — | — |
@@ -544,6 +547,37 @@ Rules:
   asset has opted in to a native supply source (see below).
 - `is_covered` is true only if `coverage` is `Some`, both the supply figure
   and the report are no older than `max_age` seconds, and `bps >= min_bps`.
+- `sign_coverage(asset, min_bps, max_age, min_tier)` evaluates
+  `is_covered(asset, min_bps, max_age, min_tier)` and returns a compact,
+  domain-separated SHA-256-authenticated binary attestation (`Bytes`) encoding
+  the asset, policy parameters, boolean result, ledger sequence, ledger
+  timestamp, and ledger contract address so a third party can verify the
+  payload off-chain without an RPC call via `plimsoll_types::attestation`.
+
+### Coverage attestation proof format (v1)
+
+All multi-byte integers are big-endian.
+
+| Offset | Size | Field | Encoding |
+| --- | --- | --- | --- |
+| `0` | 4 | `magic` | ASCII `b"PLMS"` |
+| `4` | 1 | `version` | `0x01` |
+| `5` | 1 | `covered` | `0x01` if covered, `0x00` otherwise |
+| `6` | 4 | `min_bps` | `u32` big-endian |
+| `10` | 8 | `max_age` | `u64` big-endian |
+| `18` | 4 | `min_tier` | `u32` big-endian (`1` = Transcribed, `2` = IssuerSigned, `3` = AuditorSigned) |
+| `22` | 4 | `ledger_sequence` | `u32` big-endian |
+| `26` | 8 | `ledger_timestamp` | `u64` big-endian |
+| `34` | 2 | `asset_xdr_len` | `u16` big-endian (`N`) |
+| `36` | `N` | `asset_xdr` | `asset.to_xdr()` |
+| `36 + N` | 2 | `ledger_xdr_len` | `u16` big-endian (`M`) |
+| `38 + N` | `M` | `ledger_xdr` | `ledger_contract.to_xdr()` |
+| `38 + N + M` | 32 | `digest` | `sha256(b"plimsoll-coverage-attestation-v1" \|\| body)` |
+
+`body` is the exact byte slice `0..(38 + N + M)`. Verification checks the
+magic, version, `covered` byte (`0` or `1`), `min_tier` (`1..=3`), XDR-decodes
+both addresses, and confirms `digest` matches the domain-separated SHA-256 hash.
+
   It raises `Paused` rather than answering while the ledger is paused.
   The comparison is **inclusive**: a coverage ratio exactly equal to `min_bps`
   returns `true`. This matters at exact round numbers such as `min_bps = 10_000`
@@ -777,6 +811,7 @@ must be requested before they can be executed.
 | `config()` | — | `VaultConfig` | — | — |
 | `admin()` | — | `Address` | — | — |
 | `can_deposit()` | — | `bool` | — | — |
+| `simulate_coverage(proposed_reserve: i128)` | — | `u128` | — | — |
 | `admin()` | — | `Address` | — | — |
 | `pending_admin()` | — | `Option<Address>` | — | — |
 | `propose_admin(new_admin: Address)` | admin | `()` | — | `vault_admin_proposed {new_admin}` |
@@ -810,6 +845,10 @@ gate, so a front end can show whether the vault is open without simulating a
 deposit and reading a `NotCovered` failure. It says nothing about the
 depositor's balance or authorisation.
 
+`simulate_coverage(proposed_reserve)` is a pure view function (no vault state
+writes) that reads the current on-chain supply and qualifying reserves from the
+configured `coverage-ledger` and returns the resulting `coverage_bps` (as
+`u128`) if `proposed_reserve` were added to the current reserves.
 `withdraw` always requires `to` authorization. When `amount` is strictly
 greater than `large_withdrawal_threshold`, it also requires authorization from
 the configured `approver`; an amount equal to the threshold needs only `to`.

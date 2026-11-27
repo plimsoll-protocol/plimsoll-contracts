@@ -2321,6 +2321,80 @@ fn a_new_proposal_restarts_the_clock() {
     );
 }
 
+// ---- sign_coverage --------------------------------------------------------
+
+#[test]
+fn sign_coverage_returns_verifiable_proof_when_covered() {
+    let f = setup();
+    f.ledger.list_asset(&f.sac);
+    let seq = f.env.ledger().sequence();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(1_000 * UNIT), &seq, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(1_050 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+
+    let proof = f
+        .ledger
+        .sign_coverage(&f.sac, &10_000, &DAY, &Tier::IssuerSigned);
+    let att = plimsoll_types::attestation::verify_coverage_attestation(&f.env, &proof)
+        .expect("proof should verify");
+
+    assert_eq!(att.asset, f.sac);
+    assert_eq!(att.ledger_contract, f.ledger.address);
+    assert_eq!(att.min_bps, 10_000);
+    assert_eq!(att.max_age, DAY);
+    assert_eq!(att.min_tier, Tier::IssuerSigned);
+    assert!(att.covered);
+    assert_eq!(att.ledger_sequence, seq);
+    assert_eq!(att.ledger_timestamp, T0);
+}
+
+#[test]
+fn sign_coverage_returns_verifiable_proof_when_uncovered() {
+    let f = setup();
+    f.ledger.list_asset(&f.sac);
+    let seq = f.env.ledger().sequence();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(1_000 * UNIT), &seq, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(900 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+
+    let proof = f
+        .ledger
+        .sign_coverage(&f.sac, &10_000, &DAY, &Tier::IssuerSigned);
+    let att = plimsoll_types::attestation::verify_coverage_attestation(&f.env, &proof)
+        .expect("proof should verify");
+    assert!(!att.covered);
+    assert_eq!(att.ledger_sequence, seq);
+}
+
+#[test]
+fn sign_coverage_proof_rejects_tampering() {
+    let f = setup();
+    f.ledger.list_asset(&f.sac);
+    let mut proof = f
+        .ledger
+        .sign_coverage(&f.sac, &10_000, &DAY, &Tier::IssuerSigned);
+    // Mutate the covered byte in the signed proof.
+    proof.set(5, 1);
+    assert_eq!(
+        plimsoll_types::attestation::verify_coverage_attestation(&f.env, &proof),
+        Err(plimsoll_types::attestation::AttestationError::DigestMismatch)
+    );
+}
+
 // ---- reporter_last_post (#138) --------------------------------------------
 
 fn another_asset(f: &Fixture) -> Address {

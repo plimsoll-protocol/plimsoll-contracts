@@ -4,6 +4,7 @@
 #![no_std]
 
 use plimsoll_types::{
+    coverage_bps, CoverageLedgerClient, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
     CoverageLedgerClient, Tier, WithdrawalRequest, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
     CoverageLedgerClient, CoverageStatus, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
     PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
@@ -494,6 +495,19 @@ impl CoveredVault {
         is_open(&env, &config(&env))
     }
 
+    /// Pure view returning the coverage bps if `proposed_reserve` were added
+    /// to current reserves against the current on-chain supply, without
+    /// modifying vault state.
+    pub fn simulate_coverage(env: Env, proposed_reserve: i128) -> u128 {
+        let cfg = config(&env);
+        let ledger = CoverageLedgerClient::new(&env, &cfg.ledger);
+        let supply = ledger.get_supply(&cfg.asset).map(|s| s.amount).unwrap_or(0);
+        let current_reserves = ledger
+            .coverage(&cfg.asset, &cfg.min_tier)
+            .map(|c| c.reserves)
+            .unwrap_or(0);
+        let new_reserves = current_reserves.saturating_add(proposed_reserve);
+        coverage_bps(new_reserves, supply) as u128
     /// Add a pending delayed withdrawal request.
     /// The caller must authorise this action.
     pub fn add_withdrawal_request(env: Env, requester: Address, amount: i128, unlock_ledger: u32) {

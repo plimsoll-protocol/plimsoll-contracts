@@ -4,6 +4,15 @@
 #![no_std]
 
 use plimsoll_types::{
+    attestation::encode_coverage_attestation, coverage_bps, AssetRecord, Coverage, CoverageStatus,
+    CoveredInfo, PendingUpgrade, RegistryClient, ReserveReport, Role, StaleInfo, SupplySnapshot,
+    SupplyTokenClient, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, MAX_PLAUSIBLE_BPS,
+    MIN_PLAUSIBLE_BPS, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, SECONDS_PER_LEDGER,
+    UPGRADE_DELAY_LEDGERS,
+};
+use soroban_sdk::{
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
+    Address, Bytes, BytesN, ContractExecutable, Env, Executable, String, Vec,
     coverage_bps, AssetRecord, Coverage, CoverageStatus, PendingUpgrade, RegistryClient,
     ReserveReport, Role, SupplySnapshot, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
     MAX_PLAUSIBLE_BPS, MIN_PLAUSIBLE_BPS, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
@@ -1546,6 +1555,32 @@ impl CoverageLedger {
     /// The opted-in token, or `None` when the asset reads the snapshot.
     pub fn native_supply_token(env: Env, sac: Address) -> Option<Address> {
         native_token(&env, &sac)
+    }
+
+    /// Return a compact authenticated attestation of `is_covered` for off-chain
+    /// verification without an RPC call.
+    pub fn sign_coverage(
+        env: Env,
+        asset: Address,
+        min_bps: u32,
+        max_age: u64,
+        min_tier: Tier,
+    ) -> Bytes {
+        let covered = Self::is_covered(env.clone(), asset.clone(), min_bps, max_age, min_tier);
+        let ledger_contract = env.current_contract_address();
+        let ledger_sequence = env.ledger().sequence();
+        let ledger_timestamp = env.ledger().timestamp();
+        encode_coverage_attestation(
+            &env,
+            &asset,
+            &ledger_contract,
+            min_bps,
+            max_age,
+            min_tier,
+            covered,
+            ledger_sequence,
+            ledger_timestamp,
+        )
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) {

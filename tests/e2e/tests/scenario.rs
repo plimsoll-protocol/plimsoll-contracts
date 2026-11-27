@@ -294,6 +294,147 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     assert_eq!(vault.deposit(&user, &(10 * UNIT)), 10 * UNIT);
 }
 
+#[test]
+fn upgrade_preserves_all_existing_storage_values() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    env.ledger().set_sequence_number(SEQ0);
+
+    let admin = Address::generate(&env);
+    let registry_id = env.register(registry::WASM, (admin.clone(),));
+    let registry = registry::Client::new(&env, &registry_id);
+    let ledger_id = env.register(ledger::WASM, (admin.clone(), registry_id.clone()));
+    let ledger = ledger::Client::new(&env, &ledger_id);
+
+    let sac_admin = Address::generate(&env);
+    let handle = env.register_stellar_asset_contract_v2(sac_admin);
+    let sac = handle.address();
+    let issuer = handle.issuer().address();
+
+    let vault_id = env.register(
+        vault::WASM,
+        (
+            ledger_id.clone(),
+            sac.clone(),
+            MIN_BPS,
+            MAX_AGE,
+            vault::Tier::IssuerSigned,
+        ),
+    );
+    let vault = vault::Client::new(&env, &vault_id);
+
+    // 1. Write several entries to registry, ledger, and vault.
+    let poster = Address::generate(&env);
+    let auditor = Address::generate(&env);
+    let transcriber = Address::generate(&env);
+    registry.set_reporter(
+        &poster,
+        &registry::Role::SupplyPoster,
+        &String::from_str(&env, "indexer"),
+    );
+    registry.set_reporter(
+        &auditor,
+        &registry::Role::Auditor,
+        &String::from_str(&env, "Acme Audit"),
+    );
+    registry.set_reporter(
+        &transcriber,
+        &registry::Role::Transcriber,
+        &String::from_str(&env, "volunteer"),
+    );
+
+    let asset_record = ledger.list_asset(&sac);
+    ledger.post_supply(&poster, &sac, &(1_000 * UNIT), &SEQ0, &hash(&env, 1));
+    ledger.post_reserve(
+        &issuer,
+        &sac,
+        &(1_020 * UNIT),
+        &T0,
+        &hash(&env, 2),
+        &doc_uri(&env),
+    );
+    advance(&env, 10);
+    ledger.post_reserve(
+        &auditor,
+        &sac,
+        &(1_030 * UNIT),
+        &(T0 + 10),
+        &hash(&env, 3),
+        &doc_uri(&env),
+    );
+    ledger.post_reserve(
+        &transcriber,
+        &sac,
+        &(1_010 * UNIT),
+        &(T0 + 5),
+        &hash(&env, 4),
+        &doc_uri(&env),
+    );
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    let sac_client = StellarAssetClient::new(&env, &sac);
+    sac_client.mint(&user1, &(500 * UNIT));
+    sac_client.mint(&user2, &(300 * UNIT));
+    assert_eq!(vault.deposit(&user1, &(120 * UNIT)), 120 * UNIT);
+    assert_eq!(vault.deposit(&user2, &(80 * UNIT)), 80 * UNIT);
+
+    let supply_before = ledger.get_supply(&sac).expect("supply stored");
+    let reports_before = ledger.get_reports(&sac);
+    let coverage_before = ledger
+        .coverage(&sac, &ledger::Tier::Transcribed)
+        .expect("coverage stored");
+    let vault_cfg_before = vault.config();
+
+    // 2. Upgrade registry and ledger to the same wasm.
+    let registry_wasm_hash = env.deployer().upload_contract_wasm(registry::WASM);
+    registry.propose_upgrade(&registry_wasm_hash);
+
+    let ledger_wasm_hash = env.deployer().upload_contract_wasm(ledger::WASM);
+    ledger.propose_upgrade(&ledger_wasm_hash);
+
+    // Advance past UPGRADE_DELAY_LEDGERS (17_280 ledgers at 5s each = 86_400s).
+    advance(&env, 17_280 * 5);
+    registry.execute_upgrade();
+    ledger.execute_upgrade();
+
+    assert_runs_wasm(&env, &registry_id, registry::WASM);
+    assert_runs_wasm(&env, &ledger_id, ledger::WASM);
+    assert_runs_wasm(&env, &vault_id, vault::WASM);
+
+    // 3. Read back all entries and assert no data was lost.
+    assert_eq!(registry.admin(), admin);
+    assert_eq!(
+        registry.role_of(&poster),
+        Some(registry::Role::SupplyPoster)
+    );
+    assert_eq!(registry.role_of(&auditor), Some(registry::Role::Auditor));
+    assert_eq!(
+        registry.role_of(&transcriber),
+        Some(registry::Role::Transcriber)
+    );
+
+    assert_eq!(ledger.admin(), admin);
+    assert_eq!(ledger.registry(), registry_id);
+    assert_eq!(ledger.get_asset(&sac), Some(asset_record));
+    assert_eq!(ledger.get_supply(&sac), Some(supply_before));
+    assert_eq!(ledger.get_reports(&sac), reports_before);
+    assert_eq!(
+        ledger.coverage(&sac, &ledger::Tier::Transcribed),
+        Some(coverage_before)
+    );
+    assert!(ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::IssuerSigned));
+
+    // Vault storage and interactions remain intact after ledger upgrade.
+    assert_eq!(vault.config(), vault_cfg_before);
+    assert_eq!(vault.balance(&user1), 120 * UNIT);
+    assert_eq!(vault.balance(&user2), 80 * UNIT);
+    assert!(vault.can_deposit());
+    assert_eq!(vault.deposit(&user1, &(30 * UNIT)), 150 * UNIT);
+    assert_eq!(vault.withdraw(&user2, &(20 * UNIT)), 60 * UNIT);
+}
+
 fn hash(env: &Env, byte: u8) -> BytesN<32> {
     BytesN::from_array(env, &[byte; 32])
 }

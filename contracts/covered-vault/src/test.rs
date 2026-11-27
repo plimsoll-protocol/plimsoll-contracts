@@ -537,6 +537,49 @@ fn can_deposit_uses_the_stored_min_tier() {
     );
 }
 
+// ---- simulate_coverage ----------------------------------------------------
+
+#[test]
+fn simulate_coverage_adds_proposed_reserve_without_state_writes() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 900 * UNIT);
+
+    // Current coverage is 9_000 bps (90%). Adding 150 units -> 10_500 bps (105%).
+    assert_eq!(f.vault.simulate_coverage(&(150 * UNIT)), 10_500);
+    // Pure computation: on-chain reserves and vault state are unchanged.
+    let cov = f.ledger.coverage(&f.sac, &Tier::IssuerSigned).unwrap();
+    assert_eq!(cov.reserves, 900 * UNIT);
+    assert_eq!(cov.bps, 9_000);
+    assert!(!f.vault.can_deposit());
+}
+
+#[test]
+fn simulate_coverage_with_zero_proposed_matches_current_bps() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_020 * UNIT);
+    assert_eq!(f.vault.simulate_coverage(&0), 10_200);
+}
+
+#[test]
+fn simulate_coverage_without_reserve_report_uses_on_chain_supply() {
+    let f = setup();
+    let seq = f.env.ledger().sequence();
+    f.ledger.post_supply(
+        &f.poster,
+        &f.sac,
+        &(1_000 * UNIT),
+        &seq,
+        &BytesN::from_array(&f.env, &[1; 32]),
+    );
+    assert_eq!(f.vault.simulate_coverage(&(500 * UNIT)), 5_000);
+}
+
+#[test]
+fn simulate_coverage_without_supply_returns_max() {
+    let f = setup();
+    assert_eq!(f.vault.simulate_coverage(&(500 * UNIT)), u32::MAX as u128);
+}
+
 // ---- admin / update_thresholds -------------------------------------------
 
 #[test]
