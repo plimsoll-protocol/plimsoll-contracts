@@ -6,11 +6,11 @@
 
 <p align="center">
   <a href="https://github.com/plimsoll-protocol/plimsoll-contracts/actions/workflows/ci.yml"><img src="https://github.com/plimsoll-protocol/plimsoll-contracts/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <img src="https://img.shields.io/badge/soroban--sdk-28.0.0-0f1d2b" alt="soroban-sdk 28" />
+  <img src="https://img.shields.io/badge/soroban--sdk-29.0.1-0f1d2b" alt="soroban-sdk 29.0.1" />
   <img src="https://img.shields.io/badge/network-testnet-c8341f" alt="testnet" />
   <a href="https://plimsoll-protocol.gitbook.io/plimsoll-protocol-docs/"><img src="https://img.shields.io/badge/docs-gitbook-0f1d2b" alt="Docs" /></a>
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" />
-  <img src="https://img.shields.io/badge/audit-none-lightgrey" alt="unaudited" />
+  <a href="https://github.com/plimsoll-protocol/plimsoll-contracts/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/cargo--audit-enabled-green" alt="cargo-audit" /></a>
 </p>
 
 # Plimsoll contracts
@@ -24,7 +24,7 @@ account, a registered auditor, or a registered transcriber, and the signer sets
 the report's tier. Any contract can then call:
 
 ```rust
-is_covered(asset, min_bps, max_age, min_tier) -> bool
+is_covered(asset, min_bps, max_age, min_tier) -> CoverageStatus
 ```
 
 and refuse an asset that is under-backed or whose figures are out of date.
@@ -56,7 +56,7 @@ Questions, ideas and contributor coordination happen in
 | --- | --- |
 | [`reporter-registry`](contracts/reporter-registry) | Who may speak: auditors, transcribers and supply posters, managed by an admin. |
 | [`coverage-ledger`](contracts/coverage-ledger) | What was said: asset listings, supply snapshots, reserve reports, and the `coverage` / `is_covered` queries. |
-| [`covered-vault`](contracts/covered-vault) | Reference consumer: refuses deposits while the asset is not covered; never blocks withdrawals. |
+| [`covered-vault`](contracts/covered-vault) | Reference consumer: refuses deposits while the asset is not covered; withdrawals are never coverage-gated and can have an admin-configured delay. |
 | [`plimsoll-types`](crates/types) | Shared types, basis-point math and cross-contract client traits. |
 
 ```
@@ -69,7 +69,9 @@ The full function-by-function specification is in [docs/SPEC.md](docs/SPEC.md),
 and the event topic and data layouts every off-chain reader depends on are in
 [docs/EVENTS.md](docs/EVENTS.md). What each error code means, from
 `Error(Contract, #1)` up, and what a caller should do about it is in
-[docs/ERRORS.md](docs/ERRORS.md).
+[docs/ERRORS.md](docs/ERRORS.md). Which SDK, Stellar CLI and network protocol a
+contract wasm needs, and how those pins are upgraded, is in
+[docs/compatibility.md](docs/compatibility.md).
 
 What each actor (admins, supply poster, reporters, issuers, anyone) can make
 the ledger say, what limits them and what an integrator should do about it is
@@ -106,12 +108,15 @@ Listed demo assets: `PUSD` (demo issuer, SAC `CCHPT4…HIM7S`) and Circle's test
 
 ## Quick start
 
-Requirements: Rust at the exact version pinned in
-[rust-toolchain.toml](rust-toolchain.toml) (rustup installs it, with the
-`wasm32v1-none` target, the first time you run `cargo` here), and
-[Stellar CLI](https://developers.stellar.org/docs/tools/cli) 28 or later. To
-reproduce CI's wasm hashes exactly, use the CLI version CI pins (see
-[Bumping the Rust toolchain and the Stellar CLI](#bumping-the-rust-toolchain-and-the-stellar-cli)).
+Requirements:
+- **Minimum Supported Rust Version (MSRV):** `1.100.0`, pinned in
+  [rust-toolchain.toml](rust-toolchain.toml) (rustup installs it, with the
+  `wasm32v1-none` target, the first time you run `cargo` here). CI also runs
+  `cargo build` and `cargo test` against `stable` and `beta` (with `beta`
+  failures reported as non-blocking warnings) to catch regressions early.
+- [Stellar CLI](https://developers.stellar.org/docs/tools/cli) 28 or later. To
+  reproduce CI's wasm hashes exactly, use the CLI version CI pins (see
+  [Bumping the Rust toolchain and the Stellar CLI](#bumping-the-rust-toolchain-and-the-stellar-cli)).
 
 ```bash
 git clone https://github.com/plimsoll-protocol/plimsoll-contracts
@@ -186,8 +191,12 @@ stellar contract invoke --network testnet --send=no \
 ### Verifying a deployed contract against a release
 
 Every `v*` tag publishes a GitHub release containing the three wasm files,
-their interface specs (`*.spec.json`) and `SHA256SUMS`. Download a release and
-check it before comparing it with what is deployed:
+their interface specs (`*.spec.json`) and `SHA256SUMS`. On every `v*` tag, the
+[Release](.github/workflows/release.yml) workflow also rebuilds the contracts
+from source and verifies that each wasm SHA-256 hash matches the hash
+published under `liveWasm` in [deployments/testnet.json](deployments/testnet.json).
+
+Download a release and check it before comparing it with what is deployed:
 
 ```bash
 gh release download v0.1.0 --pattern '*'
@@ -195,6 +204,15 @@ sha256sum -c SHA256SUMS
 
 stellar contract info hash --wasm coverage_ledger.wasm
 stellar contract info hash --id CC2QQ7R4FLPHZP7KA5AO4IASXXICTG6N4GQXCXITTEBNYQEYTYXKMN4D --network testnet
+```
+
+To verify the reproducible wasm build locally from source against
+[deployments/testnet.json](deployments/testnet.json):
+
+```bash
+stellar contract build --locked
+sha256sum target/wasm32v1-none/release/coverage_ledger.wasm
+jq -r '.liveWasm.coverageLedger' deployments/testnet.json
 ```
 
 The two hashes must match. `deployments/testnet.json` records the wasm hash
@@ -327,6 +345,27 @@ Issues labelled [`good first issue`](https://github.com/plimsoll-protocol/plimso
 are scoped for a first pull request. Read [CONTRIBUTING.md](CONTRIBUTING.md) before you start,
 and comment on an issue to have it assigned.
 
+### Error codes are append-only
+
+The indexer, the web app and third-party front ends decode a contract error by
+its number, so a variant's number is fixed for good once it ships. **New errors
+are appended with the next free number**, and no existing variant is
+renumbered, given another variant's number or removed: an error that is no
+longer raised stays in the enum, so the numbers above and below it keep their
+meaning.
+
+The compiler cannot catch this: `#[repr(u32)]` accepts any numbering. So the
+rule is checked in CI. `scripts/check_error_codes.py` parses every
+`#[contracterror]` enum in the branch and in the base branch and fails on a
+renumbering, a removal or a new variant numbered below the last existing one:
+
+```bash
+python3 scripts/check_error_codes.py --base origin/main
+```
+
+What each number means, and why it can never move, is in
+[docs/ERRORS.md](docs/ERRORS.md#numbers-are-never-reused-or-renumbered).
+
 Security reports: see [SECURITY.md](SECURITY.md). Do not open public issues for vulnerabilities.
 Trust assumptions per actor: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
@@ -353,6 +392,27 @@ Run it locally against your branch's base:
 
 It exits non-zero and prints the signature diff when SPEC.md is missing, so
 the failure names exactly what a reviewer would have had to reconstruct.
+## Commit conventions
+
+Commit messages and pull request titles follow [Conventional
+Commits](https://www.conventionalcommits.org/) and are validated in CI with
+[commitlint](https://commitlint.js.org/) (`.commitlintrc.json`), run by the
+[Commit lint](.github/workflows/commitlint.yml) workflow on every pull request
+and on pushes to `main`.
+
+Format: `type(scope): subject`
+
+| Part | Rule |
+| --- | --- |
+| `type` | one of `feat`, `fix`, `docs`, `ci`, `test`, `chore`, `perf`, `security` |
+| `scope` | one of `types`, `registry`, `ledger`, `vault`, `spec`, `ci`, `deps` |
+| `subject` | lower-case, no trailing period, imperative mood |
+| Example | `feat(ledger): add supply age endpoint` |
+
+Only the commits introduced by a pull request are linted; existing history on
+`main` is not re-checked, and GitHub merge-commit metadata is skipped. If a PR
+title or commit is not conventional, the Commit lint check fails and the PR
+cannot be merged.
 
 ## Contributors
 

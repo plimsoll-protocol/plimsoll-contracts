@@ -80,6 +80,7 @@ VAULT2=$(json "d.get('contracts',{}).get('coveredVaultQusd','')")
 if [ -z "$VAULT2" ]; then
   VAULT2=$(stellar contract deploy --wasm target/wasm32v1-none/release/covered_vault.wasm \
     --source plimsoll-admin --network "$NETWORK" -- \
+    --admin "$(stellar keys address plimsoll-admin)" \
     --ledger "$LEDGER" --asset "$SAC" --min_bps 10000 --max_age 2678400 --min_tier 1)
 fi
 echo "QUSD vault $VAULT2"
