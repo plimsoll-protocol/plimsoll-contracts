@@ -220,6 +220,8 @@ Decides who may speak. Holds no money.
 | `ReporterDisplayName(Address)` | persistent, TTL extended on write and read | `Symbol` (optional, at most 32 characters) |
 
 | `PendingReporter(Address)` | persistent, TTL extended on write and read | `PendingReporter` |
+| `ReporterDisplayName(Address)` | persistent, TTL extended on write and read | `Symbol` (optional, at most 32 characters) |
+
 | `Metadata(Address)` | persistent, TTL extended on write and read | `ReporterMetadata` |
 | `Dispute(BytesN<32>)` | persistent, TTL extended on write and read | `DisputeRecord` |
 | `DisplayName(Address)` | persistent, TTL extended on write and read | `Symbol` |
@@ -266,6 +268,8 @@ Decides who may speak. Holds no money.
 | `get_dispute(report_id: BytesN<32>)` | — | `Option<DisputeRecord>` | — | — |
 | `max_reporters()` | — | `u32` | — | — |
 | `set_max_reporters(max: u32)` | admin | `()` | `InvalidMaxReporters` (zero) | `max_reporters_set {max}` |
+| `set_reporter_name(reporter: Address, name: Symbol)` | reporter | `()` | `ReporterNotFound` | — |
+| `get_reporter_name(reporter: Address)` | — | `Option<Symbol>` | — | — |
 | `transfer_admin(new_admin: Address)` | admin and new_admin | `()` | — | `admin_transferred {new_admin}` |
 | `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
 | `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
@@ -308,6 +312,10 @@ Rules:
   snapshot. This is a balance requirement, not a transfer or custody of XLM.
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
 `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
+
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`.
+The display name is stored separately from `ReporterInfo` so existing reporter
+records remain decodable. Soroban `Symbol` values are limited to 32 characters.
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
 `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`,
@@ -499,6 +507,7 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `get_issuer_delegate(sac: Address)` | — | `Option<Address>` | — | — |
 | `can_post_report(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | — | `Result<(), LedgerError>` | `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` | — |
 | `retract_reserve(reporter: Address, sac: Address)` | reporter | `()` | `AssetNotListed`, `NotReporter`, `NoReportToRetract` | `reserve_retracted {sac, tier} reporter, as_of` |
+| `can_post_report(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | — | `Result<(), LedgerError>` | `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` | — |
 | `get_asset(sac)` | — | `Option<AssetRecord>` | — | — |
 | `get_supply(sac)` | — | `Option<SupplySnapshot>` | — | — |
 | `get_report(sac, tier: Tier)` | — | `Option<ReserveReport>` (the freshest report at that tier that counts) | — | — |

@@ -65,6 +65,7 @@ enum DataKey {
     ReporterDisplayName(Address),
     /// Unix-timestamp at which the reporter's registration expires.
     Expiry(Address),
+    ReporterDisplayName(Address),
 
     Metadata(Address),
     Stake(Address),
@@ -921,6 +922,9 @@ impl ReporterRegistry {
         env.storage()
             .persistent()
             .remove(&DataKey::Reporter(reporter.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ReporterDisplayName(reporter.clone()));
         env.storage()
             .persistent()
             .remove(&DataKey::ReporterDisplayName(reporter.clone()));
