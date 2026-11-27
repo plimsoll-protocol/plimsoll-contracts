@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/plimsoll-protocol/plimsoll-contracts/actions/workflows/ci.yml"><img src="https://github.com/plimsoll-protocol/plimsoll-contracts/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <img src="https://img.shields.io/badge/soroban--sdk-28.0.0-0f1d2b" alt="soroban-sdk 28" />
+  <img src="https://img.shields.io/badge/soroban--sdk-29.0.1-0f1d2b" alt="soroban-sdk 29.0.1" />
   <img src="https://img.shields.io/badge/network-testnet-c8341f" alt="testnet" />
   <a href="https://plimsoll-protocol.gitbook.io/plimsoll-protocol-docs/"><img src="https://img.shields.io/badge/docs-gitbook-0f1d2b" alt="Docs" /></a>
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0" />
@@ -56,7 +56,7 @@ Questions, ideas and contributor coordination happen in
 | --- | --- |
 | [`reporter-registry`](contracts/reporter-registry) | Who may speak: auditors, transcribers and supply posters, managed by an admin. |
 | [`coverage-ledger`](contracts/coverage-ledger) | What was said: asset listings, supply snapshots, reserve reports, and the `coverage` / `is_covered` queries. |
-| [`covered-vault`](contracts/covered-vault) | Reference consumer: refuses deposits while the asset is not covered; never blocks withdrawals. |
+| [`covered-vault`](contracts/covered-vault) | Reference consumer: refuses deposits while the asset is not covered; withdrawals are never coverage-gated and can have an admin-configured delay. |
 | [`plimsoll-types`](crates/types) | Shared types, basis-point math and cross-contract client traits. |
 
 ```
@@ -69,7 +69,9 @@ The full function-by-function specification is in [docs/SPEC.md](docs/SPEC.md),
 and the event topic and data layouts every off-chain reader depends on are in
 [docs/EVENTS.md](docs/EVENTS.md). What each error code means, from
 `Error(Contract, #1)` up, and what a caller should do about it is in
-[docs/ERRORS.md](docs/ERRORS.md).
+[docs/ERRORS.md](docs/ERRORS.md). Which SDK, Stellar CLI and network protocol a
+contract wasm needs, and how those pins are upgraded, is in
+[docs/compatibility.md](docs/compatibility.md).
 
 What each actor (admins, supply poster, reporters, issuers, anyone) can make
 the ledger say, what limits them and what an integrator should do about it is
@@ -186,8 +188,12 @@ stellar contract invoke --network testnet --send=no \
 ### Verifying a deployed contract against a release
 
 Every `v*` tag publishes a GitHub release containing the three wasm files,
-their interface specs (`*.spec.json`) and `SHA256SUMS`. Download a release and
-check it before comparing it with what is deployed:
+their interface specs (`*.spec.json`) and `SHA256SUMS`. On every `v*` tag, the
+[Release](.github/workflows/release.yml) workflow also rebuilds the contracts
+from source and verifies that each wasm SHA-256 hash matches the hash
+published under `liveWasm` in [deployments/testnet.json](deployments/testnet.json).
+
+Download a release and check it before comparing it with what is deployed:
 
 ```bash
 gh release download v0.1.0 --pattern '*'
@@ -195,6 +201,15 @@ sha256sum -c SHA256SUMS
 
 stellar contract info hash --wasm coverage_ledger.wasm
 stellar contract info hash --id CC2QQ7R4FLPHZP7KA5AO4IASXXICTG6N4GQXCXITTEBNYQEYTYXKMN4D --network testnet
+```
+
+To verify the reproducible wasm build locally from source against
+[deployments/testnet.json](deployments/testnet.json):
+
+```bash
+stellar contract build --locked
+sha256sum target/wasm32v1-none/release/coverage_ledger.wasm
+jq -r '.liveWasm.coverageLedger' deployments/testnet.json
 ```
 
 The two hashes must match. `deployments/testnet.json` records the wasm hash
@@ -329,6 +344,28 @@ and comment on an issue to have it assigned.
 
 Security reports: see [SECURITY.md](SECURITY.md). Do not open public issues for vulnerabilities.
 Trust assumptions per actor: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
+## Commit conventions
+
+Commit messages and pull request titles follow [Conventional
+Commits](https://www.conventionalcommits.org/) and are validated in CI with
+[commitlint](https://commitlint.js.org/) (`.commitlintrc.json`), run by the
+[Commit lint](.github/workflows/commitlint.yml) workflow on every pull request
+and on pushes to `main`.
+
+Format: `type(scope): subject`
+
+| Part | Rule |
+| --- | --- |
+| `type` | one of `feat`, `fix`, `docs`, `ci`, `test`, `chore`, `perf`, `security` |
+| `scope` | one of `types`, `registry`, `ledger`, `vault`, `spec`, `ci`, `deps` |
+| `subject` | lower-case, no trailing period, imperative mood |
+| Example | `feat(ledger): add supply age endpoint` |
+
+Only the commits introduced by a pull request are linted; existing history on
+`main` is not re-checked, and GitHub merge-commit metadata is skipped. If a PR
+title or commit is not conventional, the Commit lint check fails and the PR
+cannot be merged.
 
 ## Contributors
 

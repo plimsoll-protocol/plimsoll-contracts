@@ -856,6 +856,82 @@ fn is_covered_checks_ratio_age_and_tier() {
 /// An asset whose coverage ratio equals min_bps exactly must return true,
 /// and one bps below must return false. See SPEC.md "is_covered" rules.
 #[test]
+fn is_covered_at_filters_figures_by_posting_ledger() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.env.ledger().set_sequence_number(1_010);
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+
+    assert!(!f
+        .ledger
+        .is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_000,));
+    assert!(f
+        .ledger
+        .is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_010,));
+}
+
+#[test]
+fn is_covered_at_cannot_reconstruct_replaced_reports() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    assert!(f
+        .ledger
+        .is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_000,));
+
+    f.env.ledger().set_sequence_number(1_010);
+    f.env.ledger().set_timestamp(T0 + 50);
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &(T0 + 50),
+        &hash(&f.env, 3),
+        &uri(&f.env),
+    );
+    assert!(!f
+        .ledger
+        .is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_005,));
+}
+
+#[test]
+fn is_covered_at_rejects_a_future_ledger() {
+    let f = listed();
+    assert_eq!(
+        f.ledger
+            .try_is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_001,),
+        Err(Ok(LedgerError::FutureLedger.into()))
+    );
+}
+
+#[test]
+fn is_covered_at_propagates_pause() {
+    let f = listed();
+    f.ledger.pause();
+    assert_eq!(
+        f.ledger
+            .try_is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_000,),
+        Err(Ok(LedgerError::Paused.into()))
+    );
+}
+
+#[test]
 fn is_covered_exact_bps_boundary_is_inclusive() {
     let f = listed();
     // 100 reserves against 100 supply → exactly 10_000 bps (100 %).
@@ -2283,6 +2359,32 @@ fn pause_sets_the_flag_and_emits_the_admin() {
 }
 
 #[test]
+fn is_covered_stays_within_its_resource_budget() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    assert_within_budget(
+        &f,
+        "is_covered",
+        IS_COVERED_MAX_CPU_INSTRUCTIONS,
+        IS_COVERED_MAX_MEMORY_BYTES,
+        || {
+            assert!(f
+                .ledger
+                .is_covered(&f.sac, &10_000, &86_400, &Tier::Transcribed));
+        },
+    );
+}
+
+#[test]
 fn unpause_clears_the_flag_and_emits_the_admin() {
     let f = listed();
     f.ledger.pause();
@@ -2298,6 +2400,21 @@ fn unpause_clears_the_flag_and_emits_the_admin() {
     assert_eq!(
         Address::try_from_val(&f.env, &data.get(Symbol::new(&f.env, "by")).unwrap()).unwrap(),
         f.admin
+    );
+}
+
+#[test]
+fn post_supply_stays_within_its_resource_budget() {
+    let f = listed();
+    assert_within_budget(
+        &f,
+        "post_supply",
+        POST_SUPPLY_MAX_CPU_INSTRUCTIONS,
+        POST_SUPPLY_MAX_MEMORY_BYTES,
+        || {
+            f.ledger
+                .post_supply(&f.poster, &f.sac, &UNIT, &990, &hash(&f.env, 1));
+        },
     );
 }
 
@@ -2586,6 +2703,29 @@ fn enable_native_supply_requires_a_listed_asset() {
 }
 
 #[test]
+fn post_report_stays_within_its_resource_budget() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    assert_within_budget(
+        &f,
+        "post_reserve",
+        POST_RESERVE_MAX_CPU_INSTRUCTIONS,
+        POST_RESERVE_MAX_MEMORY_BYTES,
+        || {
+            f.ledger.post_reserve(
+                &f.auditor,
+                &f.sac,
+                &(100 * UNIT),
+                &T0,
+                &hash(&f.env, 2),
+                &uri(&f.env),
+            );
+        },
+    );
+}
+
+#[test]
 fn enable_native_supply_requires_the_admin() {
     let f = listed();
     let stranger = Address::generate(&f.env);
@@ -2667,4 +2807,119 @@ fn a_failing_native_query_without_a_snapshot_is_uncovered() {
             .coverage_status(&f.sac, &0, &u64::MAX, &Tier::Transcribed),
         CoverageStatus::Uncovered
     );
+}
+
+fn try_post_now(f: &Fixture, who: &Address) -> Result<(), LedgerError> {
+    match f
+        .ledger
+        .try_post_reserve(who, &f.sac, &UNIT, &T0, &hash(&f.env, 6), &uri(&f.env))
+    {
+        Ok(_) => Ok(()),
+        Err(Ok(error)) => Err(LedgerError::try_from(error).expect("a ledger error")),
+        Err(Err(error)) => panic!("post_reserve failed outside the contract: {error:?}"),
+    }
+}
+
+fn can_post(f: &Fixture, who: &Address) -> Result<(), LedgerError> {
+    match f.ledger.try_can_post_report(who, &f.sac) {
+        Ok(Ok(())) => Ok(()),
+        Err(Ok(error)) => Err(error),
+        other => panic!("can_post_report failed outside the contract: {other:?}"),
+    }
+}
+
+#[test]
+fn can_post_report_allows_every_reporting_identity() {
+    let f = listed();
+    for who in [&f.issuer, &f.auditor, &f.transcriber] {
+        assert_eq!(can_post(&f, who), Ok(()));
+        f.ledger.can_post_report(who, &f.sac);
+        // And post_reserve agrees.
+        assert_eq!(try_post_now(&f, who), Ok(()));
+    }
+}
+
+#[test]
+fn can_post_report_rejects_an_unlisted_asset() {
+    let f = setup();
+    assert_eq!(can_post(&f, &f.auditor), Err(LedgerError::AssetNotListed));
+    assert_eq!(
+        try_post_now(&f, &f.auditor),
+        Err(LedgerError::AssetNotListed)
+    );
+}
+
+#[test]
+fn can_post_report_rejects_a_non_reporter() {
+    let f = listed();
+    let stranger = Address::generate(&f.env);
+    for who in [&f.poster, &stranger] {
+        assert_eq!(can_post(&f, who), Err(LedgerError::NotReporter));
+        assert_eq!(try_post_now(&f, who), Err(LedgerError::NotReporter));
+    }
+}
+
+#[test]
+fn can_post_report_reports_the_pause_first() {
+    let f = setup();
+    f.ledger.pause();
+    // Paused wins over the unlisted asset, as it does in post_reserve.
+    assert_eq!(can_post(&f, &f.auditor), Err(LedgerError::Paused));
+    assert_eq!(try_post_now(&f, &f.auditor), Err(LedgerError::Paused));
+}
+
+#[test]
+fn can_post_report_rejects_a_full_tier_unless_a_slot_can_be_reclaimed() {
+    let f = listed();
+    let mut auditors = std::vec![f.auditor.clone()];
+    for _ in 1..MAX_REPORTERS_PER_TIER {
+        auditors.push(add_reporter(&f, Role::Auditor));
+    }
+    for (i, a) in auditors.iter().enumerate() {
+        post(&f, a, UNIT, T0 - 100 + i as u64);
+    }
+    let one_too_many = add_reporter(&f, Role::Auditor);
+    assert_eq!(
+        can_post(&f, &one_too_many),
+        Err(LedgerError::TooManyReporters)
+    );
+    assert_eq!(
+        try_post_now(&f, &one_too_many),
+        Err(LedgerError::TooManyReporters)
+    );
+    // A reporter already holding a slot is not blocked by the cap.
+    assert_eq!(can_post(&f, &auditors[0]), Ok(()));
+
+    // Revoking a holder frees a slot post_reserve would reclaim.
+    f.registry.revoke(&auditors[1]);
+    assert_eq!(can_post(&f, &one_too_many), Ok(()));
+    assert_eq!(try_post_now(&f, &one_too_many), Ok(()));
+}
+
+#[test]
+fn can_post_report_writes_no_storage() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let f = listed();
+    let key = DataKey::Asset(f.sac.clone());
+    let ttl = |f: &Fixture| {
+        f.env.as_contract(&f.ledger.address, || {
+            f.env.storage().persistent().get_ttl(&key)
+        })
+    };
+    // Move close enough to expiry that any read that extends TTL would.
+    let remaining = ttl(&f);
+    f.env
+        .ledger()
+        .set_sequence_number(f.env.ledger().sequence() + remaining - 10);
+    let before = ttl(&f);
+    assert!(before < PERSISTENT_THRESHOLD);
+
+    assert_eq!(can_post(&f, &f.auditor), Ok(()));
+    assert_eq!(ttl(&f), before, "can_post_report must not extend TTLs");
+    assert!(f.ledger.get_reports(&f.sac).is_empty());
+
+    // get_asset, by contrast, extends it.
+    f.ledger.get_asset(&f.sac);
+    assert!(ttl(&f) > before);
 }

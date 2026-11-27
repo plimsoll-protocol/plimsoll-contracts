@@ -98,6 +98,7 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     let vault_id = env.register(
         vault::WASM,
         (
+            admin.clone(),
             ledger_id.clone(),
             sac.clone(),
             MIN_BPS,
@@ -246,16 +247,18 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     assert_eq!(token.balance(&vault_id), 100 * UNIT);
     assert_eq!(token.balance(&user), 400 * UNIT);
 
-    // ---- 7. withdraw still works ------------------------------------------
-    assert_eq!(vault.withdraw(&user, &(40 * UNIT)), 60 * UNIT);
+    // ---- 7. withdrawals remain available with the zero-delay default -----
+    vault.request_withdraw(&user, &(40 * UNIT));
+    assert_eq!(vault.execute_withdraw(&user), 60 * UNIT);
     assert_eq!(vault.balance(&user), 60 * UNIT);
     assert_eq!(token.balance(&vault_id), 60 * UNIT);
     assert_eq!(token.balance(&user), 440 * UNIT);
     assert_eq!(
-        vault.try_withdraw(&user, &(61 * UNIT)),
+        vault.try_request_withdraw(&user, &(61 * UNIT)),
         Err(Ok(contract_error(VAULT_INSUFFICIENT_BALANCE)))
     );
-    assert_eq!(vault.withdraw(&user, &(60 * UNIT)), 0);
+    vault.request_withdraw(&user, &(60 * UNIT));
+    assert_eq!(vault.execute_withdraw(&user), 0);
     assert_eq!(token.balance(&vault_id), 0);
     assert_eq!(token.balance(&user), 500 * UNIT);
 

@@ -146,7 +146,8 @@ fn withdraw_works_even_when_not_covered() {
     f.vault.deposit(&f.user, &(100 * UNIT));
     // Coverage lapses; the user can still get out.
     f.env.ledger().set_timestamp(T0 + 10 * DAY);
-    let bal = f.vault.withdraw(&f.user, &(40 * UNIT));
+    f.vault.request_withdraw(&f.user, &(40 * UNIT));
+    let bal = f.vault.execute_withdraw(&f.user);
     assert_eq!(bal, 60 * UNIT);
     assert_eq!(f.token.balance(&f.user), 940 * UNIT);
 }
@@ -156,7 +157,7 @@ fn withdraw_more_than_balance_fails() {
     let f = setup();
     report(&f, 1_000 * UNIT, 1_000 * UNIT);
     f.vault.deposit(&f.user, &(10 * UNIT));
-    let res = f.vault.try_withdraw(&f.user, &(11 * UNIT));
+    let res = f.vault.try_request_withdraw(&f.user, &(11 * UNIT));
     assert_eq!(res, Err(Ok(VaultError::InsufficientBalance.into())));
 }
 
@@ -168,8 +169,98 @@ fn zero_amounts_rejected() {
         Err(Ok(VaultError::InvalidAmount.into()))
     );
     assert_eq!(
-        f.vault.try_withdraw(&f.user, &0),
+        f.vault.try_request_withdraw(&f.user, &0),
         Err(Ok(VaultError::InvalidAmount.into()))
+    );
+}
+
+#[test]
+fn get_balance_reads_the_on_chain_token_balance() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    assert_eq!(f.vault.get_balance(), 0);
+    f.vault.deposit(&f.user, &(100 * UNIT));
+    assert_eq!(f.vault.get_balance(), 100 * UNIT);
+    assert_eq!(f.vault.get_balance(), f.token.balance(&f.vault.address));
+    f.vault.withdraw(&f.user, &(40 * UNIT));
+    assert_eq!(f.vault.get_balance(), 60 * UNIT);
+}
+
+#[test]
+fn withdrawal_delay_blocks_execution_until_available() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    f.vault.deposit(&f.user, &(100 * UNIT));
+    f.vault.set_withdrawal_delay(&3_600);
+    assert_eq!(f.vault.withdrawal_delay_seconds(), 3_600);
+    assert_eq!(f.vault.request_withdraw(&f.user, &(40 * UNIT)), T0 + 3_600);
+    assert_eq!(
+        f.vault.try_execute_withdraw(&f.user),
+        Err(Ok(VaultError::WithdrawalDelayNotElapsed.into()))
+    );
+
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    assert_eq!(f.vault.execute_withdraw(&f.user), 60 * UNIT);
+}
+
+#[test]
+fn withdrawal_delay_can_be_updated_by_admin_only() {
+    let f = setup();
+    f.vault.set_withdrawal_delay(&60);
+    f.vault.set_withdrawal_delay(&120);
+    assert_eq!(f.vault.withdrawal_delay_seconds(), 120);
+
+    f.env.mock_auths(&[]);
+    assert!(f.vault.try_set_withdrawal_delay(&0).is_err());
+    assert_eq!(f.vault.withdrawal_delay_seconds(), 120);
+}
+
+#[test]
+fn withdrawal_requires_a_pending_request() {
+    let f = setup();
+    assert_eq!(
+        f.vault.try_execute_withdraw(&f.user),
+        Err(Ok(VaultError::NoPendingWithdrawal.into()))
+    );
+}
+
+#[test]
+fn withdrawal_delay_rejects_timestamp_overflow() {
+    let f = setup();
+    assert_eq!(
+        f.vault.try_set_withdrawal_delay(&u64::MAX),
+        Err(Ok(VaultError::InvalidDelay.into()))
+    );
+}
+
+#[test]
+fn request_withdraw_rejects_available_time_overflow() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    f.vault.deposit(&f.user, &UNIT);
+    f.vault.set_withdrawal_delay(&(u64::MAX - T0));
+    f.env.ledger().set_timestamp(T0 + 1);
+    assert_eq!(
+        f.vault.try_request_withdraw(&f.user, &UNIT),
+        Err(Ok(VaultError::InvalidDelay.into()))
+    );
+}
+
+#[test]
+fn execute_withdraw_rechecks_balance() {
+    let f = setup();
+    f.env.as_contract(&f.vault.address, || {
+        f.env.storage().persistent().set(
+            &DataKey::PendingWithdrawal(f.user.clone()),
+            &PendingWithdrawal {
+                amount: UNIT,
+                available_at: T0,
+            },
+        );
+    });
+    assert_eq!(
+        f.vault.try_execute_withdraw(&f.user),
+        Err(Ok(VaultError::InsufficientBalance.into()))
     );
 }
 
@@ -231,6 +322,7 @@ fn deposit_emits_coverage_dropped_when_post_deposit_coverage_is_false() {
         CoveredVault,
         (
             admin,
+            Address::generate(&env),
             ledger,
             sac.clone(),
             10_000u32,

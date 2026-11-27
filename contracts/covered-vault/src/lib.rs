@@ -29,6 +29,16 @@ enum DataKey {
     Config,
     Balance(Address),
     PendingAdmin,
+    Admin,
+    WithdrawalDelay,
+    PendingWithdrawal(Address),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingWithdrawal {
+    amount: i128,
+    available_at: u64,
 }
 
 #[contracterror]
@@ -39,6 +49,9 @@ pub enum VaultError {
     NotCovered = 2,
     InsufficientBalance = 3,
     NoPendingAdmin = 4,
+    InvalidDelay = 4,
+    NoPendingWithdrawal = 5,
+    WithdrawalDelayNotElapsed = 6,
 }
 
 #[contractevent]
@@ -47,6 +60,7 @@ pub struct Deposited {
     #[topic]
     pub from: Address,
     pub amount: i128,
+    pub balance_after: i128,
 }
 
 #[contractevent]
@@ -55,6 +69,16 @@ pub struct Withdrawn {
     #[topic]
     pub to: Address,
     pub amount: i128,
+    pub balance_after: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalQueued {
+    #[topic]
+    pub to: Address,
+    pub amount: i128,
+    pub available_at: u64,
 }
 
 /// The asset is not covered by the vault's config after a deposit that
@@ -115,6 +139,24 @@ fn balance_of(env: &Env, who: &Address) -> i128 {
     balance.unwrap_or(0)
 }
 
+fn withdrawal_delay(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::WithdrawalDelay)
+        .unwrap_or(0)
+}
+
+fn pending_withdrawal(env: &Env, who: &Address) -> Option<PendingWithdrawal> {
+    let key = DataKey::PendingWithdrawal(who.clone());
+    let pending = env.storage().persistent().get(&key);
+    if pending.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+    }
+    pending
+}
+
 fn set_balance(env: &Env, who: &Address, amount: i128) {
     let key = DataKey::Balance(who.clone());
     if amount == 0 {
@@ -138,6 +180,10 @@ impl CoveredVault {
         max_age: u64,
         min_tier: Tier,
     ) {
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawalDelay, &0u64);
         let cfg = VaultConfig {
             admin,
             ledger,
@@ -173,7 +219,12 @@ impl CoveredVault {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
-        Deposited { from, amount }.publish(&env);
+        Deposited {
+            from,
+            amount,
+            balance_after: new_balance,
+        }
+        .publish(&env);
         // Ask again now that the deposit is in the books. A deposit writes no
         // figure `is_covered` reads, so a ledger that behaves as SPEC.md says
         // answers as it did at the gate; this fires only when the answer moves
@@ -187,7 +238,7 @@ impl CoveredVault {
         new_balance
     }
 
-    pub fn withdraw(env: Env, to: Address, amount: i128) -> i128 {
+    pub fn request_withdraw(env: Env, to: Address, amount: i128) -> u64 {
         to.require_auth();
         if amount <= 0 {
             panic_with_error!(&env, VaultError::InvalidAmount);
@@ -196,20 +247,106 @@ impl CoveredVault {
         if amount > current {
             panic_with_error!(&env, VaultError::InsufficientBalance);
         }
-        let new_balance = current - amount;
+        let available_at = match env.ledger().timestamp().checked_add(withdrawal_delay(&env)) {
+            Some(available_at) => available_at,
+            None => panic_with_error!(&env, VaultError::InvalidDelay),
+        };
+        let key = DataKey::PendingWithdrawal(to.clone());
+        env.storage().persistent().set(
+            &key,
+            &PendingWithdrawal {
+                amount,
+                available_at,
+            },
+        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
+        WithdrawalQueued {
+            to,
+            amount,
+            available_at,
+        }
+        .publish(&env);
+        available_at
+    }
+
+    pub fn execute_withdraw(env: Env, to: Address) -> i128 {
+        to.require_auth();
+        let pending = match pending_withdrawal(&env, &to) {
+            Some(pending) => pending,
+            None => panic_with_error!(&env, VaultError::NoPendingWithdrawal),
+        };
+        if env.ledger().timestamp() < pending.available_at {
+            panic_with_error!(&env, VaultError::WithdrawalDelayNotElapsed);
+        }
+        let current = balance_of(&env, &to);
+        if pending.amount > current {
+            panic_with_error!(&env, VaultError::InsufficientBalance);
+        }
+        let new_balance = current - pending.amount;
         set_balance(&env, &to, new_balance);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingWithdrawal(to.clone()));
         let cfg = config(&env);
         token::TokenClient::new(&env, &cfg.asset).transfer(
             &env.current_contract_address(),
             &to,
-            &amount,
+            &pending.amount,
         );
-        Withdrawn { to, amount }.publish(&env);
+        Withdrawn {
+            to,
+            amount: pending.amount,
+            balance_after: new_balance,
+        }
+        .publish(&env);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
         new_balance
+    }
+
+    pub fn set_withdrawal_delay(env: Env, delay_seconds: u64) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin is set in the constructor");
+        admin.require_auth();
+        if env
+            .ledger()
+            .timestamp()
+            .checked_add(delay_seconds)
+            .is_none()
+        {
+            panic_with_error!(&env, VaultError::InvalidDelay);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawalDelay, &delay_seconds);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
+    }
+
+    pub fn withdrawal_delay_seconds(env: Env) -> u64 {
+        withdrawal_delay(&env)
     }
 
     pub fn balance(env: Env, of: Address) -> i128 {
         balance_of(&env, &of)
+    }
+
+    /// The vault's actual on-chain token balance, read straight from the
+    /// asset's SAC rather than the internally tracked per-depositor sum.
+    /// A pure read: touches no vault storage, so no TTL is extended.
+    pub fn get_balance(env: Env) -> i128 {
+        let cfg = config(&env);
+        token::TokenClient::new(&env, &cfg.asset).balance(&env.current_contract_address())
     }
 
     pub fn config(env: Env) -> VaultConfig {
