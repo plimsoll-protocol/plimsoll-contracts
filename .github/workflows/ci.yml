@@ -88,3 +88,37 @@ jobs:
           name: coverage-lcov
           path: target/coverage/lcov.info
           if-no-files-found: error
+
+  wasm-size-report:
+    name: wasm size report
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/install-stellar-cli
+      - name: Build wasm (PR head)
+        run: stellar contract build --locked
+      - name: Measure PR wasm sizes
+        run: python3 scripts/wasm_size_diff.py measure /tmp/pr-sizes.json
+      - name: Build wasm (base branch)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --depth=1 origin "$BASE_SHA"
+          git worktree add /tmp/base-ref "$BASE_SHA"
+          mkdir -p /tmp/base-ref/scripts
+          cp scripts/wasm_size_diff.py /tmp/base-ref/scripts/wasm_size_diff.py
+          cd /tmp/base-ref
+          stellar contract build --locked
+          python3 scripts/wasm_size_diff.py measure /tmp/base-sizes.json
+      - name: Generate size report
+        run: python3 scripts/wasm_size_diff.py report /tmp/base-sizes.json /tmp/pr-sizes.json /tmp/size-report.md
+      - name: Comment on pull request
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/post_wasm_size_comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" /tmp/size-report.md

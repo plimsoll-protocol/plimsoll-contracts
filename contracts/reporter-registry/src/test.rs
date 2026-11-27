@@ -5,7 +5,7 @@ use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     xdr::ContractEventBody,
-    Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val,
+    Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
 #[allow(dead_code)]
@@ -118,6 +118,57 @@ fn revoke_unknown_fails() {
     let who = Address::generate(&env);
     let res = client.try_revoke(&who);
     assert_eq!(res, Err(Ok(RegistryError::ReporterNotFound.into())));
+}
+
+#[test]
+fn batch_deregister_removes_registered_and_skips_unknown() {
+    let (env, _admin, client) = setup();
+    let known = Address::generate(&env);
+    let unknown = Address::generate(&env);
+    client.set_reporter(&known, &Role::Auditor, &String::from_str(&env, "a"));
+
+    let mut addresses = Vec::new(&env);
+    addresses.push_back(known.clone());
+    addresses.push_back(unknown.clone());
+    client.batch_deregister(&addresses);
+
+    assert_eq!(client.role_of(&known), None);
+    assert_eq!(client.role_of(&unknown), None);
+}
+
+#[test]
+fn batch_deregister_emits_event_per_removed_reporter() {
+    let (env, _admin, client) = setup();
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    client.set_reporter(&first, &Role::Auditor, &String::from_str(&env, "a"));
+    client.set_reporter(&second, &Role::Transcriber, &String::from_str(&env, "b"));
+
+    let mut addresses = Vec::new(&env);
+    addresses.push_back(first);
+    addresses.push_back(second);
+    addresses.push_back(Address::generate(&env));
+    client.batch_deregister(&addresses);
+
+    assert_eq!(env.events().all().events().len(), 2);
+}
+
+#[test]
+fn batch_deregister_without_admin_auth_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin.clone(),));
+    let client = ReporterRegistryClient::new(&env, &id);
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "a"));
+
+    env.mock_auths(&[]);
+    let mut addresses = Vec::new(&env);
+    addresses.push_back(who.clone());
+    let res = client.try_batch_deregister(&addresses);
+    assert!(res.is_err());
+    assert_eq!(client.role_of(&who), Some(Role::Auditor));
 }
 
 #[test]

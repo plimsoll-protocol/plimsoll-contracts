@@ -15,6 +15,7 @@ use soroban_sdk::{
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultConfig {
+    pub admin: Address,
     pub ledger: Address,
     pub asset: Address,
     pub min_bps: u32,
@@ -27,6 +28,7 @@ pub struct VaultConfig {
 enum DataKey {
     Config,
     Balance(Address),
+    PendingAdmin,
     Admin,
     WithdrawalDelay,
     PendingWithdrawal(Address),
@@ -46,6 +48,7 @@ pub enum VaultError {
     InvalidAmount = 1,
     NotCovered = 2,
     InsufficientBalance = 3,
+    NoPendingAdmin = 4,
     InvalidDelay = 4,
     NoPendingWithdrawal = 5,
     WithdrawalDelayNotElapsed = 6,
@@ -87,6 +90,20 @@ pub struct CoverageDropped {
     pub asset: Address,
 }
 
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VaultAdminProposed {
+    #[topic]
+    pub new_admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VaultAdminTransferred {
+    #[topic]
+    pub new_admin: Address,
+}
+
 #[contract]
 pub struct CoveredVault;
 
@@ -95,6 +112,10 @@ fn config(env: &Env) -> VaultConfig {
         .instance()
         .get(&DataKey::Config)
         .expect("config is set in the constructor")
+}
+
+fn pending_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::PendingAdmin)
 }
 
 /// The coverage check `deposit` makes, with the stored config.
@@ -164,6 +185,7 @@ impl CoveredVault {
             .instance()
             .set(&DataKey::WithdrawalDelay, &0u64);
         let cfg = VaultConfig {
+            admin,
             ledger,
             asset,
             min_bps,
@@ -319,6 +341,14 @@ impl CoveredVault {
         balance_of(&env, &of)
     }
 
+    /// The vault's actual on-chain token balance, read straight from the
+    /// asset's SAC rather than the internally tracked per-depositor sum.
+    /// A pure read: touches no vault storage, so no TTL is extended.
+    pub fn get_balance(env: Env) -> i128 {
+        let cfg = config(&env);
+        token::TokenClient::new(&env, &cfg.asset).balance(&env.current_contract_address())
+    }
+
     pub fn config(env: Env) -> VaultConfig {
         config(&env)
     }
@@ -326,6 +356,44 @@ impl CoveredVault {
     /// Whether a positive deposit would pass the coverage gate right now.
     pub fn can_deposit(env: Env) -> bool {
         is_open(&env, &config(&env))
+    }
+
+    pub fn admin(env: Env) -> Address {
+        config(&env).admin
+    }
+
+    /// Propose a new vault admin. A new proposal replaces any pending one.
+    pub fn propose_vault_admin(env: Env, new_admin: Address) {
+        config(&env).admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
+        VaultAdminProposed { new_admin }.publish(&env);
+    }
+
+    /// Accept a pending admin proposal. Must be called by the proposed admin.
+    pub fn accept_vault_admin(env: Env) {
+        let new_admin = match pending_admin(&env) {
+            Some(new_admin) => new_admin,
+            None => panic_with_error!(&env, VaultError::NoPendingAdmin),
+        };
+        new_admin.require_auth();
+        let mut cfg = config(&env);
+        cfg.admin = new_admin.clone();
+        env.storage().instance().set(&DataKey::Config, &cfg);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
+        VaultAdminTransferred { new_admin }.publish(&env);
+    }
+
+    /// The pending admin proposal, if any.
+    pub fn pending_vault_admin(env: Env) -> Option<Address> {
+        pending_admin(&env)
     }
 }
 

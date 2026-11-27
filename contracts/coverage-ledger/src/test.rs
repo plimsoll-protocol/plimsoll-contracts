@@ -167,6 +167,27 @@ fn list_asset_rejects_account_address() {
 }
 
 #[test]
+fn asset_count_is_zero_on_a_fresh_ledger() {
+    let f = setup();
+    assert_eq!(f.ledger.asset_count(), 0);
+}
+
+#[test]
+fn asset_count_increments_per_listed_asset() {
+    let f = setup();
+    f.ledger.list_asset(&f.sac);
+    assert_eq!(f.ledger.asset_count(), 1);
+
+    let second_admin = Address::generate(&f.env);
+    let second_sac = f
+        .env
+        .register_stellar_asset_contract_v2(second_admin)
+        .address();
+    f.ledger.list_asset(&second_sac);
+    assert_eq!(f.ledger.asset_count(), 2);
+}
+
+#[test]
 fn parse_rejects_native_and_malformed() {
     let env = Env::default();
     assert!(parse_sac_name(&env, &String::from_str(&env, "native")).is_none());

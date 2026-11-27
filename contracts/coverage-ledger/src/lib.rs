@@ -613,6 +613,11 @@ impl CoverageLedger {
         registry(&env)
     }
 
+    /// The total number of listed assets.
+    pub fn asset_count(env: Env) -> u32 {
+        assets(&env).len()
+    }
+
     /// List a Stellar-issued asset by its Stellar Asset Contract address.
     /// Permissionless: the code and issuer are read from the SAC itself.
     pub fn list_asset(env: Env, sac: Address) -> AssetRecord {
@@ -790,6 +795,14 @@ impl CoverageLedger {
             &env.ledger().sequence(),
         );
         bump_instance(&env);
+        // Best-effort: a registry with no trusted ledger configured (or any
+        // other failure) must never block a reserve report from landing, so
+        // this uses `try_` and swallows the result.
+        let _ = RegistryClient::new(&env, &registry(&env)).try_record_report_outcome(
+            &env.current_contract_address(),
+            &reporter,
+            &true,
+        );
         ReservePosted {
             sac,
             tier,
@@ -898,6 +911,11 @@ impl CoverageLedger {
             write_persistent(&env, &index_key, &index);
         }
         bump_instance(&env);
+        let _ = RegistryClient::new(&env, &registry(&env)).try_record_report_outcome(
+            &env.current_contract_address(),
+            &reporter,
+            &false,
+        );
         ReserveRetracted {
             sac,
             tier,

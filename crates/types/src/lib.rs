@@ -234,6 +234,7 @@ pub fn coverage_bps(reserves: i128, supply: i128) -> u32 {
 #[contractclient(name = "RegistryClient")]
 pub trait RegistryInterface {
     fn role_of(env: Env, reporter: Address) -> Option<Role>;
+    fn record_report_outcome(env: Env, ledger: Address, reporter: Address, accepted: bool);
 }
 
 /// The subset of a SEP-41 token that coverage-ledger calls when an asset opts
