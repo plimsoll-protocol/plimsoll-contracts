@@ -183,6 +183,27 @@ are admin-only, so they reach maintainers rather than end users;
 - **Remedy:** Continue using the existing role, or ask the registry admin to
   change it with `set_reporter`.
 
+### 5 `InsufficientStake`
+
+- **Raised by:** `register_reporter(reporter, name)`.
+- **Cause:** The reporter's current balance of the configured native XLM SAC
+  is below `min_stake_stroops`.
+- **Remedy:** Fund the reporter with the required XLM balance, then retry.
+
+### 6 `InvalidStakeAmount`
+
+- **Raised by:** `set_stake_requirement(stake_asset, min_stake_stroops)`.
+- **Cause:** The configured minimum is negative.
+- **Remedy:** Set a non-negative number of stroops.
+
+### 7 `ReporterAlreadyRegistered`
+
+- **Raised by:** `register_reporter(reporter, name)`.
+- **Cause:** The address already has a role. Self-registration only creates a
+  new supply-poster entry and cannot replace an admin-managed role.
+- **Remedy:** Continue using the existing role, or ask the registry admin to
+  change it with `set_reporter`.
+
 ### 5 `InvalidMetadata`
 
 - **Raised by:** `update_reporter_metadata(reporter, name, website_uri,

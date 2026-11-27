@@ -8,6 +8,9 @@ pub mod attestation;
 mod ledger_client;
 pub use ledger_client::is_covered;
 
+mod ledger_client;
+pub use ledger_client::is_covered;
+
 /// One day of ledgers at a 5-second close time.
 pub const DAY_IN_LEDGERS: u32 = 17_280;
 /// Extend a persistent entry once it has less than this many ledgers left.
