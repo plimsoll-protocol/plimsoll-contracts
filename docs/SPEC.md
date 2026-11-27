@@ -214,6 +214,8 @@ Decides who may speak. Holds no money.
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 | `DisputeQuorum` | instance | `u32` (absent means `1`) |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
+| `ReporterIndex` | persistent, TTL extended on write and read | `Vec<Address>`: every registered reporter, in the order they were first indexed |
+
 | `ReporterDisplayName(Address)` | persistent, TTL extended on write and read | `Symbol` (optional, at most 32 characters) |
 
 | `PendingReporter(Address)` | persistent, TTL extended on write and read | `PendingReporter` |
@@ -250,6 +252,8 @@ Decides who may speak. Holds no money.
 | `get_reporter_name(reporter: Address)` | — | `Option<Symbol>` | — | — |
 | `role_of(reporter: Address)` | — | `Option<Role>` | — | — |
 | `get_reporter(reporter: Address)` | — | `Option<ReporterInfo>` | — | — |
+| `reporter_count()` | — | `u32` | — | — |
+| `reporters(start: u32, limit: u32)` | — | `Vec<Address>` | — | — |
 | `max_reporters()` | — | `u32` | — | — |
 | `set_max_reporters(max: u32)` | admin | `()` | `InvalidMaxReporters` (zero) | `max_reporters_set {max}` |
 | `set_reporter_name(reporter: Address, name: Symbol)` | reporter | `()` | `ReporterNotFound` | — |
@@ -263,6 +267,29 @@ Decides who may speak. Holds no money.
 | `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
 | `cancel_upgrade()` | admin | `()` | `UpgradeNotProposed` | `upgrade_cancelled {wasm_hash}` |
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
+| `version()` | — | `u32` | — | — |
+
+Rules:
+
+- `set_reporter` appends the reporter to `ReporterIndex` if it is not already
+  there. Changing an existing reporter's role or name leaves its position
+  unchanged.
+- `revoke` removes the reporter from `ReporterIndex`; the reporters after it
+  move up one place, so the order stays first-indexed order.
+- `reporter_count()` is the length of `ReporterIndex`.
+- `reporters(start, limit)` returns up to `min(limit, 100)` addresses from
+  `ReporterIndex` starting at position `start`, and an empty list when `start`
+  is past the end.
+- Soroban cannot enumerate storage keys, so a deployment upgraded from a
+  version without `ReporterIndex` starts with an empty index. Reporters
+  registered before the upgrade join it when the admin calls `set_reporter`
+  for them again with their current role and name.
+- `version()` returns the contract's `VERSION` constant, raised on every
+  behavioural change. The wasm also carries `description` and `repository`
+  entries in its contract metadata.
+
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
+`UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`, `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
 Rules:
@@ -385,6 +412,7 @@ Records what was said, and answers coverage questions.
 | `Reporters(Address, Tier)` | persistent | `Vec<Address>`: the reporters with a `ReportBy` entry at that tier, in the order they first posted; at most `MAX_REPORTERS_PER_TIER = 4` |
 | `Assets` | persistent | `Vec<Address>`: every listed asset, in listing order. The `asset_reporter_pairs` index |
 | `Report(Address, Tier)` | persistent | `ReserveReport`: the v0.1 layout (one per tier). Read until migrated, never written; see [Upgrading a v0.1 deployment](#upgrading-a-v01-deployment) |
+| `IssuerDelegate(Address)` | persistent | `Address`: the account the asset's issuer appointed to post `IssuerSigned` reports for it; absent when none is set |
 | `RecentReports` | persistent | `Vec<RecentReport>`: the most recently posted reports across all assets, newest first, capped at 50 |
 | `Dispute(Address, u64)` | persistent | `DisputeRecord`: an active dispute keyed by `(sac, as_of)` |
 | `DisputeHold` | instance | `u32`: number of ledgers a disputed report is frozen for (default: `DAY_IN_LEDGERS`) |
@@ -401,7 +429,9 @@ old entry stops counting by the rule below.
 
 A stored report **counts** while its reporter is still entitled to its tier:
 
-- `IssuerSigned`: always. The issuer is fixed by the asset record.
+- `IssuerSigned`: while the reporter is the asset's issuer (fixed by the asset
+  record, so always) or the asset's current issuer delegate. A delegate the
+  issuer has cleared or replaced no longer speaks for the figures it posted.
 - `AuditorSigned`: while `registry.role_of(reporter) == Some(Auditor)`.
 - `Transcribed`: while `registry.role_of(reporter) == Some(Transcriber)`.
 
@@ -409,7 +439,9 @@ So `reporter-registry.revoke` takes a bad actor's figures out of
 `coverage`, `is_covered`, `get_report` and `get_reports` in the same
 transaction, with no second admin action, and restoring the role with
 `set_reporter` brings them back. Issuer-signed reports never depend on the
-registry. The reports are not deleted when the reporter is revoked; they stay
+registry; `set_issuer_delegate` does the same for a delegate's figures,
+taking them out when the delegate is cleared or replaced and bringing them
+back if it is appointed again. The reports are not deleted when the reporter is revoked; they stay
 in storage until their slot is reclaimed (see the cap rule) and their history
 is in events either way.
 
@@ -435,6 +467,8 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `post_supply(poster: Address, sac: Address, amount: i128, ledger: u32, breakdown_hash: BytesN<32>)` | poster | `()` | `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger`, `LedgerTooOld` | `supply_posted {sac} amount, ledger, breakdown_hash, poster` |
 | `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `ImplausibleAmount`, `TooManyReporters`, `TooManyReportersPerAsset` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
 | `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `ImplausibleAmount`, `TooManyReporters` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
+| `set_issuer_delegate(sac: Address, delegate: Option<Address>)` | asset's issuer | `()` | `AssetNotListed` | `issuer_delegate_set {sac} delegate` when `Some`, `issuer_delegate_cleared {sac}` when `None` |
+| `get_issuer_delegate(sac: Address)` | — | `Option<Address>` | — | — |
 | `can_post_report(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | — | `Result<(), LedgerError>` | `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` | — |
 | `retract_reserve(reporter: Address, sac: Address)` | reporter | `()` | `AssetNotListed`, `NotReporter`, `NoReportToRetract` | `reserve_retracted {sac, tier} reporter, as_of` |
 | `get_asset(sac)` | — | `Option<AssetRecord>` | — | — |
@@ -478,6 +512,7 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
 | `cancel_upgrade()` | admin | `()` | `UpgradeNotProposed` | `upgrade_cancelled {wasm_hash}` |
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
+| `version()` | — | `u32` | — | — |
 
 Rules:
 
@@ -488,9 +523,19 @@ Rules:
   "native"`) is rejected: it has no issuer and no reserves.
 - `post_reserve` tier resolution: if `reporter == asset.issuer` the tier is
   `IssuerSigned` (the classic issuer account signs the Soroban auth entry).
-  Otherwise the registry role decides: `Auditor → AuditorSigned`,
-  `Transcriber → Transcribed`. A `SupplyPoster` or unknown address gets
-  `NotReporter`.
+  If a delegate is set for the asset via `set_issuer_delegate` and
+  `reporter == delegate`, the tier is also `IssuerSigned`. Otherwise the
+  registry role decides: `Auditor → AuditorSigned`, `Transcriber →
+  Transcribed`. A `SupplyPoster` or unknown address gets `NotReporter`.
+  The report's `reporter` field records the delegate's address when a delegate
+  posts; consumers infer `IssuerSigned` from the tier and that the reporter is
+  the delegate, not the issuer itself.
+- `set_issuer_delegate` needs the asset's issuer account to authorise, so only
+  the issuer can appoint, replace or clear its delegate. There is at most one
+  delegate per asset; setting a new one replaces the old.
+- `version()` returns the contract's `VERSION` constant, raised on every
+  behavioural change. The wasm also carries `description` and `repository`
+  entries in its contract metadata.
 - Supply snapshots must move forward: `ledger` strictly greater than the stored
   one and not greater than the current ledger. Reports per tier must move
   forward per reporter: `as_of` strictly greater than that reporter's stored
@@ -840,6 +885,7 @@ must be requested before they can be executed.
 | `withdrawal_delay_seconds()` | — | `u64` | — | — |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
+| `version()` | — | `u32` | — | — |
 | `admin()` | — | `Address` | — | — |
 | `can_deposit()` | — | `bool` | — | — |
 | `simulate_coverage(proposed_reserve: i128)` | — | `u128` | — | — |

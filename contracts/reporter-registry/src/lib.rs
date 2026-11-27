@@ -14,6 +14,24 @@ use plimsoll_types::{
     INSTANCE_THRESHOLD, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
 };
 use soroban_sdk::{
+    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype,
+    panic_with_error, Address, BytesN, ContractExecutable, Env, String, Vec,
+};
+
+const MAX_NAME_LEN: u32 = 64;
+/// Maximum number of reporters returned in a single `reporters` call.
+const MAX_REPORTERS_PAGE_LIMIT: u32 = 100;
+
+/// Contract version. Increment on every behavioural change.
+const VERSION: u32 = 1;
+
+// Contract metadata for `stellar contract info meta`
+contractmeta!(key = "description", val = "Plimsoll Reporter Registry");
+contractmeta!(
+    key = "repository",
+    val = "https://github.com/plimsoll-protocol/plimsoll-contracts"
+);
+
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
     token::TokenClient, Address, Bytes, BytesN, ContractExecutable, Env, String, Symbol,
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
@@ -36,6 +54,7 @@ enum DataKey {
     StakeAsset,
     MinStakeStroops,
     Reporter(Address),
+    ReporterIndex,
     /// Unix-timestamp at which the reporter's registration expires.
     Expiry(Address),
     ReporterDisplayName(Address),
@@ -288,6 +307,43 @@ fn pending(env: &Env) -> Option<PendingUpgrade> {
     env.storage().instance().get(&DataKey::PendingUpgrade)
 }
 
+fn read_index(env: &Env) -> Vec<Address> {
+    let key = DataKey::ReporterIndex;
+    match env.storage().persistent().get::<_, Vec<Address>>(&key) {
+        Some(index) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+            index
+        }
+        None => Vec::new(env),
+    }
+}
+
+fn write_index(env: &Env, index: &Vec<Address>) {
+    let key = DataKey::ReporterIndex;
+    env.storage().persistent().set(&key, index);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+}
+
+/// Append `reporter` to the index unless it is already there.
+fn index_add(env: &Env, reporter: &Address) {
+    let mut index = read_index(env);
+    if !index.contains(reporter) {
+        index.push_back(reporter.clone());
+        write_index(env, &index);
+    }
+}
+
+/// Remove `reporter` from the index, keeping the others in order.
+fn index_remove(env: &Env, reporter: &Address) {
+    let mut index = read_index(env);
+    if let Some(position) = index.first_index_of(reporter) {
+        index.remove(position);
+        write_index(env, &index);
+    }
 fn meets_minimum_stake(env: &Env, reporter: &Address) -> bool {
     let minimum = env
         .storage()
@@ -547,6 +603,9 @@ impl ReporterRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        // Indexing on every call, not only for new reporters, lets the admin
+        // add reporters registered before the index existed by re-setting them.
+        index_add(&env, &reporter);
         bump_instance(&env);
         ReporterSet {
             reporter,
@@ -689,6 +748,8 @@ impl ReporterRegistry {
             return false;
         }
         env.storage().persistent().remove(&key);
+        index_remove(&env, &reporter);
+
         bump_instance(&env);
         ReporterRegistrationExpired { reporter }.publish(&env);
         true
@@ -1007,6 +1068,23 @@ impl ReporterRegistry {
         info
     }
 
+    /// Number of reporters in the index.
+    pub fn reporter_count(env: Env) -> u32 {
+        read_index(&env).len()
+    }
+
+    /// Up to `min(limit, 100)` indexed reporters from position `start`, in
+    /// first-indexed order. Empty when `start` is past the end.
+    pub fn reporters(env: Env, start: u32, limit: u32) -> Vec<Address> {
+        let index = read_index(&env);
+        let len = index.len();
+        if start >= len {
+            return Vec::new(&env);
+        }
+        let end = start
+            .saturating_add(limit.min(MAX_REPORTERS_PAGE_LIMIT))
+            .min(len);
+        index.slice(start..end)
     /// Set or update the Unix-timestamp after which `reporter` is considered
     /// inactive. The comparison in `is_reporter_active` is always against
     /// `env.ledger().timestamp()` (not `ledger().sequence()`).
@@ -1197,6 +1275,9 @@ impl ReporterRegistry {
         proposed
     }
 
+    /// The contract version, raised on every behavioural change.
+    pub fn version(_env: Env) -> u32 {
+        VERSION
     /// Assign an explicit access tier to `assignee`. Requires admin auth.
     ///
     /// An explicit tier overrides the implicit `Reporter` tier that any address

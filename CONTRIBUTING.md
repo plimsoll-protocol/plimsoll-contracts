@@ -43,6 +43,7 @@ advisory has a comment explaining why it cannot be fixed yet.
       `python3 scripts/check_error_coverage.py` passes. A variant that cannot be
       reached is listed in that script with a reason.
 - [ ] If behaviour changed, [docs/SPEC.md](docs/SPEC.md) is updated in the same pull request.
+- [ ] `version()` constant is bumped in the affected contract(s) when behaviour changes.
 - [ ] Commit messages use [Conventional Commits](https://www.conventionalcommits.org/): `feat(ledger): …`, `fix(registry): …`, `test(vault): …`.
 
 ## CI checks

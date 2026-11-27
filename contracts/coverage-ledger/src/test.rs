@@ -2458,6 +2458,155 @@ fn a_new_proposal_restarts_the_clock() {
     );
 }
 
+// ---- issuer delegate ------------------------------------------------------
+
+fn appoint(f: &Fixture) -> Address {
+    let delegate = Address::generate(&f.env);
+    f.ledger
+        .set_issuer_delegate(&f.sac, &Some(delegate.clone()));
+    delegate
+}
+
+#[test]
+fn set_issuer_delegate_appoints_replaces_and_clears() {
+    let f = listed();
+    assert_eq!(f.ledger.get_issuer_delegate(&f.sac), None);
+    let first = appoint(&f);
+    assert_eq!(f.ledger.get_issuer_delegate(&f.sac), Some(first));
+    let second = appoint(&f);
+    assert_eq!(f.ledger.get_issuer_delegate(&f.sac), Some(second));
+    f.ledger.set_issuer_delegate(&f.sac, &None);
+    assert_eq!(f.ledger.get_issuer_delegate(&f.sac), None);
+}
+
+#[test]
+fn set_issuer_delegate_is_signed_by_the_issuer() {
+    let f = listed();
+    let delegate = appoint(&f);
+    let call = AuthorizedFunction::Contract((
+        f.ledger.address.clone(),
+        Symbol::new(&f.env, "set_issuer_delegate"),
+        (f.sac.clone(), Some(delegate)).into_val(&f.env),
+    ));
+    let auths = f.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, f.issuer);
+    assert_eq!(auths[0].1.function, call);
+}
+
+#[test]
+fn set_issuer_delegate_fails_without_the_issuers_signature() {
+    let f = listed();
+    let delegate = Address::generate(&f.env);
+    let args: soroban_sdk::Vec<Val> = (f.sac.clone(), Some(delegate.clone())).into_val(&f.env);
+    // Neither the ledger admin nor the would-be delegate can appoint it.
+    for signer in [&f.admin, &delegate] {
+        authorise_only(&f, &[(signer, "set_issuer_delegate", args.clone())]);
+        assert_eq!(
+            f.ledger
+                .try_set_issuer_delegate(&f.sac, &Some(delegate.clone())),
+            Err(Ok(auth_failure()))
+        );
+    }
+    f.env.mock_all_auths();
+    assert_eq!(f.ledger.get_issuer_delegate(&f.sac), None);
+}
+
+#[test]
+fn set_issuer_delegate_requires_a_listed_asset() {
+    let f = setup();
+    let delegate = Address::generate(&f.env);
+    assert_eq!(
+        f.ledger.try_set_issuer_delegate(&f.sac, &Some(delegate)),
+        Err(Ok(LedgerError::AssetNotListed.into()))
+    );
+    assert_eq!(
+        f.ledger.try_set_issuer_delegate(&f.sac, &None),
+        Err(Ok(LedgerError::AssetNotListed.into()))
+    );
+}
+
+#[test]
+fn get_issuer_delegate_on_an_unlisted_asset_is_none() {
+    let f = setup();
+    assert_eq!(f.ledger.get_issuer_delegate(&f.sac), None);
+}
+
+#[test]
+fn issuer_delegate_set_event_matches_the_documented_layout() {
+    let f = listed();
+    let delegate = appoint(&f);
+    let (topics, data) = last_ledger_event(&f);
+    let expected_topics: Vec<Val> =
+        (Symbol::new(&f.env, "issuer_delegate_set"), f.sac.clone()).into_val(&f.env);
+    assert_eq!(topics, expected_topics);
+    let expected_data = Map::from_array(
+        &f.env,
+        [(Symbol::new(&f.env, "delegate"), delegate.into_val(&f.env))],
+    );
+    assert_eq!(data, expected_data);
+}
+
+#[test]
+fn issuer_delegate_cleared_event_matches_the_documented_layout() {
+    let f = listed();
+    appoint(&f);
+    f.ledger.set_issuer_delegate(&f.sac, &None);
+    let (topics, data) = last_ledger_event(&f);
+    let expected_topics: Vec<Val> = (
+        Symbol::new(&f.env, "issuer_delegate_cleared"),
+        f.sac.clone(),
+    )
+        .into_val(&f.env);
+    assert_eq!(topics, expected_topics);
+    assert_eq!(data, Map::<Symbol, Val>::new(&f.env));
+}
+
+#[test]
+fn a_delegate_posts_issuer_signed() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    let delegate = appoint(&f);
+    assert_eq!(post(&f, &delegate, 101 * UNIT, T0 - 60), Tier::IssuerSigned);
+    let r = f.ledger.get_report(&f.sac, &Tier::IssuerSigned).unwrap();
+    assert_eq!(r.reporter, delegate);
+    assert_eq!(r.amount, 101 * UNIT);
+    assert!(f
+        .ledger
+        .is_covered(&f.sac, &10_000, &3_600, &Tier::IssuerSigned));
+}
+
+#[test]
+fn a_delegate_who_is_also_an_auditor_posts_issuer_signed() {
+    let f = listed();
+    f.ledger
+        .set_issuer_delegate(&f.sac, &Some(f.auditor.clone()));
+    assert_eq!(post(&f, &f.auditor, UNIT, T0 - 60), Tier::IssuerSigned);
+}
+
+#[test]
+fn a_delegate_speaks_only_for_its_own_asset() {
+    let f = listed();
+    let other = f
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&f.env))
+        .address();
+    f.ledger.list_asset(&other);
+    let delegate = appoint(&f);
+    assert_eq!(post(&f, &delegate, UNIT, T0 - 60), Tier::IssuerSigned);
+    assert_eq!(
+        f.ledger.try_post_reserve(
+            &delegate,
+            &other,
+            &UNIT,
+            &(T0 - 60),
+            &hash(&f.env, 4),
+            &uri(&f.env)
+        ),
+        Err(Ok(LedgerError::NotReporter.into()))
+    );
+}
+
 // ---- get_recent_reports (issue #90) ----------------------------------------
 
 #[test]
@@ -3074,8 +3223,96 @@ fn unpause_clears_the_flag_and_emits_the_admin() {
     );
     assert_eq!(
         Address::try_from_val(&f.env, &data.get(Symbol::new(&f.env, "by")).unwrap()).unwrap(),
-        f.admin
+        f.admin    );
+}
+
+#[test]
+fn a_cleared_delegate_cannot_post_and_its_figures_stop_counting() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    let delegate = appoint(&f);
+    post(&f, &delegate, 100 * UNIT, T0 - 60);
+    f.ledger.set_issuer_delegate(&f.sac, &None);
+
+    assert_eq!(
+        f.ledger.try_post_reserve(
+            &delegate,
+            &f.sac,
+            &UNIT,
+            &(T0 - 30),
+            &hash(&f.env, 4),
+            &uri(&f.env)
+        ),
+        Err(Ok(LedgerError::NotReporter.into()))
     );
+    assert_eq!(f.ledger.get_report(&f.sac, &Tier::IssuerSigned), None);
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 0);
+    assert_eq!(f.ledger.coverage(&f.sac, &Tier::Transcribed), None);
+}
+
+#[test]
+fn a_replaced_delegates_figures_stop_counting_until_reappointed() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    let first = appoint(&f);
+    post(&f, &first, 100 * UNIT, T0 - 10);
+    let second = appoint(&f);
+    post(&f, &second, 90 * UNIT, T0 - 60);
+
+    // The first delegate's fresher figure no longer counts.
+    let r = f.ledger.get_report(&f.sac, &Tier::IssuerSigned).unwrap();
+    assert_eq!(r.reporter, second);
+    assert_eq!(
+        f.ledger
+            .coverage(&f.sac, &Tier::IssuerSigned)
+            .unwrap()
+            .reserves,
+        90 * UNIT
+    );
+
+    f.ledger.set_issuer_delegate(&f.sac, &Some(first.clone()));
+    let r = f.ledger.get_report(&f.sac, &Tier::IssuerSigned).unwrap();
+    assert_eq!(r.reporter, first);
+}
+
+#[test]
+fn the_issuers_own_figures_count_whatever_the_delegate() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.issuer, 100 * UNIT, T0 - 60);
+    appoint(&f);
+    f.ledger.set_issuer_delegate(&f.sac, &None);
+    let r = f.ledger.get_report(&f.sac, &Tier::IssuerSigned).unwrap();
+    assert_eq!(r.reporter, f.issuer);
+}
+
+#[test]
+fn a_former_delegates_slot_is_reclaimed_when_the_tier_is_full() {
+    let f = listed();
+    post(&f, &f.issuer, UNIT, T0 - 60);
+    for _ in 1..MAX_REPORTERS_PER_TIER {
+        let delegate = appoint(&f);
+        post(&f, &delegate, UNIT, T0 - 60);
+    }
+    // The tier is full: the issuer and three delegates, all now former.
+    let current = appoint(&f);
+    assert_eq!(post(&f, &current, UNIT, T0 - 30), Tier::IssuerSigned);
+    let reporters: std::vec::Vec<Address> = f
+        .ledger
+        .get_reports(&f.sac)
+        .iter()
+        .map(|r| r.reporter)
+        .collect();
+    assert_eq!(reporters, std::vec![f.issuer.clone(), current]);
+}
+
+// ---- version --------------------------------------------------------------
+
+#[test]
+fn version_is_the_constant() {
+    let f = setup();
+    assert_eq!(f.ledger.version(), VERSION);
+    assert_eq!(f.ledger.version(), 1);
 }
 
 #[test]

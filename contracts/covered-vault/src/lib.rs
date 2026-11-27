@@ -10,9 +10,21 @@ use plimsoll_types::{
     PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
 };
 use soroban_sdk::{
+    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype,
+    panic_with_error, token, Address, Env,
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
     Address, BytesN, Env, String, Symbol, Vec,
 };
+
+/// Contract version. Increment on every behavioural change.
+const VERSION: u32 = 1;
+
+// Contract metadata for `stellar contract info meta`
+contractmeta!(key = "description", val = "Plimsoll Covered Vault");
+contractmeta!(
+    key = "repository",
+    val = "https://github.com/plimsoll-protocol/plimsoll-contracts"
+);
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -538,6 +550,9 @@ impl CoveredVault {
         is_open(&env, &config(&env))
     }
 
+    /// The contract version, raised on every behavioural change.
+    pub fn version(_env: Env) -> u32 {
+        VERSION
     /// Pure view returning the coverage bps if `proposed_reserve` were added
     /// to current reserves against the current on-chain supply, without
     /// modifying vault state.

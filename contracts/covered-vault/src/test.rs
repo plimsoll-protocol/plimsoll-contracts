@@ -569,6 +569,13 @@ fn can_deposit_uses_the_stored_min_tier() {
     );
 }
 
+// ---- version --------------------------------------------------------------
+
+#[test]
+fn version_is_the_constant() {
+    let f = setup();
+    assert_eq!(f.vault.version(), VERSION);
+    assert_eq!(f.vault.version(), 1);
 // ---- simulate_coverage ----------------------------------------------------
 
 #[test]
@@ -670,6 +677,7 @@ fn deposit_propagates_a_paused_ledger() {
     assert_eq!(
         f.vault.try_deposit(&f.user, &UNIT),
         Err(Ok(LedgerError::Paused.into()))
+    );}
     );
 }
 
