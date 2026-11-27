@@ -37,6 +37,7 @@ enum DataKey {
     /// rather than added to `ReporterInfo`: changing that struct's field
     /// list would change the encoding of every existing reporter entry.
     Score(Address),
+    DisplayName(Address),
 }
 
 #[contracterror]
@@ -303,6 +304,9 @@ impl ReporterRegistry {
         env.storage()
             .persistent()
             .remove(&DataKey::Metadata(reporter.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisplayName(reporter.clone()));
         let stake_key = DataKey::Stake(reporter.clone());
         if let Some(old_stake) = env.storage().persistent().get::<_, i128>(&stake_key) {
             env.storage().persistent().remove(&stake_key);
@@ -520,6 +524,32 @@ impl ReporterRegistry {
                 .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
         }
         index.unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Set a registered reporter's on-chain display name. Only the reporter
+    /// can set it; a later call replaces it. `Symbol` caps it at 32
+    /// characters.
+    pub fn set_reporter_name(env: Env, reporter: Address, name: Symbol) {
+        reporter.require_auth();
+        require_registered(&env, &reporter);
+        let key = DataKey::DisplayName(reporter);
+        env.storage().persistent().set(&key, &name);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        bump_instance(&env);
+    }
+
+    /// A reporter's display name, or `None` when they have not set one.
+    pub fn get_reporter_name(env: Env, reporter: Address) -> Option<Symbol> {
+        let key = DataKey::DisplayName(reporter);
+        let name = env.storage().persistent().get::<_, Symbol>(&key);
+        if name.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        }
+        name
     }
 
     pub fn role_of(env: Env, reporter: Address) -> Option<Role> {

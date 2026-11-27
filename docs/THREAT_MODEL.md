@@ -35,7 +35,7 @@ so.
 | Auditor | `post_reserve` (tier 3) | Any reserve figure within the plausibility band, for any listed asset, dated "now" |
 | Transcriber | `post_reserve` (tier 1) | The same at tier 1, which outranks older auditor figures when `min_tier` is 1 |
 | Issuer | `post_reserve` (tier 2) for its own assets | Any reserve figure within the band for its own asset; the registry cannot revoke it |
-| Arbitrary caller | `list_asset`, every view, `deposit` / `withdraw` on a vault for themselves | Nothing about coverage. They can list a look-alike asset under their own issuer |
+| Arbitrary caller | `list_asset`, every view, `deposit` / `request_withdraw` / `execute_withdraw` on a vault for themselves | Nothing about coverage. They can list a look-alike asset under their own issuer |
 
 ## How the answer is assembled
 
@@ -374,8 +374,8 @@ Anyone, with no role.
 | --- | --- |
 | `coverage-ledger.list_asset(sac)` | Lists any genuine Stellar Asset Contract that is not native XLM. Permissionless. |
 | Every view (`coverage`, `is_covered`, `get_*`, `role_of`, `pending_upgrade`, `admin`, ...) | Reads, and extends the TTL of the entries read. |
-| `covered-vault.deposit(from, amount)` / `withdraw(to, amount)` | Moves their own funds. Each needs its own address's signature. |
-| `__constructor` on a fresh deployment | Only at deploy time, by whoever deploys. A deployer sets the admins, the registry address and a vault's thresholds, and none of these can be changed afterwards except by upgrade. |
+| `covered-vault.deposit(from, amount)` / `request_withdraw(to, amount)` / `execute_withdraw(to)` | Moves or queues their own funds. Each needs its own address's signature. |
+| `__constructor` on a fresh deployment | Only at deploy time, by whoever deploys. A deployer sets the admins, registry address and vault thresholds; the vault admin can later update its withdrawal delay. |
 
 **What they can falsify:**
 

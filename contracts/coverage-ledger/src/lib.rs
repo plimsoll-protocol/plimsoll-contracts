@@ -30,6 +30,13 @@ pub const MAX_SUPPLY_LEDGER_AGE: u32 = 720;
 /// Most asset-reporter pairs one `asset_reporter_pairs` call returns.
 pub const MAX_PAIRS_PER_CALL: u32 = 50;
 
+/// Maximum number of live reports returned by [`CoverageLedger::get_all_reports`].
+pub const MAX_ALL_REPORTS: u32 = 20;
+
+/// Maximum report age in seconds (90 days, matching the persistent TTL window)
+/// for [`CoverageLedger::get_all_reports`] to treat a report as non-expired.
+pub const MAX_REPORT_AGE_SECS: u64 = 90 * 86_400;
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -52,6 +59,8 @@ enum DataKey {
     Alias(Address),
     /// Index of all listed asset SACs, in listing order.
     Assets,
+    SupplyPostedLedger(Address),
+    ReportPostedLedger(Address, Tier, Address),
 }
 
 #[contracterror]
@@ -311,6 +320,24 @@ fn reports_at(env: &Env, sac: &Address, tier: Tier) -> Vec<ReserveReport> {
     out
 }
 
+fn reports_at_ledger(
+    env: &Env,
+    sac: &Address,
+    tier: Tier,
+    as_of_ledger: u32,
+) -> Vec<ReserveReport> {
+    let mut out = Vec::new(env);
+    for report in reports_at(env, sac, tier).iter() {
+        let key = DataKey::ReportPostedLedger(sac.clone(), tier, report.reporter.clone());
+        let posted_ledger =
+            read_persistent::<u32>(env, &key).unwrap_or_else(|| env.ledger().sequence());
+        if posted_ledger <= as_of_ledger {
+            out.push_back(report);
+        }
+    }
+    out
+}
+
 /// Move a v0.1 `Report(sac, tier)` entry into the per-reporter layout. Runs
 /// before every write at a tier, so a legacy key only ever exists while that
 /// tier's index is empty: the legacy reporter becomes its first entry, and no
@@ -378,15 +405,18 @@ fn effective_supply(env: &Env, sac: &Address) -> Option<SupplyFigure> {
     })
 }
 
-/// Whether a reporter at `tier` still counts: issuer-signed reports always
-/// count, while auditor and transcriber reports require the matching role.
-fn counts_for_tier(registry: &RegistryClient, tier: Tier, reporter: &Address) -> bool {
-    let needed = match tier {
-        Tier::IssuerSigned => return true,
-        Tier::AuditorSigned => Role::Auditor,
-        Tier::Transcribed => Role::Transcriber,
-    };
-    registry.role_of(reporter) == Some(needed)
+fn posted_supply_at_ledger(env: &Env, sac: &Address, as_of_ledger: u32) -> Option<SupplyFigure> {
+    let snapshot = read_persistent::<SupplySnapshot>(env, &DataKey::Supply(sac.clone()))?;
+    let posted_ledger = read_persistent::<u32>(env, &DataKey::SupplyPostedLedger(sac.clone()))
+        .unwrap_or_else(|| env.ledger().sequence());
+    if posted_ledger > as_of_ledger {
+        return None;
+    }
+    Some(SupplyFigure {
+        amount: snapshot.amount,
+        ledger: snapshot.ledger,
+        timestamp: snapshot.timestamp,
+    })
 }
 
 /// Whether a stored report still counts: its reporter must still be entitled
@@ -456,6 +486,21 @@ fn best_report(env: &Env, sac: &Address, min_tier: Tier) -> Option<ReserveReport
     pick_counting(env, candidates)
 }
 
+fn best_report_at_ledger(
+    env: &Env,
+    sac: &Address,
+    min_tier: Tier,
+    as_of_ledger: u32,
+) -> Option<ReserveReport> {
+    let mut candidates = Vec::new(env);
+    for tier in Tier::ALL_DESC {
+        if tier >= min_tier {
+            candidates.append(&reports_at_ledger(env, sac, tier, as_of_ledger));
+        }
+    }
+    pick_counting(env, candidates)
+}
+
 /// Drop index entries, and their reports, whose reporter no longer counts.
 /// Called only when a tier is full, so a revoked reporter cannot hold a slot
 /// against a working one.
@@ -475,6 +520,9 @@ fn reclaim_slots(
             kept.push_back(reporter);
         } else {
             env.storage().persistent().remove(&key);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::ReportPostedLedger(sac.clone(), tier, reporter));
         }
     }
     kept
@@ -566,6 +614,11 @@ impl CoverageLedger {
             poster: poster.clone(),
         };
         write_persistent(&env, &key, &snapshot);
+        write_persistent(
+            &env,
+            &DataKey::SupplyPostedLedger(sac.clone()),
+            &current_ledger,
+        );
         bump_instance(&env);
         SupplyPosted {
             sac,
@@ -662,6 +715,11 @@ impl CoverageLedger {
             doc_uri: doc_uri.clone(),
         };
         write_persistent(&env, &key, &report);
+        write_persistent(
+            &env,
+            &DataKey::ReportPostedLedger(sac.clone(), tier, reporter.clone()),
+            &env.ledger().sequence(),
+        );
         bump_instance(&env);
         // Best-effort: a registry with no trusted ledger configured (or any
         // other failure) must never block a reserve report from landing, so
@@ -682,6 +740,54 @@ impl CoverageLedger {
         }
         .publish(&env);
         tier
+    }
+
+    /// Pre-flight for `post_reserve`: the error it would raise for this
+    /// reporter and asset, checked in the same order, without writing any
+    /// storage or extending any TTL. Checks that depend on the figure itself
+    /// (amount, URI, timestamps, plausibility) are not covered.
+    pub fn can_post_report(env: Env, reporter: Address, asset: Address) -> Result<(), LedgerError> {
+        if paused_flag(&env) {
+            return Err(LedgerError::Paused);
+        }
+        let record = env
+            .storage()
+            .persistent()
+            .get::<_, AssetRecord>(&DataKey::Asset(asset.clone()))
+            .ok_or(LedgerError::AssetNotListed)?;
+        let registry = RegistryClient::new(&env, &registry(&env));
+        let tier = if reporter == record.issuer {
+            Tier::IssuerSigned
+        } else {
+            match registry.role_of(&reporter) {
+                Some(Role::Auditor) => Tier::AuditorSigned,
+                Some(Role::Transcriber) => Tier::Transcribed,
+                _ => return Err(LedgerError::NotReporter),
+            }
+        };
+        // A legacy entry only exists while the tier's index is empty, so it
+        // can never fill the tier; only the index needs counting.
+        let index: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Reporters(asset.clone(), tier))
+            .unwrap_or_else(|| Vec::new(&env));
+        if !index.contains(&reporter) && index.len() >= MAX_REPORTERS_PER_TIER {
+            // Count the slots `post_reserve` would keep after reclaiming.
+            let mut kept: u32 = 0;
+            for held_by in index.iter() {
+                let key = DataKey::ReportBy(asset.clone(), tier, held_by.clone());
+                if env.storage().persistent().has(&key)
+                    && counts_for_tier(&registry, tier, &held_by)
+                {
+                    kept += 1;
+                }
+            }
+            if kept >= MAX_REPORTERS_PER_TIER {
+                return Err(LedgerError::TooManyReporters);
+            }
+        }
+        Ok(())
     }
 
     /// Remove the caller's latest reserve report at the tier their identity
@@ -717,6 +823,13 @@ impl CoverageLedger {
         }
 
         env.storage().persistent().remove(&report_key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ReportPostedLedger(
+                sac.clone(),
+                tier,
+                reporter.clone(),
+            ));
         let index_key = DataKey::Reporters(sac.clone(), tier);
         if index.is_empty() {
             env.storage().persistent().remove(&index_key);
@@ -787,81 +900,20 @@ impl CoverageLedger {
         out
     }
 
-    /// When `reporter` most recently posted a reserve figure for `asset`: the
-    /// ledger timestamp of that post (`posted_at`), not the figure's `as_of`.
-    ///
-    /// Every tier is searched, so a reporter whose role changed answers with
-    /// whichever of their posts is later, and a not-yet-migrated v0.1 entry
-    /// counts as one of their posts too. The registry is not consulted: a
-    /// revoked reporter's posts remain history, and `get_reports` already says
-    /// which of them still count. `None` when `reporter` has never posted for
-    /// `asset`.
-    pub fn reporter_last_post(env: Env, reporter: Address, asset: Address) -> Option<u64> {
-        let mut last: Option<u64> = None;
-        let mut note = |posted_at: u64| {
-            if last.is_none_or(|seen| posted_at > seen) {
-                last = Some(posted_at);
-            }
-        };
-        for tier in Tier::ALL_DESC {
-            if let Some(legacy) =
-                read_persistent::<ReserveReport>(&env, &DataKey::Report(asset.clone(), tier))
-            {
-                if legacy.reporter == reporter {
-                    note(legacy.posted_at);
-                }
-            }
-            if let Some(report) = read_persistent::<ReserveReport>(
-                &env,
-                &DataKey::ReportBy(asset.clone(), tier, reporter.clone()),
-            ) {
-                note(report.posted_at);
-            }
-        }
-        last
-    }
-
-    /// A page of the (asset, reporter) pairs the ledger holds figures for, so
-    /// an indexer can bootstrap its dataset without walking every asset.
-    ///
-    /// Pairs come from the stored per-tier reporter indexes, so no registry
-    /// call is made: a reporter whose figure no longer counts still appears,
-    /// and `get_reports` / `reporter_last_post` say what they posted. A
-    /// reporter with an entry at more than one tier appears once per asset.
-    ///
-    /// Order: assets in listing order, and within an asset the tiers strongest
-    /// first (`AuditorSigned`, `IssuerSigned`, `Transcribed`), first-post
-    /// order within a tier. `cursor` is the index of the first pair to return
-    /// and defaults to `0`; `limit` is capped at `MAX_PAIRS_PER_CALL = 50`.
-    /// An empty page means the cursor is at or past the last pair. Listings
-    /// and first posts only ever grow the sequence, so a bootstrap that must
-    /// be exact should re-read from `0` or dedupe by pair.
-    pub fn asset_reporter_pairs(
-        env: Env,
-        cursor: Option<u32>,
-        limit: u32,
-    ) -> Vec<(Address, Address)> {
-        let start = cursor.unwrap_or(0);
-        let page = limit.min(MAX_PAIRS_PER_CALL);
+    /// All live (non-expired and still counting) reports for `sac`, sorted by
+    /// tier descending (`AuditorSigned`, `IssuerSigned`, `Transcribed`), capped
+    /// at [`MAX_ALL_REPORTS`].
+    pub fn get_all_reports(env: Env, sac: Address) -> Vec<ReserveReport> {
+        let registry = RegistryClient::new(&env, &registry(&env));
+        let now = env.ledger().timestamp();
         let mut out = Vec::new(&env);
-        if page == 0 {
-            return out;
-        }
-        let mut index = 0u32;
-        for asset in assets(&env).iter() {
-            let mut reported = Vec::new(&env);
-            for tier in Tier::ALL_DESC {
-                for reporter in reporters(&env, &asset, tier).iter() {
-                    if reported.contains(&reporter) {
-                        continue;
-                    }
-                    reported.push_back(reporter.clone());
-                    if index < start {
-                        index += 1;
-                        continue;
-                    }
-                    out.push_back((asset.clone(), reporter));
-                    if out.len() == page {
+        for tier in Tier::ALL_DESC {
+            for report in reports_at(&env, &sac, tier).iter() {
+                if now.saturating_sub(report.as_of) <= MAX_REPORT_AGE_SECS
+                    && counts(&registry, &report)
+                {
+                    out.push_back(report);
+                    if out.len() >= MAX_ALL_REPORTS {
                         return out;
                     }
                 }
@@ -905,6 +957,44 @@ impl CoverageLedger {
             CoverageStatus::Covered(_) => true,
             CoverageStatus::Stale(_) | CoverageStatus::Uncovered => false,
         }
+    }
+
+    /// Evaluate currently retained figures at a historical ledger sequence.
+    ///
+    /// Replaced figures are not retained, so a value whose latest stored
+    /// version was posted after `as_of_ledger` is unavailable. The target
+    /// timestamp is estimated from the five-second ledger cadence.
+    pub fn is_covered_at(
+        env: Env,
+        sac: Address,
+        min_bps: u32,
+        max_age: u64,
+        min_tier: Tier,
+        as_of_ledger: u32,
+    ) -> bool {
+        let current_ledger = env.ledger().sequence();
+        if as_of_ledger > current_ledger {
+            panic_with_error!(&env, LedgerError::FutureLedger);
+        }
+        if paused_flag(&env) {
+            panic_with_error!(&env, LedgerError::Paused);
+        }
+        let resolved =
+            read_persistent::<Address>(&env, &DataKey::Alias(sac.clone())).unwrap_or(sac);
+        let supply = match posted_supply_at_ledger(&env, &resolved, as_of_ledger) {
+            Some(supply) => supply,
+            None => return false,
+        };
+        let report = match best_report_at_ledger(&env, &resolved, min_tier, as_of_ledger) {
+            Some(report) => report,
+            None => return false,
+        };
+        let elapsed = u64::from(current_ledger - as_of_ledger).saturating_mul(SECONDS_PER_LEDGER);
+        let as_of_timestamp = env.ledger().timestamp().saturating_sub(elapsed);
+        let age = as_of_timestamp
+            .saturating_sub(supply.timestamp)
+            .max(as_of_timestamp.saturating_sub(report.as_of));
+        age <= max_age && coverage_bps(report.amount, supply.amount) >= min_bps
     }
 
     /// `coverage` with the reason attached, in one call. Precedence: paused,

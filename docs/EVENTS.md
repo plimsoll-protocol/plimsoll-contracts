@@ -296,6 +296,7 @@ ingest its events.
 | topic 0 | `deposited` | `Symbol` |
 | topic 1 | `from` | `Address` |
 | data | `amount` | `i128` |
+| data | `balance_after` | `i128` |
 
 Raised only after `is_covered` returned true, which is the point of the example:
 a deposit of an under-backed asset never reaches this event.
@@ -332,9 +333,24 @@ deposit has been made while coverage was failing.
 | topic 0 | `withdrawn` | `Symbol` |
 | topic 1 | `to` | `Address` |
 | data | `amount` | `i128` |
+| data | `balance_after` | `i128` |
 
-Withdrawal is not gated on coverage: a depositor can always leave. No testnet
-example yet.
+Raised when a queued withdrawal is executed. Withdrawal is not gated on
+coverage: a depositor can always leave once any configured delay has elapsed.
+No testnet example yet.
+
+### `withdrawal_queued`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `withdrawal_queued` | `Symbol` |
+| topic 1 | `to` | `Address` |
+| data | `amount` | `i128` |
+| data | `available_at` | `u64` |
+
+Raised by `request_withdraw` after the request is stored. A new request for the
+same address replaces the previous request and restarts the delay; changing the
+configured delay does not affect a request already queued.
 
 ## Reading these events
 
