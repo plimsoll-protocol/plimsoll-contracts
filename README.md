@@ -79,7 +79,9 @@ in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md). Every admin operation
 (upgrades, moving admin to a multisig, onboarding and revoking reporters) is a
 tested, step-by-step procedure in [docs/RUNBOOK.md](docs/RUNBOOK.md). How the
 two-step admin transfer works, and what to do when it should not go ahead, is
-in [docs/admin-transfer.md](docs/admin-transfer.md).
+in [docs/admin-transfer.md](docs/admin-transfer.md). Where the bytes in a
+contract wasm go, which features are the expensive ones and how the size
+checks work is in [docs/wasm-size.md](docs/wasm-size.md).
 
 ### Why it is Stellar-specific
 

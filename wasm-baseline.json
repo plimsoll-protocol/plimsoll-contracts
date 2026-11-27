@@ -1,0 +1,8 @@
+{
+  "_comment": "Byte sizes each contract wasm is compared against by scripts/check_wasm_growth.py. A wasm more than 5% larger than its entry prints a ::warning:: annotation; the job still passes. The hard ceiling is size-budgets.json, which fails CI. Seeded from the most recent sizes recorded when those budgets were raised: reporter_registry 8976 on 2026-11-25 (#179), coverage_ledger 26990 and covered_vault 7362 on 2026-11-26 (#180, #74, #110). Refresh deliberately: run `stellar contract build --locked`, record the sizes here in the pull request that needs the room, and explain the growth in docs/wasm-size.md. The upgrade_fixture_* contracts are not listed because they exist only to test upgrades and are covered by their own budgets.",
+  "baseline": {
+    "coverage_ledger": 26990,
+    "covered_vault": 7362,
+    "reporter_registry": 8976
+  }
+}

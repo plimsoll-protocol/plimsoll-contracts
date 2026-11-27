@@ -136,6 +136,7 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 | `Reporter(Address)` (persistent) | `set_reporter` / `confirm_registration` (write), `get_reporter` / `role_of` (read) |
 | `PendingReporter(Address)` (persistent) | `register_reporter` (write), `get_pending_reporter` (read), `confirm_registration` / `cleanup_expired_registration` / `revoke` (remove) |
 | `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `revoke`, `top_up_stake`, `reduce_stake` |
+| `Reporters` (persistent) | `set_reporter`, `revoke` (write), `reporter_count` (read) |
 | `Reporter(Address)` (persistent) | `set_reporter` (write), `get_reporter` / `role_of` (read) |
 | `ReporterDisplayName(Address)` (persistent) | optional `Symbol`; `set_reporter_name` (write), `get_reporter_name` (read) |
 
@@ -152,12 +153,22 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 | --- | --- |
 | `Admin`, `Registry`, `Paused` (instance) | `__constructor`, `transfer_admin`, `list_asset`, `post_supply`, `post_reserve`, `pause`, `unpause`, `propose_upgrade`, `execute_upgrade`, `cancel_upgrade` |
 | `Asset(Address)` (persistent) | `list_asset` (write), `get_asset`, `last_updated` (existence read) |
+| `MinDocUriLen` (instance) | `set_min_doc_uri_len` (write); `post_reserve` reads it, and `min_doc_uri_len` reads it without extending the instance TTL |
+| `Asset(Address)` (persistent) | `list_asset` (write), `get_asset` (read) |
 | `Supply(Address)` (persistent) | `post_supply` (write), `get_supply`, `coverage`, `is_covered`, `is_covered_at`, `coverage_status` (read) |
 | `SupplyPostedLedger(Address)` (persistent) | `post_supply` (write), `is_covered_at`, `historical_coverage_bps` (read) |
 | `NativeSupply(Address)` (persistent) | `enable_native_supply` (write), `native_supply_token`, `coverage`, `is_covered`, `coverage_status` (read) |
 | `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `get_all_reports`, `last_updated`, `get_all_latest_reports`, `coverage`, `is_covered`, `is_covered_at`, `coverage_status` (read) |
 | `ReportPostedLedger(Address, Tier, Address)` (persistent) | `post_reserve` (write), `is_covered_at`, `historical_coverage_bps` (read) |
 | `Assets` (persistent) | `list_asset` (write), `asset_reporter_pairs`, `get_all_latest_reports` (read) |
+| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `coverage`, `is_covered`, `is_covered_at`, `coverage_status` (read) |
+| `ReportPostedLedger(Address, Tier, Address)` (persistent) | `post_reserve` (write), `is_covered_at` (read) |
+
+`get_coverage_snapshot` is the one historical query that extends nothing: it
+reads `Supply`, `SupplyPostedLedger`, `Reporters`, `ReportBy` and
+`ReportPostedLedger` without touching their TTLs (see
+[storage.md](storage.md)).
+| `Assets` (persistent) | `list_asset` (write), `asset_reporter_pairs` (read) |
 
 **covered-vault**
 
@@ -232,6 +243,7 @@ Decides who may speak. Holds no money.
 | `Dispute(BytesN<32>)` | persistent, TTL extended on write and read | `DisputeRecord` |
 | `DisplayName(Address)` | persistent, TTL extended on write and read | `Symbol` |
 | `Stake(Address)` | persistent, TTL extended on write and read | `i128` |
+| `Reporters` | persistent, TTL extended on write and read | `Vec<Address>`: every registered reporter, in first-registration order |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 
 **Functions**
@@ -276,6 +288,7 @@ Decides who may speak. Holds no money.
 | `set_max_reporters(max: u32)` | admin | `()` | `InvalidMaxReporters` (zero) | `max_reporters_set {max}` |
 | `set_reporter_name(reporter: Address, name: Symbol)` | reporter | `()` | `ReporterNotFound` | — |
 | `get_reporter_name(reporter: Address)` | — | `Option<Symbol>` | — | — |
+| `reporter_count()` | — | `u32` (reporters with a live registration) | — | — |
 | `transfer_admin(new_admin: Address)` | admin and new_admin | `()` | — | `admin_transferred {new_admin}` |
 | `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
 | `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
@@ -396,6 +409,17 @@ symbol cannot be constructed or passed in). `get_reporter_name` returns
 `None` until a name is set, and `revoke` removes the name with the other
 entries. `set_reporter` does not touch it.
 
+The `Reporters` index is what makes `reporter_count` possible without an
+enumeration primitive: `set_reporter` appends an address the first time it is
+registered (a later role or name change is not a second reporter), and
+`revoke` removes it. The index entry is deleted with the last reporter, so an
+empty registry leaves no index behind. `reporter_count` counts the indexed
+addresses whose `Reporter(Address)` entry is still present, so the answer
+follows the registrations rather than the index. TTL expiry does not remove a
+reporter: an archived persistent entry is restored when a transaction touches
+it (see [storage.md](storage.md)), so `revoke` is the only way a registration
+stops counting.
+
 Tracked stake lives under `Stake(Address)` and defaults to `0` when absent.
 `top_up_stake` and `reduce_stake` require positive `amount` (`> 0`), and
 `reduce_stake` removes the key when the balance reaches `0`. Both emit
@@ -451,6 +475,7 @@ Records what was said, and answers coverage questions.
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 | `TtlGrace` | instance | `u32` (ledger count; default 0) |
 | `Paused` | instance | `bool` (absent means not paused) |
+| `MinDocUriLen` | instance | `u32`: shortest `doc_uri` accepted. Absent means `DEFAULT_MIN_DOC_URI_LEN = 10` |
 | `Asset(Address)` | persistent | `AssetRecord` |
 | `Supply(Address)` | persistent | `SupplySnapshot` (latest only) |
 | `NativeSupply(Address)` | persistent | `Address`: the SEP-41 token queried for supply when the opt-in is set |
@@ -516,6 +541,7 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `set_issuer_delegate(sac: Address, delegate: Option<Address>)` | asset's issuer | `()` | `AssetNotListed` | `issuer_delegate_set {sac} delegate` when `Some`, `issuer_delegate_cleared {sac}` when `None` |
 | `get_issuer_delegate(sac: Address)` | — | `Option<Address>` | — | — |
 | `can_post_report(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | — | `Result<(), LedgerError>` | `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` | — |
+| `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `UriTooShort`, `ImplausibleAmount`, `TooManyReporters` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
 | `retract_reserve(reporter: Address, sac: Address)` | reporter | `()` | `AssetNotListed`, `NotReporter`, `NoReportToRetract` | `reserve_retracted {sac, tier} reporter, as_of` |
 | `can_post_report(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | — | `Result<(), LedgerError>` | `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` | — |
 | `get_asset(sac)` | — | `Option<AssetRecord>` | — | — |
@@ -548,6 +574,9 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | `Paused` | — |
 | `is_covered_at(sac, min_bps: u32, max_age: u64, min_tier: Tier, as_of_ledger: u32)` | — | `bool` | `FutureLedger`, `Paused` | — |
 | `coverage_status(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `CoverageStatus` | — | — |
+| `get_coverage_snapshot(sac, as_of_ledger: u32)` | — | `Option<Coverage>` (the ratio as it stood at that ledger) | `FutureLedger` | — |
+| `set_min_doc_uri_len(min_len: u32)` | admin | `()` | `InvalidUri` (above `MAX_URI_LEN`) | — |
+| `min_doc_uri_len()` | — | `u32` (`0` when the floor is disabled) | — | — |
 | `pause()` / `unpause()` | admin | `()` | — | `paused` / `unpaused` `by` |
 | `is_paused()` | — | `bool` | — | — |
 | `enable_native_supply(sac, token: Address)` | admin | `()` | `AssetNotListed` | `native_supply_enabled {sac} token` |
@@ -753,6 +782,23 @@ both addresses, and confirms `digest` matches the domain-separated SHA-256 hash.
   a ratio they gave cannot be reconstructed here, and the events are the source
   for that.
 
+- `doc_uri` must be 1 to 256 bytes: empty or longer is `InvalidUri`. It must
+  also be at least `min_doc_uri_len` bytes, which is `10` by default and
+  admin-settable with `set_min_doc_uri_len`; a shorter one is `UriTooShort`.
+  `0` disables the floor, and an empty URI is still `InvalidUri`. Values above
+  `MAX_URI_LEN = 256` are refused when set, since they would reject every URI
+  the contract accepts. The setting lives in instance storage under
+  `MinDocUriLen`, and its default lives in code, so a ledger upgraded from
+  v0.1 keeps the documented default until an admin changes it.
+- `get_coverage_snapshot(sac, as_of_ledger)` returns the `Coverage` that
+  `coverage(sac, Tier::Transcribed)` would have reported at that ledger: the
+  posted supply snapshot and the freshest counting report whose current stored
+  version was posted at or before `as_of_ledger`. It returns `None` when no
+  supply snapshot or no report had been posted by then, and raises
+  `FutureLedger` for a ledger that has not closed. It writes nothing and
+  extends no TTL, so it can be simulated freely; like `is_covered_at` it uses
+  the posted snapshot rather than a native supply token, and it follows a
+  registered alias at most one hop.
 - `alias_asset(old, new)` creates or replaces the alias mapping `old → new`.
   Both `old` and `new` must be listed assets; `old == new` is rejected with
   `SelfAlias`. Only one alias hop is ever followed: `is_covered(old, ...)` and
@@ -776,6 +822,7 @@ Errors (`LedgerError`): `NotAStellarAsset = 1`, `AlreadyListed = 2`,
 `UpgradeDelayNotElapsed = 15`, `SelfAlias = 16`, `Paused = 17`,
 `LedgerTooOld = 18`, `NoReportToRetract = 19`,
 `TooManyReportersPerAsset = 20`.
+`LedgerTooOld = 18`, `NoReportToRetract = 19`, `UriTooShort = 20`.
 Causes, remedies and the order they are checked in: [ERRORS.md](ERRORS.md#ledgererror).
 
 ### Emergency pause

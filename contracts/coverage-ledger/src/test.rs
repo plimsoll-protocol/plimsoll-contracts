@@ -4736,6 +4736,189 @@ fn historical_coverage_bps_answers_a_past_ledger() {
     assert_eq!(
         f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap().bps,
         10_000
+// ---- get_coverage_snapshot (#107) -----------------------------------------
+
+#[test]
+fn coverage_snapshot_matches_coverage_at_its_posting_ledger() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+
+    let snapshot = f.ledger.get_coverage_snapshot(&f.sac, &1_000).unwrap();
+    assert_eq!(snapshot.bps, 10_000);
+    assert_eq!(snapshot.supply, 100 * UNIT);
+    assert_eq!(snapshot.reserves, 100 * UNIT);
+    assert_eq!(snapshot.tier, Tier::IssuerSigned);
+    assert_eq!(snapshot.supply_ledger, 990);
+    assert_eq!(snapshot.supply_timestamp, T0);
+    assert_eq!(snapshot.report_as_of, T0);
+    // The same figures `coverage` reports now, since nothing has moved since.
+    assert_eq!(
+        f.ledger.coverage(&f.sac, &Tier::Transcribed),
+        Some(snapshot)
+    );
+}
+
+#[test]
+fn coverage_snapshot_is_none_before_the_figures_existed() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+
+    // Both figures landed at ledger 1_000, so nothing was on chain at 999.
+    assert_eq!(f.ledger.get_coverage_snapshot(&f.sac, &999), None);
+}
+
+#[test]
+fn coverage_snapshot_ignores_a_report_posted_later() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.env.ledger().set_sequence_number(1_010);
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+
+    // Supply was on chain at 1_005 but the only report was posted at 1_010.
+    assert_eq!(f.ledger.get_coverage_snapshot(&f.sac, &1_005), None);
+    assert!(f.ledger.get_coverage_snapshot(&f.sac, &1_010).is_some());
+}
+
+#[test]
+fn coverage_snapshot_is_none_without_a_supply_snapshot() {
+    let f = listed();
+    f.ledger
+        .post_reserve(&f.issuer, &f.sac, &UNIT, &T0, &hash(&f.env, 2), &uri(&f.env));
+
+    assert_eq!(f.ledger.get_coverage_snapshot(&f.sac, &1_000), None);
+}
+
+#[test]
+fn coverage_snapshot_rejects_a_future_ledger() {
+    let f = listed();
+    assert_eq!(
+        f.ledger.try_get_coverage_snapshot(&f.sac, &1_001),
+        Err(Ok(LedgerError::FutureLedger.into()))
+    );
+}
+
+#[test]
+fn coverage_snapshot_follows_an_asset_alias() {
+    let f = listed();
+    let successor = second_sac(&f);
+    f.ledger.alias_asset(&f.sac, &successor);
+    f.ledger
+        .post_supply(&f.poster, &successor, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.auditor,
+        &successor,
+        &(50 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+
+    let snapshot = f.ledger.get_coverage_snapshot(&f.sac, &1_000).unwrap();
+    assert_eq!(snapshot.bps, 5_000);
+    assert_eq!(snapshot.tier, Tier::AuditorSigned);
+}
+
+#[test]
+fn coverage_snapshot_extends_no_ttl() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+
+    let key = DataKey::Supply(f.sac.clone());
+    let ttl = |f: &Fixture| {
+        f.env.as_contract(&f.ledger.address, || {
+            f.env.storage().persistent().get_ttl(&key)
+        })
+    };
+    // Move close enough to expiry that any read that extends TTL would.
+    let remaining = ttl(&f);
+    f.env
+        .ledger()
+        .set_sequence_number(f.env.ledger().sequence() + remaining - 10);
+    let before = ttl(&f);
+    assert!(before < PERSISTENT_THRESHOLD);
+
+    assert!(f.ledger.get_coverage_snapshot(&f.sac, &1_000).is_some());
+    assert_eq!(
+        ttl(&f),
+        before,
+        "get_coverage_snapshot must not extend TTLs"
+    );
+}
+
+// ---- configurable minimum doc_uri length (#128) ---------------------------
+
+#[test]
+fn min_doc_uri_len_defaults_to_ten() {
+    let f = listed();
+    assert_eq!(f.ledger.min_doc_uri_len(), DEFAULT_MIN_DOC_URI_LEN);
+    assert_eq!(f.ledger.min_doc_uri_len(), 10);
+}
+
+#[test]
+fn report_rejects_a_uri_shorter_than_the_default_minimum() {
+    let f = listed();
+    let res = f.ledger.try_post_reserve(
+        &f.auditor,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 1),
+        &String::from_str(&f.env, "ipfs://x"),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::UriTooShort.into())));
+}
+
+#[test]
+fn report_accepts_a_uri_at_the_minimum_length() {
+    let f = listed();
+    let exactly_ten = String::from_str(&f.env, "ipfs://abc");
+    assert_eq!(exactly_ten.len(), 10);
+    f.ledger
+        .post_reserve(&f.auditor, &f.sac, &UNIT, &T0, &hash(&f.env, 1), &exactly_ten);
+
+    assert_eq!(
+        f.ledger
+            .get_report(&f.sac, &Tier::AuditorSigned)
+            .unwrap()
+            .doc_uri,
+        exactly_ten
     );
 }
 
@@ -4923,6 +5106,30 @@ fn the_default_cap_clears_the_most_reporters_the_tier_caps_allow() {
     assert_eq!(
         f.ledger.get_reports(&f.sac).len(),
         2 * MAX_REPORTERS_PER_TIER,
+fn admin_can_lower_the_minimum() {
+    let f = listed();
+    let eight = String::from_str(&f.env, "ipfs://x");
+    assert_eq!(eight.len(), 8);
+    let rejected = f.ledger.try_post_reserve(
+        &f.auditor,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 1),
+        &eight,
+    );
+    assert_eq!(rejected, Err(Ok(LedgerError::UriTooShort.into())));
+
+    f.ledger.set_min_doc_uri_len(&8);
+    assert_eq!(f.ledger.min_doc_uri_len(), 8);
+    f.ledger
+        .post_reserve(&f.auditor, &f.sac, &UNIT, &T0, &hash(&f.env, 2), &eight);
+    assert_eq!(
+        f.ledger
+            .get_report(&f.sac, &Tier::AuditorSigned)
+            .unwrap()
+            .doc_uri,
+        eight
     );
 }
 
@@ -4982,4 +5189,44 @@ fn a_batch_registered_reporter_still_hits_the_asset_cap() {
         &uri(&f.env),
     );
     assert_eq!(res, Err(Ok(LedgerError::TooManyReportersPerAsset.into())));
+fn minimum_of_zero_still_rejects_an_empty_uri() {
+    let f = listed();
+    f.ledger.set_min_doc_uri_len(&0);
+    let res = f.ledger.try_post_reserve(
+        &f.auditor,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 1),
+        &String::from_str(&f.env, ""),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::InvalidUri.into())));
+}
+
+#[test]
+fn admin_can_raise_the_minimum() {
+    let f = listed();
+    f.ledger.set_min_doc_uri_len(&64);
+    let res =
+        f.ledger
+            .try_post_reserve(&f.auditor, &f.sac, &UNIT, &T0, &hash(&f.env, 1), &uri(&f.env));
+    assert_eq!(res, Err(Ok(LedgerError::UriTooShort.into())));
+}
+
+#[test]
+fn minimum_longer_than_the_uri_cap_is_rejected() {
+    let f = listed();
+    assert_eq!(
+        f.ledger.try_set_min_doc_uri_len(&(MAX_URI_LEN + 1)),
+        Err(Ok(LedgerError::InvalidUri.into()))
+    );
+    assert_eq!(f.ledger.min_doc_uri_len(), 10);
+}
+
+#[test]
+fn setting_the_minimum_requires_admin_auth() {
+    let f = listed();
+    f.env.mock_auths(&[]);
+    assert!(f.ledger.try_set_min_doc_uri_len(&5).is_err());
+    assert_eq!(f.ledger.min_doc_uri_len(), 10);
 }

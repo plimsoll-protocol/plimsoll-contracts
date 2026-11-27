@@ -29,6 +29,11 @@ jobs:
         run: stellar contract build --locked
       - name: Check wasm size budgets
         run: python3 scripts/check_wasm_sizes.py
+      # Soft guard, so growth is seen before it reaches a budget: a wasm more
+      # than 5% over its recorded baseline gets a ::warning:: annotation and
+      # the job still passes. See docs/wasm-size.md.
+      - name: Warn on wasm growth over 5%
+        run: python3 scripts/check_wasm_growth.py
       - name: Shellcheck scripts
         run: shellcheck scripts/*.sh
       - name: Security audit
