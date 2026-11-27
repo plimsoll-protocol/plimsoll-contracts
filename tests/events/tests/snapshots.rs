@@ -447,6 +447,13 @@ fn covered_vault_event_schema_matches_the_snapshot() {
     vault.accept_admin();
     events.extend(take(&f.env, &vault_id));
 
+    let next_vault_admin = Address::generate(&f.env);
+    vault.propose_admin(&next_vault_admin);
+    events.extend(take(&f.env, &vault_id));
+
+    vault.accept_admin();
+    events.extend(take(&f.env, &vault_id));
+
     let names: std::vec::Vec<&str> = events.iter().map(|event| event.name.as_str()).collect();
     for expected in [
         "deposited",

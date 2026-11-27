@@ -113,6 +113,9 @@ entries today: every code below is covered.
 | 6 | | [`InvalidAmount`](#6-invalidamount) | [`WithdrawalDelayNotElapsed`](#6-withdrawaldelaynotelapsed) |
 | 7 | | [`FutureLedger`](#7-futureledger) | |
 | 8 | | [`StaleLedger`](#8-staleledger) | |
+| 6 | [`InvalidConfirmWindow`](#6-invalidconfirmwindow) | [`InvalidAmount`](#6-invalidamount) | |
+| 7 | [`PendingRegistrationNotFound`](#7-pendingregistrationnotfound) | [`FutureLedger`](#7-futureledger) | |
+| 8 | [`RegistrationExpired`](#8-registrationexpired) | [`StaleLedger`](#8-staleledger) | |
 | 9 | | [`FutureTimestamp`](#9-futuretimestamp) | |
 | 10 | | [`StaleReport`](#10-stalereport) | |
 | 11 | | [`InvalidUri`](#11-invaliduri) | |
