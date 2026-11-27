@@ -288,6 +288,8 @@ Rules:
   behavioural change. The wasm also carries `description` and `repository`
   entries in its contract metadata.
 
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`, `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
+
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
 `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
 

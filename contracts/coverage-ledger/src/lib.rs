@@ -29,6 +29,7 @@ use soroban_sdk::{
     RegistryClient, ReserveReport, Role, StaleInfo, SupplySnapshot, SupplyTokenClient, Tier,
     INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, MAX_PLAUSIBLE_BPS, MIN_PLAUSIBLE_BPS,
     PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, SECONDS_PER_LEDGER, UPGRADE_DELAY_LEDGERS,};
+};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
     Address, BytesN, ContractExecutable, Env, Executable, String, Symbol, Vec,
@@ -92,6 +93,29 @@ contractmeta!(
     key = "repository",
     val = "https://github.com/plimsoll-protocol/plimsoll-contracts"
 );
+
+/// Largest N accepted by `get_recent_reports`.
+pub const MAX_RECENT_REPORTS: u32 = 50;
+
+/// Default number of ledgers a disputed report is frozen before it is
+/// considered delisted. One day at 5-second close time.
+pub const DEFAULT_DISPUTE_HOLD_LEDGERS: u32 = DAY_IN_LEDGERS;
+
+/// A single entry in the cross-asset recent-reports index.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecentReport {
+    pub sac: Address,
+    pub report: ReserveReport,
+}
+
+/// An active dispute on a reserve report identified by `(sac, as_of)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeRecord {
+    pub disputer: Address,
+    pub hold_until_ledger: u32,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -651,6 +675,7 @@ fn pick_counting(
         if counts(&registry, &report) && !is_disputed(env, sac, &report) {
         let report = candidates.get(i).unwrap_or_else(|| unreachable!());
         if counts(&registry, &report) {
+        if counts(&registry, &report) && !is_disputed(env, sac, &report) {
             return Some(report);
         }
         skip |= 1u32 << i;

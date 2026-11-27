@@ -58,6 +58,8 @@ enum DataKey {
     /// Unix-timestamp at which the reporter's registration expires.
     Expiry(Address),
     ReporterDisplayName(Address),
+    /// Unix-timestamp at which the reporter's registration expires.
+    Expiry(Address),
 
     Metadata(Address),
     Stake(Address),
@@ -126,6 +128,14 @@ pub enum RegistryError {
     EmptyBatch = 9,
     TooManyTags = 8,
     UntrustedLedger = 9,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReporterExpirySet {
+    #[topic]
+    pub reporter: Address,
+    pub expires_at: u64,
 }
 
 #[contractevent]
