@@ -20,13 +20,25 @@ that raised it.** The three contracts number their errors independently, so
 When a contract calls another and the callee fails, the callee's error is the
 one that comes back. In practice:
 
-- `covered-vault.deposit` and `withdraw` move tokens through the asset's
+- `covered-vault.deposit` and `execute_withdraw` move tokens through the asset's
   Stellar Asset Contract (SAC). If the transfer fails, the caller sees the
   **SAC's** error code, not a vault code. See
   [Errors from the asset contract](#errors-from-the-asset-contract).
+- `coverage-ledger` calls `reporter-registry.role_of` and
+  `has_minimum_stake`, and the SAC's `name` and `balance`. On a correctly
+  configured deployment these calls succeed; an insufficient balance returns
+  the ledger's `InsufficientStake` error.
+- `coverage-ledger.is_covered` and `coverage` never fail. Every reason an
+  asset might not qualify comes back as `false` or `None`.
+
 - `coverage-ledger` calls `reporter-registry.role_of` and the SAC's `name`,
   but neither can fail on a valid deployment, so a ledger call only ever
   fails with a ledger code.
+- `coverage-ledger` calls `reporter-registry.role_of`,
+  `reporter-registry.max_reporters` and the SAC's `name`, but none of them can
+  fail on a valid deployment, so a ledger call only ever fails with a ledger
+  code. (A ledger upgraded ahead of its registry is not a valid deployment:
+  see [SPEC.md](SPEC.md#upgrading-a-v01-deployment).)
 - `coverage-ledger.is_covered` fails only with `Paused`, and only while an
   admin has paused the ledger. Every other reason an asset might not qualify
   comes back as `false`. `coverage` never fails; it returns `None`.
@@ -44,9 +56,34 @@ So a variant's number is fixed for good once it ships:
   anything else.
 - No existing variant is renumbered, whatever the reason.
 
-[AGENTS.md](../AGENTS.md) makes this a rule for every change, and the
-end-to-end test in [tests/e2e](../tests/e2e/tests/scenario.rs) asserts several
-codes as literal numbers, so a renumbering fails CI.
+[AGENTS.md](../AGENTS.md) makes this a rule for every change. The end-to-end
+test in [tests/e2e](../tests/e2e/tests/scenario.rs) asserts several codes as
+literal numbers, and CI runs [scripts/check_error_codes.py](../scripts/check_error_codes.py),
+which compares every `#[contracterror]` enum with the base branch and fails on a
+renumbering, a removal or a new variant that is not appended after the last
+one. Run it yourself before pushing:
+
+```bash
+python3 scripts/check_error_codes.py --base origin/main
+```
+
+### Every code has a test
+
+`cargo test` covers behaviour; a second check covers the list itself.
+[`scripts/check_error_coverage.py`](../scripts/check_error_coverage.py) (the
+**Error-code coverage** step in CI, or `python3
+scripts/check_error_coverage.py` locally) reads every `#[contracterror]` enum
+under `contracts/` and `examples/` and fails if some variant is named by no
+test file in its package. It prints a per-enum covered count and every
+uncovered `Type::Variant` with its number, so the failing output is the to-do
+list. It also fails on a duplicate error number in one enum, because the
+number is what the indexer decodes.
+
+A code that genuinely cannot be reached from a test is listed with its reason
+in `INTENTIONALLY_UNTESTED` at the top of that script. The check fails when a
+listed entry has gone stale (the variant is gone, or a test now covers it), so
+the list cannot be used to paper over a missing test. There are no such
+entries today: every code below is covered.
 
 ## Quick lookup
 
@@ -54,10 +91,26 @@ codes as literal numbers, so a renumbering fails CI.
 | ---: | --- | --- | --- |
 | 1 | [`ReporterNotFound`](#1-reporternotfound) | [`NotAStellarAsset`](#1-notastellarasset) | [`InvalidAmount`](#1-invalidamount) |
 | 2 | [`InvalidName`](#2-invalidname) | [`AlreadyListed`](#2-alreadylisted) | [`NotCovered`](#2-notcovered) |
+| 3 | | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
+| 4 | | | [`InvalidThreshold`](#4-invalidthreshold) |
+| 4 | | [`NotSupplyPoster`](#4-notsupplyposter) | |
+| 5 | [`InsufficientStake`](#5-insufficientstake) | [`NotReporter`](#5-notreporter) | |
+| 6 | [`InvalidStakeAmount`](#6-invalidstakeamount) | [`InvalidAmount`](#6-invalidamount) | |
+| 7 | [`ReporterAlreadyRegistered`](#7-reporteralreadyregistered) | [`FutureLedger`](#7-futureledger) | |
+
 | 3 | `UpgradeNotProposed` | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
-| 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | |
+| 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | [`NoPendingAdmin`](#4-nopendingadmin) |
 | 5 | [`InvalidMetadata`](#5-invalidmetadata) | [`NotReporter`](#5-notreporter) | |
-| 6 | | [`InvalidAmount`](#6-invalidamount) | |
+| 6 | [`InvalidStakeAmount`](#6-invalidstakeamount) | [`InvalidAmount`](#6-invalidamount) | |
+| 7 | [`InsufficientStake`](#7-insufficientstake) | [`FutureLedger`](#7-futureledger) | |
+| 8 | [`InvalidMaxReporters`](#8-invalidmaxreporters) | [`StaleLedger`](#8-staleledger) | |
+| 9 | [`EmptyBatch`](#9-emptybatch) | [`FutureTimestamp`](#9-futuretimestamp) | |
+| 6 | [`InvalidConfirmWindow`](#6-invalidconfirmwindow) | [`InvalidAmount`](#6-invalidamount) | |
+| 7 | [`PendingRegistrationNotFound`](#7-pendingregistrationnotfound) | [`FutureLedger`](#7-futureledger) | |
+| 8 | [`RegistrationExpired`](#8-registrationexpired) | [`StaleLedger`](#8-staleledger) | |
+| 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | [`InvalidDelay`](#4-invaliddelay) |
+| 5 | [`InvalidMetadata`](#5-invalidmetadata) | [`NotReporter`](#5-notreporter) | [`NoPendingWithdrawal`](#5-nopendingwithdrawal) |
+| 6 | | [`InvalidAmount`](#6-invalidamount) | [`WithdrawalDelayNotElapsed`](#6-withdrawaldelaynotelapsed) |
 | 7 | | [`FutureLedger`](#7-futureledger) | |
 | 8 | | [`StaleLedger`](#8-staleledger) | |
 | 9 | | [`FutureTimestamp`](#9-futuretimestamp) | |
@@ -65,15 +118,27 @@ codes as literal numbers, so a renumbering fails CI.
 | 11 | | [`InvalidUri`](#11-invaliduri) | |
 | 12 | | [`ImplausibleAmount`](#12-implausibleamount) | |
 | 13 | | [`TooManyReporters`](#13-toomanyreporters) | |
+| 16 | | [`InsufficientStake`](#16-insufficientstake) | |
+
 | 14 | | [`UpgradeNotProposed`](#14-upgradenotproposed) | |
 | 15 | | [`UpgradeDelayNotElapsed`](#15-upgradedelaynotelapsed) | |
-| 16 | | [`Paused`](#16-paused) | |
+| 16 | | [`SelfAlias`](#16-selfalias) | |
+| 17 | | [`Paused`](#17-paused) | |
+| 18 | | [`LedgerTooOld`](#18-ledgertooold) | |
+| 19 | | [`NoReportToRetract`](#19-noreporttoretract) | |
+| 20 | | [`TooManyReportersPerAsset`](#20-toomanyreportersperasset) | |
 
 ## RegistryError
+
+Raised by `reporter-registry`. These errors can be returned by admin
+configuration or reporter self-registration.
 
 Raised by `reporter-registry`. The role and upgrade errors are admin-only, so
 they reach maintainers rather than end users; `InvalidMetadata` is raised to a
 registered reporter updating their own entry.
+Raised by `reporter-registry`. The role, upgrade, stake, cap and batch errors
+are admin-only, so they reach maintainers rather than end users;
+`InvalidMetadata` is raised to a registered reporter updating their own entry.
 
 ### 1 `ReporterNotFound`
 
@@ -86,11 +151,37 @@ registered reporter updating their own entry.
 
 ### 2 `InvalidName`
 
-- **Raised by:** `set_reporter(reporter, role, name)`.
+- **Raised by:** `set_reporter(reporter, role, name)` and
+  `register_reporter(reporter, name)`.
+- **Raised by:** `set_reporter(reporter, role, name)`,
+  `batch_register(reporters)`.
 - **Cause:** `name` is empty or longer than 64 bytes. The limit is in UTF-8
   bytes, not characters, so a 30-character name in a non-Latin script can
   exceed it.
-- **Remedy:** Use a short, non-empty display name of 1 to 64 bytes.
+- **Remedy:** Use a short, non-empty display name of 1 to 64 bytes. In a batch
+  one bad name fails the whole call and nothing is written; the entry that
+  caused it is the one to fix.
+
+### 5 `InsufficientStake`
+
+- **Raised by:** `register_reporter(reporter, name)`.
+- **Cause:** The reporter's current balance of the configured native XLM SAC
+  is below `min_stake_stroops`.
+- **Remedy:** Fund the reporter with the required XLM balance, then retry.
+
+### 6 `InvalidStakeAmount`
+
+- **Raised by:** `set_stake_requirement(stake_asset, min_stake_stroops)`.
+- **Cause:** The configured minimum is negative.
+- **Remedy:** Set a non-negative number of stroops.
+
+### 7 `ReporterAlreadyRegistered`
+
+- **Raised by:** `register_reporter(reporter, name)`.
+- **Cause:** The address already has a role. Self-registration only creates a
+  new supply-poster entry and cannot replace an admin-managed role.
+- **Remedy:** Continue using the existing role, or ask the registry admin to
+  change it with `set_reporter`.
 
 ### 5 `InvalidMetadata`
 
@@ -102,6 +193,54 @@ registered reporter updating their own entry.
 - **Remedy:** Shorten the URL or omit those fields. The `name` field is a
   `Symbol` and is already limited to 32 bytes by the host.
 
+### 6 `InvalidConfirmWindow`
+
+- **Raised by:** `register_reporter(reporter, role, name, confirm_window_ledgers)`.
+- **Cause:** `confirm_window_ledgers` is `0`.
+- **Remedy:** Pass a positive confirmation window in ledgers.
+
+### 7 `PendingRegistrationNotFound`
+
+- **Raised by:** `confirm_registration(reporter)`.
+- **Cause:** No pending registration exists for `reporter`.
+- **Remedy:** Have the admin call `register_reporter` first.
+
+### 8 `RegistrationExpired`
+
+- **Raised by:** `confirm_registration(reporter)`.
+- **Cause:** The current ledger sequence is past `expires_at_ledger`.
+- **Remedy:** Clean up with `cleanup_expired_registration` and have the admin
+  re-register the reporter.
+### 6 `InvalidStakeAmount`
+
+- **Raised by:** `top_up_stake(reporter, amount)`, `reduce_stake(reporter, amount)`.
+- **Cause:** `amount` is zero or negative, or adding `amount` to the existing
+  stake would overflow `i128`.
+- **Remedy:** Pass a strictly positive `amount` within `i128` bounds.
+
+### 7 `InsufficientStake`
+
+- **Raised by:** `reduce_stake(reporter, amount)`.
+- **Cause:** `amount` exceeds the reporter's currently tracked stake (`stake_of`).
+- **Remedy:** Query `stake_of(reporter)` and reduce by at most that amount.
+
+### 8 `InvalidMaxReporters`
+
+- **Raised by:** `set_max_reporters(max)`.
+- **Cause:** `max` is zero, which would stop every asset taking a new
+  reporter.
+- **Remedy:** Set at least 1. The default is 20, above what the per-tier caps
+  allow, so a value only changes anything when the admin lowers it.
+
+### 9 `EmptyBatch`
+
+- **Raised by:** `batch_register(reporters)`.
+- **Cause:** the list is empty, so the call would do nothing. It is refused
+  rather than succeeding silently, because an empty list is usually a bug in
+  the caller that built it.
+- **Remedy:** Pass at least one entry. A single reporter can also go through
+  `set_reporter`.
+
 ## LedgerError
 
 Raised by `coverage-ledger`. Each write checks its errors in a fixed order, so
@@ -110,8 +249,15 @@ when several apply the caller sees the first:
 | Function | Order checked |
 | --- | --- |
 | `list_asset` | `NotAStellarAsset` (not a SAC), `AlreadyListed`, `NotAStellarAsset` (SAC name has no issuer) |
+| `post_supply` | auth, `NotSupplyPoster`, `AssetNotListed`, `InsufficientStake`, `InvalidAmount`, `FutureLedger`, `StaleLedger` |
+| `post_reserve` | auth, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+
 | `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` |
+| `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `LedgerTooOld`, `StaleLedger` |
+| `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters`, `TooManyReportersPerAsset` |
+| `is_covered_at` | `FutureLedger`, `Paused` |
 | `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+| `retract_reserve` | auth, `AssetNotListed`, `NotReporter`, `NoReportToRetract` |
 | `enable_native_supply` | auth, `AssetNotListed` |
 
 ### 1 `NotAStellarAsset`
@@ -150,7 +296,16 @@ when several apply the caller sees the first:
   It was never added, was revoked, or holds a different role. An auditor
   cannot post supply.
 - **Remedy:** Sign with the registered supply-poster account. A maintainer can
-  grant the role with `reporter-registry.set_reporter(poster, SupplyPoster, name)`.
+  grant the role with `reporter-registry.set_reporter(poster, SupplyPoster, name)`;
+  the poster must also keep the configured minimum XLM balance.
+
+### 16 `InsufficientStake`
+
+- **Raised by:** `post_supply`.
+- **Cause:** The poster is registered as a supply poster but its current XLM
+  balance is below the minimum configured in reporter-registry.
+- **Remedy:** Restore the required XLM balance and retry. The check is live on
+  every submission; registering once does not lock or custody the balance.
 
 ### 5 `NotReporter`
 
@@ -173,10 +328,12 @@ when several apply the caller sees the first:
 
 ### 7 `FutureLedger`
 
-- **Raised by:** `post_supply`.
-- **Cause:** `ledger` is greater than the ledger the transaction executes in.
-- **Remedy:** Post the sequence number of the ledger the supply was actually
-  computed at, which is in the past by the time the transaction lands.
+- **Raised by:** `post_supply`, `is_covered_at`.
+- **Cause:** A supplied sequence (`ledger` or `as_of_ledger`) is greater than
+  the ledger the transaction executes in.
+- **Remedy:** For `post_supply`, use the sequence number the supply was
+  computed at. For `is_covered_at`, query a ledger no later than the one the
+  transaction executes in.
 
 ### 8 `StaleLedger`
 
@@ -264,7 +421,7 @@ when several apply the caller sees the first:
   `upgrade_proposed` is the intended signal to raise an alarm before that
   ledger closes.
 
-### 16 `Paused`
+### 17 `Paused`
 
 - **Raised by:** `post_supply`, `post_reserve`, `is_covered`.
 - **Cause:** An admin called `pause()` and has not called `unpause()` yet.
@@ -275,6 +432,42 @@ when several apply the caller sees the first:
   show the paused state in the UI. `coverage`, `get_supply`, `get_reports`
   and `coverage_status` keep working while paused.
 
+### 18 `LedgerTooOld`
+
+- **Raised by:** `post_supply(poster, sac, amount, ledger, breakdown_hash)`.
+- **Cause:** `ledger` is more than 720 ledgers behind the current ledger
+  (approximately one hour at Stellar's usual five-second ledger cadence).
+  `post_supply` stores the submission time, so without this sequence bound an
+  old figure could be presented as a fresh snapshot.
+- **Remedy:** Recompute supply from a recent ledger and post its sequence.
+  Exactly 720 ledgers of lag is accepted.
+
+### 19 `NoReportToRetract`
+
+- **Raised by:** `retract_reserve(reporter, sac)`.
+- **Cause:** The authorised reporter has no stored report for the tier their
+  identity currently resolves to. This includes signing with a different
+  reporter address, even when another reporter has a report at that tier.
+- **Remedy:** Sign with the address that posted the report, and confirm the
+  report still exists at the reporter's current tier.
+
+### 20 `TooManyReportersPerAsset`
+
+- **Raised by:** `post_reserve`.
+- **Cause:** the asset already holds reports from
+  `reporter-registry.max_reporters()` distinct reporters, and this reporter
+  has no report for it at any tier. The default is 20. Before failing, the
+  ledger drops the entries of reporters who no longer count (revoked, or
+  moved to another role) at every tier, so this error means the cap is full
+  of reporters that still count. The asset's issuer occupies a slot like
+  anyone else, and a v0.1 report counts until its tier is migrated.
+- **Remedy:** A reporter already speaking for the asset can keep posting new
+  figures. A new reporter needs a maintainer to revoke one of the reporters
+  holding a slot, or to raise the cap with
+  `reporter-registry.set_max_reporters(n)`. With the default cap this error is
+  unreachable, because the per-tier caps allow at most twelve entries per
+  asset and `TooManyReporters` is checked first.
+
 ## VaultError
 
 Raised by `covered-vault`, the reference consumer. These are the errors end
@@ -282,7 +475,7 @@ users meet most.
 
 ### 1 `InvalidAmount`
 
-- **Raised by:** `deposit`, `withdraw`.
+- **Raised by:** `deposit`, `request_withdraw`.
 - **Cause:** `amount` is zero or negative. On `deposit` it is also raised if
   the new balance would overflow `i128`, which no real asset can reach.
 - **Remedy:** Send a positive amount in the asset's smallest unit.
@@ -311,21 +504,51 @@ users meet most.
 
 ### 3 `InsufficientBalance`
 
-- **Raised by:** `withdraw`.
+- **Raised by:** `request_withdraw`, `execute_withdraw`.
 - **Cause:** `amount` is more than the caller's balance in the vault.
 - **Remedy:** Read `balance(of)` and withdraw at most that.
+
+### 4 `InvalidThreshold`
+
+- **Raised by:** the vault constructor.
+- **Cause:** `large_withdrawal_threshold` is negative.
+- **Remedy:** Configure a non-negative amount in the asset's smallest unit.
+### 4 `NoPendingAdmin`
+
+- **Raised by:** `accept_admin`.
+- **Cause:** No admin transfer has been proposed with `propose_admin`.
+- **Remedy:** Have the current vault admin call `propose_admin(new_admin)` first.
+### 4 `InvalidDelay`
+
+- **Raised by:** `set_withdrawal_delay`, `request_withdraw`.
+- **Cause:** Adding the configured delay to the current ledger timestamp
+  overflows `u64`.
+- **Remedy:** Configure a delay that fits in the remaining timestamp range.
+
+### 5 `NoPendingWithdrawal`
+
+- **Raised by:** `execute_withdraw`.
+- **Cause:** The caller has no queued withdrawal.
+- **Remedy:** Call `request_withdraw` and execute it after its available time.
+
+### 6 `WithdrawalDelayNotElapsed`
+
+- **Raised by:** `execute_withdraw`.
+- **Cause:** The queued withdrawal's `available_at` is later than the current
+  ledger timestamp.
+- **Remedy:** Retry at or after `available_at`.
 
 ## Errors from the asset contract
 
 `covered-vault` moves tokens with the asset's SAC, so these SAC codes can
-surface from `deposit` and `withdraw`. They come from the Soroban host's
+surface from `deposit` and `execute_withdraw`. They come from the Soroban host's
 built-in token. The ones a vault user can hit:
 
 | N | SAC error | When | What to do |
 | ---: | --- | --- | --- |
 | 10 | `BalanceError` | `deposit` of more than the wallet holds | Deposit at most the wallet's token balance. |
 | 11 | `BalanceDeauthorizedError` | The issuer has not authorized, or has frozen, the account's trustline | Contact the issuer; the trustline must be authorized. |
-| 13 | `TrustlineMissingError` | The account has no trustline to the asset (`deposit` from, or `withdraw` to, it) | Add a trustline to the asset first. |
+| 13 | `TrustlineMissingError` | The account has no trustline to the asset (`deposit` from, or `execute_withdraw` to, it) | Add a trustline to the asset first. |
 
 The end-to-end test asserts that an oversized deposit fails with `#10` from
 the SAC.

@@ -4,6 +4,10 @@ extern crate std;
 
 use super::*;
 use coverage_ledger::{CoverageLedger, CoverageLedgerClient as LedgerClient};
+use plimsoll_types::{CoverageStatus, Role, PERSISTENT_EXTEND_TO};
+use coverage_ledger::{
+    CoverageLedger, CoverageLedgerClient as LedgerClient, MAX_SUPPLY_LEDGER_AGE,
+};
 use plimsoll_types::{Role, PERSISTENT_EXTEND_TO};
 use reporter_registry::{ReporterRegistry, ReporterRegistryClient};
 use soroban_sdk::{
@@ -226,9 +230,11 @@ fn unlisted_asset_is_not_covered() {
         .env
         .register_stellar_asset_contract_v2(Address::generate(&f.env))
         .address();
-    assert!(!f
-        .ledger
-        .is_covered(&other, &0, &u64::MAX, &Tier::Transcribed));
+    assert_eq!(
+        f.ledger
+            .is_covered(&other, &0, &u64::MAX, &Tier::Transcribed),
+        CoverageStatus::Uncovered
+    );
 }
 
 // ---- max_age --------------------------------------------------------------
@@ -243,15 +249,15 @@ fn report_freshness_uses_as_of_not_post_time() {
 }
 
 #[test]
-fn snapshot_freshness_uses_post_time_not_its_ledger() {
+fn snapshot_freshness_uses_post_time_within_the_ledger_age_bound() {
     let f = setup();
     advance(&f.env, 3 * DAY);
-    // Computed at a ledger two days back, but posted just now: fresh.
-    let two_days_ago = f.env.ledger().sequence() - (2 * DAY / 5) as u32;
-    f.supply_at(1_000 * UNIT, two_days_ago);
+    // At the maximum accepted ledger lag, a newly posted snapshot is fresh.
+    let oldest_accepted = f.env.ledger().sequence() - MAX_SUPPLY_LEDGER_AGE;
+    f.supply_at(1_000 * UNIT, oldest_accepted);
     f.reserve(&f.issuer, 1_000 * UNIT, f.now());
     assert!(f.gate.is_open());
-    // A day and a second later the snapshot is stale, whatever its ledger.
+    // A day and a second later the snapshot is stale based on its post time.
     advance(&f.env, DAY + 1);
     f.reserve(&f.issuer, 1_000 * UNIT, f.now());
     assert!(!f.gate.is_open());
@@ -276,9 +282,11 @@ fn weaker_tier_does_not_count() {
     f.supply(1_000 * UNIT);
     f.reserve(&f.transcriber, 1_000 * UNIT, f.now());
     assert!(!f.gate.is_open());
-    assert!(f
-        .ledger
-        .is_covered(&f.sac, &10_000, &DAY, &Tier::Transcribed));
+    assert_eq!(
+        f.ledger
+            .is_covered(&f.sac, &10_000, &DAY, &Tier::Transcribed),
+        CoverageStatus::Covered
+    );
 }
 
 #[test]
@@ -333,9 +341,11 @@ fn archived_report_is_restored_and_judged_by_its_age() {
     // The host restores the entry and the figure still counts...
     assert!(f.gate.is_open());
     // ...but it is now over 90 days old, so any shorter max_age refuses it.
-    assert!(!f
-        .ledger
-        .is_covered(&f.sac, &10_000, &(89 * DAY), &Tier::IssuerSigned));
+    assert_eq!(
+        f.ledger
+            .is_covered(&f.sac, &10_000, &(89 * DAY), &Tier::IssuerSigned),
+        CoverageStatus::Uncovered
+    );
 }
 
 // ---- the guide ------------------------------------------------------------

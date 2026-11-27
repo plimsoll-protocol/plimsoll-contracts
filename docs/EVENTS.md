@@ -44,6 +44,16 @@ Testnet: PUSD was listed in
 with `code = "PUSD"` and
 `issuer = GBIE3ANCRVCBWETUZXWYKRMP27LQVJHX757XXAQUT3LYHVTNFPPPXEY4`.
 
+### `asset_delisted`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `asset_delisted` | `Symbol` |
+| topic 1 | `sac` | `Address` (contract) |
+
+No data map. Raised once per listed asset actually removed by `batch_delist`;
+unlisted addresses passed in the batch are skipped without emitting an event.
+
 ### `supply_posted`
 
 | | Name | Type |
@@ -108,6 +118,21 @@ Testnet, issuer-signed, 10,200,000 PUSD as of 2026-10-05:
 [`2b41a94e…`](https://stellar.expert/explorer/testnet/tx/2b41a94efe4cf881ab097ce9b8e0e14f4cf90f9cc4fe38958b9b9d18e7bb9c0c).
 Auditor-signed, 10,150,000 as of 2026-10-04:
 [`b434db8d…`](https://stellar.expert/explorer/testnet/tx/b434db8d240502176ef22f066a1d16ad3e9a4e9c35a283d0e2837bede3a811ce).
+
+### `reserve_retracted`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reserve_retracted` | `Symbol` |
+| topic 1 | `sac` | `Address` (contract) |
+| topic 2 | `tier` | `Tier` (`u32`) |
+| data | `reporter` | `Address` (account) |
+| data | `as_of` | `u64` |
+
+Raised after the reporter's latest report at the resolved tier is removed.
+The reporter must be the one who posted that report. Events retain the
+retracted report's identity and effective date for off-chain history; the next
+qualifying report, if any, becomes eligible for coverage.
 
 ### `admin_transferred`
 
@@ -200,6 +225,9 @@ No data map. Raised by `cancel_upgrade`, which clears the pending proposal.
 
 Raised both when a reporter is first registered and when its role or name
 changes, so a reader should treat it as an upsert keyed on `reporter`.
+`set_reporter` raises one; `batch_register` raises one per entry, in entry
+order, so a reader sees the same events whether the admin onboarded reporters
+one at a time or in one transaction.
 
 Testnet: the indexer's supply poster was registered in
 [`f4681dc3…`](https://stellar.expert/explorer/testnet/tx/f4681dc3ea065f770a1e715f1f43ae08171e40ef9cb6228c791d12c45a5b1c34)
@@ -208,6 +236,53 @@ Testnet: the indexer's supply poster was registered in
 (`role = 1`), and the demo transcriber in
 [`6f9bce5a…`](https://stellar.expert/explorer/testnet/tx/6f9bce5af1b52dc53058c3d172591a36cb3b4e1839c726a56aca0a83ae3fd4ee)
 (`role = 2`).
+
+### `stake_requirement_set`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `stake_requirement_set` | `Symbol` |
+| topic 1 | `stake_asset` | `Address` (contract) |
+| data | `min_stake_stroops` | `i128` |
+
+Raised by `set_stake_requirement` whenever the admin changes the XLM SAC or
+minimum balance. Consumers should treat the event as the latest configured
+balance requirement; it does not represent XLM held by the registry.
+### `reporter_registration_proposed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reporter_registration_proposed` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `role` | `Role` (`u32`) |
+| data | `name` | `String` |
+| data | `expires_at_ledger` | `u32` |
+
+Raised by `register_reporter` when the admin creates a pending reporter entry.
+The reporter is not active until `confirm_registration` is called before
+`expires_at_ledger`.
+
+### `reporter_registration_confirmed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reporter_registration_confirmed` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `role` | `Role` (`u32`) |
+| data | `name` | `String` |
+
+Raised by `confirm_registration` when the reporter accepts their pending
+registration within the confirmation window.
+
+### `reporter_registration_expired`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reporter_registration_expired` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+
+No data map. Raised by `cleanup_expired_registration` when an expired pending
+entry is removed.
 
 ### `reporter_metadata_updated`
 
@@ -232,6 +307,19 @@ entry without a separate event; treat `reporter_revoked` as clearing it.
 | topic 0 | `reporter_revoked` | `Symbol` |
 | topic 1 | `reporter` | `Address` (account) |
 
+### `stake_changed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `stake_changed` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `old_stake` | `i128` |
+| data | `new_stake` | `i128` |
+
+Raised by `top_up_stake` and `reduce_stake` whenever a reporter's tracked stake
+is updated, and by `revoke` (with `new_stake = 0`) if the revoked reporter held
+a positive tracked stake.
+
 No data map. Revocation does not delete the reports a reporter already posted,
 but from that transaction on the coverage ledger stops counting them:
 `coverage`, `is_covered`, `get_report` and `get_reports` skip an auditor or
@@ -241,6 +329,50 @@ reader that wants to mirror `coverage` should do the same as the contract and
 treat the reporter's reports as inactive from this event until a later
 `reporter_set` gives the role back. The indexer leaves the history in place. No
 testnet example: nothing has been revoked on the demo deployment.
+
+### `max_reporters_set`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `max_reporters_set` | `Symbol` |
+| topic 1 | `max` | `u32` |
+
+No data map. Raised by `set_max_reporters` with the new registry-level cap on
+how many reporters one asset may hold. The cap itself is a view: read
+`max_reporters()` for the value in force, including the default of 20 that no
+event reports.
+### `dispute_quorum_set`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `dispute_quorum_set` | `Symbol` |
+| data | `quorum` | `u32` |
+
+Raised by `set_dispute_quorum` when the admin updates the number of distinct
+watchers required to reject a disputed report.
+
+### `report_disputed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `report_disputed` | `Symbol` |
+| topic 1 | `report_id` | `BytesN<32>` |
+| data | `watcher` | `Address` |
+| data | `dispute_count` | `u32` |
+
+Raised by `dispute_report` whenever a watcher records a new dispute against
+`report_id`.
+
+### `report_rejected`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `report_rejected` | `Symbol` |
+| topic 1 | `report_id` | `BytesN<32>` |
+| data | `dispute_count` | `u32` |
+
+Raised by `dispute_report` immediately after `report_disputed` when
+`dispute_count` reaches `dispute_quorum`.
 
 ### `admin_transferred`
 
@@ -268,6 +400,7 @@ ingest its events.
 | topic 0 | `deposited` | `Symbol` |
 | topic 1 | `from` | `Address` |
 | data | `amount` | `i128` |
+| data | `balance_after` | `i128` |
 
 Raised only after `is_covered` returned true, which is the point of the example:
 a deposit of an under-backed asset never reaches this event.
@@ -304,9 +437,46 @@ deposit has been made while coverage was failing.
 | topic 0 | `withdrawn` | `Symbol` |
 | topic 1 | `to` | `Address` |
 | data | `amount` | `i128` |
+| data | `balance_after` | `i128` |
 
-Withdrawal is not gated on coverage: a depositor can always leave. No testnet
-example yet.
+Withdrawal is not gated on coverage. Amounts above the configured threshold
+also require the vault's secondary approver. No testnet example yet.
+Raised when a queued withdrawal is executed. Withdrawal is not gated on
+coverage: a depositor can always leave once any configured delay has elapsed.
+No testnet example yet.
+
+### `withdrawal_queued`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `withdrawal_queued` | `Symbol` |
+| topic 1 | `to` | `Address` |
+| data | `amount` | `i128` |
+| data | `available_at` | `u64` |
+
+Raised by `request_withdraw` after the request is stored. A new request for the
+same address replaces the previous request and restarts the delay; changing the
+configured delay does not affect a request already queued.
+
+### `vault_admin_proposed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `vault_admin_proposed` | `Symbol` |
+| topic 1 | `new_admin` | `Address` |
+
+No data map. Raised by `propose_admin` when the current vault admin proposes a
+new admin address.
+
+### `vault_admin_transferred`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `vault_admin_transferred` | `Symbol` |
+| topic 1 | `old_admin` | `Address` |
+| topic 2 | `new_admin` | `Address` |
+
+No data map. Raised by `accept_admin` when the proposed admin accepts the role.
 
 ## Reading these events
 
@@ -333,8 +503,11 @@ pasted:
 | `supply_posted` | `AAAADwAAAA1zdXBwbHlfcG9zdGVkAAAA` |
 | `reserve_posted` | `AAAADwAAAA5yZXNlcnZlX3Bvc3RlZAAA` |
 | `reporter_set` | `AAAADwAAAAxyZXBvcnRlcl9zZXQ=` |
+| `stake_requirement_set` | `AAAADwAAABVzdGFrZV9yZXF1aXJlbWVudF9zZXQ=` |
+
 | `reporter_metadata_updated` | `AAAADwAAABlyZXBvcnRlcl9tZXRhZGF0YV91cGRhdGVk` |
 | `reporter_revoked` | `AAAADwAAABByZXBvcnRlcl9yZXZva2Vk` |
+| `max_reporters_set` | `AAAADwAAABFtYXhfcmVwb3J0ZXJzX3NldA==` |
 | `admin_transferred` | `AAAADwAAABFhZG1pbl90cmFuc2ZlcnJlZAAAAA==` |
 | `upgrade_proposed` | `AAAADwAAABB1cGdyYWRlX3Byb3Bvc2Vk` |
 | `upgrade_executed` | `AAAADwAAABB1cGdyYWRlX2V4ZWN1dGVk` |
