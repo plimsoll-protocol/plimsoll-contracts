@@ -31,8 +31,17 @@ jobs:
         run: python3 scripts/check_wasm_sizes.py
       - name: Shellcheck scripts
         run: shellcheck scripts/*.sh
+      - name: Security audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2026-0387
       - name: Test
         run: cargo test
+      # Every #[contracterror] variant needs a test that asserts it, so a dead
+      # or untested code cannot ship. See docs/ERRORS.md.
+      - name: Error-code coverage
+        run: python3 scripts/check_error_coverage.py
       # tests/e2e loads the wasm built above with contractimport!, so it is not
       # a default workspace member and runs only once that wasm exists.
       - name: Clippy (e2e)
@@ -61,6 +70,28 @@ jobs:
         run: cargo build
       - name: Test
         run: cargo test
+  error-codes:
+    name: error codes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The check reads the enums at the base revision, so it needs the
+          # other branch's commits as well as this one's.
+          fetch-depth: 0
+      - name: Fetch the base branch
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          git fetch --no-tags origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+      # The indexer, the app and third-party front ends decode errors by number,
+      # so a shipped variant keeps its number forever: new codes are appended
+      # and nothing is renumbered or removed (docs/ERRORS.md).
+      - name: Errors are append-only
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: python3 scripts/check_error_codes.py --base "origin/${BASE_REF}"
 
   coverage:
     name: coverage
@@ -83,3 +114,37 @@ jobs:
           name: coverage-lcov
           path: target/coverage/lcov.info
           if-no-files-found: error
+
+  wasm-size-report:
+    name: wasm size report
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/install-stellar-cli
+      - name: Build wasm (PR head)
+        run: stellar contract build --locked
+      - name: Measure PR wasm sizes
+        run: python3 scripts/wasm_size_diff.py measure /tmp/pr-sizes.json
+      - name: Build wasm (base branch)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --depth=1 origin "$BASE_SHA"
+          git worktree add /tmp/base-ref "$BASE_SHA"
+          mkdir -p /tmp/base-ref/scripts
+          cp scripts/wasm_size_diff.py /tmp/base-ref/scripts/wasm_size_diff.py
+          cd /tmp/base-ref
+          stellar contract build --locked
+          python3 scripts/wasm_size_diff.py measure /tmp/base-sizes.json
+      - name: Generate size report
+        run: python3 scripts/wasm_size_diff.py report /tmp/base-sizes.json /tmp/pr-sizes.json /tmp/size-report.md
+      - name: Comment on pull request
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/post_wasm_size_comment.sh "${{ github.repository }}" "${{ github.event.pull_request.number }}" /tmp/size-report.md

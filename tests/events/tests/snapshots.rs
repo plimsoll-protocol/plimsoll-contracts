@@ -412,14 +412,18 @@ fn covered_vault_event_schema_matches_the_snapshot() {
         &soroban_sdk::String::from_str(&f.env, "https://issuer.example/reserves.pdf"),
     );
 
+    let vault_admin = Address::generate(&f.env);
     let vault_id = f.env.register(
         CoveredVault,
         (
+            vault_admin,
+            Address::generate(&f.env),
             f.ledger_id.clone(),
             f.sac.clone(),
             10_000u32,
             DAY,
             Tier::IssuerSigned,
+            vault_admin,
         ),
     );
     let vault = CoveredVaultClient::new(&f.env, &vault_id);
@@ -431,11 +435,26 @@ fn covered_vault_event_schema_matches_the_snapshot() {
     vault.deposit(&user, &(40 * UNIT));
     events.extend(take(&f.env, &vault_id));
 
-    vault.withdraw(&user, &(10 * UNIT));
+    vault.request_withdraw(&user, &(10 * UNIT));
+    events.extend(take(&f.env, &vault_id));
+    vault.execute_withdraw(&user);
+    events.extend(take(&f.env, &vault_id));
+
+    let next_vault_admin = Address::generate(&f.env);
+    vault.propose_admin(&next_vault_admin);
+    events.extend(take(&f.env, &vault_id));
+
+    vault.accept_admin();
     events.extend(take(&f.env, &vault_id));
 
     let names: std::vec::Vec<&str> = events.iter().map(|event| event.name.as_str()).collect();
-    for expected in ["deposited", "withdrawn"] {
+    for expected in [
+        "deposited",
+        "withdrawn",
+        "vault_admin_proposed",
+        "vault_admin_transferred",
+    ] {
+    for expected in ["deposited", "withdrawal_queued", "withdrawn"] {
         assert!(
             names.contains(&expected),
             "the harness did not emit {expected}; events: {names:?}"

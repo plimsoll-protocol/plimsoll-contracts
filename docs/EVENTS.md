@@ -234,6 +234,42 @@ Testnet: the indexer's supply poster was registered in
 [`6f9bce5a…`](https://stellar.expert/explorer/testnet/tx/6f9bce5af1b52dc53058c3d172591a36cb3b4e1839c726a56aca0a83ae3fd4ee)
 (`role = 2`).
 
+### `reporter_registration_proposed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reporter_registration_proposed` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `role` | `Role` (`u32`) |
+| data | `name` | `String` |
+| data | `expires_at_ledger` | `u32` |
+
+Raised by `register_reporter` when the admin creates a pending reporter entry.
+The reporter is not active until `confirm_registration` is called before
+`expires_at_ledger`.
+
+### `reporter_registration_confirmed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reporter_registration_confirmed` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `role` | `Role` (`u32`) |
+| data | `name` | `String` |
+
+Raised by `confirm_registration` when the reporter accepts their pending
+registration within the confirmation window.
+
+### `reporter_registration_expired`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reporter_registration_expired` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+
+No data map. Raised by `cleanup_expired_registration` when an expired pending
+entry is removed.
+
 ### `reporter_metadata_updated`
 
 | | Name | Type |
@@ -256,6 +292,19 @@ entry without a separate event; treat `reporter_revoked` as clearing it.
 | --- | --- | --- |
 | topic 0 | `reporter_revoked` | `Symbol` |
 | topic 1 | `reporter` | `Address` (account) |
+
+### `stake_changed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `stake_changed` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `old_stake` | `i128` |
+| data | `new_stake` | `i128` |
+
+Raised by `top_up_stake` and `reduce_stake` whenever a reporter's tracked stake
+is updated, and by `revoke` (with `new_stake = 0`) if the revoked reporter held
+a positive tracked stake.
 
 No data map. Revocation does not delete the reports a reporter already posted,
 but from that transaction on the coverage ledger stops counting them:
@@ -326,6 +375,7 @@ ingest its events.
 | topic 0 | `deposited` | `Symbol` |
 | topic 1 | `from` | `Address` |
 | data | `amount` | `i128` |
+| data | `balance_after` | `i128` |
 
 Raised only after `is_covered` returned true, which is the point of the example:
 a deposit of an under-backed asset never reaches this event.
@@ -362,9 +412,44 @@ deposit has been made while coverage was failing.
 | topic 0 | `withdrawn` | `Symbol` |
 | topic 1 | `to` | `Address` |
 | data | `amount` | `i128` |
+| data | `balance_after` | `i128` |
 
-Withdrawal is not gated on coverage: a depositor can always leave. No testnet
-example yet.
+Raised when a queued withdrawal is executed. Withdrawal is not gated on
+coverage: a depositor can always leave once any configured delay has elapsed.
+No testnet example yet.
+
+### `withdrawal_queued`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `withdrawal_queued` | `Symbol` |
+| topic 1 | `to` | `Address` |
+| data | `amount` | `i128` |
+| data | `available_at` | `u64` |
+
+Raised by `request_withdraw` after the request is stored. A new request for the
+same address replaces the previous request and restarts the delay; changing the
+configured delay does not affect a request already queued.
+
+### `vault_admin_proposed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `vault_admin_proposed` | `Symbol` |
+| topic 1 | `new_admin` | `Address` |
+
+No data map. Raised by `propose_admin` when the current vault admin proposes a
+new admin address.
+
+### `vault_admin_transferred`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `vault_admin_transferred` | `Symbol` |
+| topic 1 | `old_admin` | `Address` |
+| topic 2 | `new_admin` | `Address` |
+
+No data map. Raised by `accept_admin` when the proposed admin accepts the role.
 
 ## Reading these events
 
