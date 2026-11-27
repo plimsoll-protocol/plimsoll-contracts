@@ -10,6 +10,8 @@ use plimsoll_types::{
     INSTANCE_THRESHOLD, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
 };
 use soroban_sdk::{
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    token::TokenClient, Address, Bytes, BytesN, ContractExecutable, Env, String, Symbol,
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
     Bytes, BytesN, ContractExecutable, Env, String, Symbol, Vec,
 };
@@ -27,6 +29,8 @@ const MAX_TAGS: u32 = 5;
 #[derive(Clone)]
 enum DataKey {
     Admin,
+    StakeAsset,
+    MinStakeStroops,
     Reporter(Address),
     ReporterDisplayName(Address),
 
@@ -77,6 +81,10 @@ pub enum RegistryError {
     InvalidName = 2,
     UpgradeNotProposed = 3,
     UpgradeDelayNotElapsed = 4,
+    InsufficientStake = 5,
+    InvalidStakeAmount = 6,
+    ReporterAlreadyRegistered = 7,
+
     InvalidMetadata = 5,
     InvalidQuorum = 6,
     DuplicateDispute = 7,
@@ -147,6 +155,10 @@ pub struct ReporterRevoked {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakeRequirementSet {
+    #[topic]
+    pub stake_asset: Address,
+    pub min_stake_stroops: i128,
 pub struct StakeChanged {
     #[topic]
     pub reporter: Address,
@@ -253,6 +265,24 @@ fn pending(env: &Env) -> Option<PendingUpgrade> {
     env.storage().instance().get(&DataKey::PendingUpgrade)
 }
 
+fn meets_minimum_stake(env: &Env, reporter: &Address) -> bool {
+    let minimum = env
+        .storage()
+        .instance()
+        .get::<_, i128>(&DataKey::MinStakeStroops)
+        .unwrap_or(0);
+    if minimum == 0 {
+        return true;
+    }
+    let asset = match env
+        .storage()
+        .instance()
+        .get::<_, Address>(&DataKey::StakeAsset)
+    {
+        Some(asset) => asset,
+        None => return false,
+    };
+    TokenClient::new(env, &asset).balance(reporter) >= minimum
 /// The admin's per-asset reporter cap, or `DEFAULT_MAX_REPORTERS_PER_ASSET`
 /// while it has not been set. A registry upgraded from v0.1 has no stored
 /// value, so it answers the default without a migration.
@@ -420,6 +450,66 @@ impl ReporterRegistry {
 
     pub fn admin(env: Env) -> Address {
         admin(&env)
+    }
+
+    pub fn set_stake_requirement(env: Env, stake_asset: Address, min_stake_stroops: i128) {
+        admin(&env).require_auth();
+        if min_stake_stroops < 0 {
+            panic_with_error!(&env, RegistryError::InvalidStakeAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::StakeAsset, &stake_asset);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinStakeStroops, &min_stake_stroops);
+        bump_instance(&env);
+        StakeRequirementSet {
+            stake_asset,
+            min_stake_stroops,
+        }
+        .publish(&env);
+    }
+
+    pub fn min_stake_stroops(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinStakeStroops)
+            .unwrap_or(0)
+    }
+
+    pub fn has_minimum_stake(env: Env, reporter: Address) -> bool {
+        meets_minimum_stake(&env, &reporter)
+    }
+
+    pub fn register_reporter(env: Env, reporter: Address, name: String) {
+        reporter.require_auth();
+        if name.is_empty() || name.len() > MAX_NAME_LEN {
+            panic_with_error!(&env, RegistryError::InvalidName);
+        }
+        let key = DataKey::Reporter(reporter.clone());
+        if env.storage().persistent().has(&key) {
+            panic_with_error!(&env, RegistryError::ReporterAlreadyRegistered);
+        }
+        if !meets_minimum_stake(&env, &reporter) {
+            panic_with_error!(&env, RegistryError::InsufficientStake);
+        }
+        let info = ReporterInfo {
+            role: Role::SupplyPoster,
+            name: name.clone(),
+            added_at: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&key, &info);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        bump_instance(&env);
+        ReporterSet {
+            reporter,
+            role: Role::SupplyPoster,
+            name,
+        }
+        .publish(&env);
     }
 
     /// Add a reporter, or change an existing reporter's role and name.

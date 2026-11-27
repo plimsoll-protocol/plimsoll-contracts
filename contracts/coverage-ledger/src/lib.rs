@@ -88,6 +88,8 @@ pub enum LedgerError {
     UpgradeNotProposed = 14,
     UpgradeDelayNotElapsed = 15,
     SelfAlias = 16,
+    InsufficientStake = 17,
+    Paused = 18,
     Paused = 17,
     LedgerTooOld = 18,
     NoReportToRetract = 19,
@@ -854,6 +856,10 @@ impl CoverageLedger {
         let role = RegistryClient::new(&env, &registry(&env)).role_of(&poster);
         if role != Some(Role::SupplyPoster) {
             panic_with_error!(&env, LedgerError::NotSupplyPoster);
+        }
+        require_listed(&env, &sac);
+        if !RegistryClient::new(&env, &registry(&env)).has_minimum_stake(&poster) {
+            panic_with_error!(&env, LedgerError::InsufficientStake);
         }
         ensure_listed(&env, &sac);
         if amount < 0 {

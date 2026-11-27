@@ -4,6 +4,9 @@
 
 use soroban_sdk::{contractclient, contracttype, Address, Bytes, BytesN, Env, String, Symbol};
 
+mod ledger_client;
+pub use ledger_client::is_covered;
+
 /// One day of ledgers at a 5-second close time.
 pub const DAY_IN_LEDGERS: u32 = 17_280;
 /// Extend a persistent entry once it has less than this many ledgers left.
@@ -287,6 +290,7 @@ pub fn coverage_bps(reserves: i128, supply: i128) -> u32 {
 #[contractclient(name = "RegistryClient")]
 pub trait RegistryInterface {
     fn role_of(env: Env, reporter: Address) -> Option<Role>;
+    fn has_minimum_stake(env: Env, reporter: Address) -> bool;
 
     /// The registry-level cap on how many reporters one asset may hold.
     fn max_reporters(env: Env) -> u32;

@@ -208,6 +208,8 @@ Decides who may speak. Holds no money.
 | Key | Storage | Value |
 | --- | --- | --- |
 | `Admin` | instance | `Address` |
+| `StakeAsset` | instance | `Address` (native XLM SAC) |
+| `MinStakeStroops` | instance | `i128` |
 | `MaxReporters` | instance | `u32` (default `20`) |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 | `DisputeQuorum` | instance | `u32` (absent means `1`) |
@@ -228,6 +230,10 @@ Decides who may speak. Holds no money.
 | `__constructor(admin: Address)` | — | — | — | — |
 | `admin()` | — | `Address` | — | — |
 | `set_reporter(reporter: Address, role: Role, name: String)` | admin | `()` | `InvalidName` (len 0 or > 64) | `reporter_set {reporter} role, name` |
+| `set_stake_requirement(stake_asset: Address, min_stake_stroops: i128)` | admin | `()` | `InvalidStakeAmount` | `stake_requirement_set {stake_asset} min_stake_stroops` |
+| `register_reporter(reporter: Address, name: String)` | reporter | `()` | `InvalidName`, `ReporterAlreadyRegistered`, `InsufficientStake` | `reporter_set {reporter} SupplyPoster, name` |
+| `has_minimum_stake(reporter: Address)` | — | `bool` | — | — |
+| `min_stake_stroops()` | — | `i128` | — | — |
 | `batch_register(reporters: Vec<ReporterEntry>)` | admin | `()` | `InvalidName`, `EmptyBatch` | one `reporter_set {reporter} role, name` per entry |
 | `register_reporter(reporter: Address, role: Role, name: String, confirm_window_ledgers: u32)` | admin | `()` | `InvalidName` (len 0 or > 64), `InvalidConfirmWindow` (0) | `reporter_registration_proposed {reporter} role, name, expires_at_ledger` |
 | `confirm_registration(reporter: Address)` | reporter | `()` | `PendingRegistrationNotFound`, `RegistrationExpired` | `reporter_registration_confirmed {reporter} role, name` |
@@ -258,6 +264,23 @@ Decides who may speak. Holds no money.
 | `cancel_upgrade()` | admin | `()` | `UpgradeNotProposed` | `upgrade_cancelled {wasm_hash}` |
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
 
+Rules:
+
+- `set_stake_requirement` configures the native XLM Stellar Asset Contract and
+  a non-negative minimum balance in stroops. The admin supplies the network's
+  native XLM SAC address.
+- `register_reporter` lets an address register itself only as a `SupplyPoster`.
+  It requires the reporter's auth, rejects an address already in the registry,
+  and checks that its current XLM balance meets `MinStakeStroops`.
+- `has_minimum_stake` compares the reporter's current XLM balance with the
+  configured minimum. `coverage-ledger.post_supply` checks it on every post,
+  so a reporter that later falls below the requirement cannot submit a
+  snapshot. This is a balance requirement, not a transfer or custody of XLM.
+
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
+`UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`,
+`InsufficientStake = 5`, `InvalidStakeAmount = 6`,
+`ReporterAlreadyRegistered = 7`.
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`.
 The display name is stored separately from `ReporterInfo` so existing reporter
 records remain decodable. Soroban `Symbol` values are limited to 32 characters.
@@ -384,6 +407,7 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | --- | --- | --- | --- | --- |
 | `__constructor(admin: Address, registry: Address)` | — | — | — | — |
 | `list_asset(sac: Address)` | none (permissionless) | `AssetRecord` | `NotAStellarAsset`, `AlreadyListed` | `asset_listed {sac} code, issuer` |
+| `post_supply(poster: Address, sac: Address, amount: i128, ledger: u32, breakdown_hash: BytesN<32>)` | poster | `()` | `NotSupplyPoster`, `AssetNotListed`, `InsufficientStake`, `InvalidAmount`, `FutureLedger`, `StaleLedger` | `supply_posted {sac} amount, ledger, breakdown_hash, poster` |
 | `batch_delist(assets: Vec<Address>)` | admin | `()` | — | `asset_delisted {sac}` for each listed asset removed |
 | `post_supply(poster: Address, sac: Address, amount: i128, ledger: u32, breakdown_hash: BytesN<32>)` | poster | `()` | `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger`, `LedgerTooOld` | `supply_posted {sac} amount, ledger, breakdown_hash, poster` |
 | `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `ImplausibleAmount`, `TooManyReporters`, `TooManyReportersPerAsset` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
@@ -438,6 +462,8 @@ Rules:
   forward per reporter: `as_of` strictly greater than that reporter's stored
   report at that tier, and not in the future. Another reporter's report at the
   same tier does not make a figure stale.
+- Before accepting a supply snapshot, `post_supply` verifies that the poster
+  still has at least the reporter registry's configured native XLM balance.
 - A supply snapshot's `ledger` must be no more than 720 ledgers behind the
   current ledger. This is approximately one hour at Stellar's usual five
   seconds per ledger; the sequence-number bound avoids treating a fresh
@@ -581,6 +607,10 @@ Errors (`LedgerError`): `NotAStellarAsset = 1`, `AlreadyListed = 2`,
 `AssetNotListed = 3`, `NotSupplyPoster = 4`, `NotReporter = 5`,
 `InvalidAmount = 6`, `FutureLedger = 7`, `StaleLedger = 8`,
 `FutureTimestamp = 9`, `StaleReport = 10`, `InvalidUri = 11`,
+`ImplausibleAmount = 12`, `TooManyReporters = 13`,
+`UpgradeNotProposed = 14`, `UpgradeDelayNotElapsed = 15`,
+`SelfAlias = 16`, `InsufficientStake = 17`.
+
 `ImplausibleAmount = 12`, `TooManyReporters = 13`, `UpgradeNotProposed = 14`,
 `UpgradeDelayNotElapsed = 15`, `SelfAlias = 16`, `Paused = 17`,
 `LedgerTooOld = 18`, `NoReportToRetract = 19`,
@@ -707,6 +737,16 @@ rollback should be followed by each reporter posting again.
 ## covered-vault (reference consumer)
 
 A deposit vault for one asset that refuses deposits while the asset is not
+covered. Withdrawals are not coverage-gated, but withdrawals above the
+configured threshold also require an approver.
+
+| Function | Auth | Returns | Errors | Event |
+| --- | --- | --- | --- | --- |
+| `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier, approver: Address, large_withdrawal_threshold: i128)` | — | — | `InvalidThreshold` | — |
+| `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount` |
+| `withdraw(to: Address, amount: i128)` | to and approver when `amount > large_withdrawal_threshold` | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
+
+| `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
 covered. The deployer supplies the vault admin, who can configure a withdrawal delay.
 Withdrawals are never gated on coverage, but when the delay is non-zero they
 must be requested before they can be executed.
@@ -770,6 +810,12 @@ gate, so a front end can show whether the vault is open without simulating a
 deposit and reading a `NotCovered` failure. It says nothing about the
 depositor's balance or authorisation.
 
+`withdraw` always requires `to` authorization. When `amount` is strictly
+greater than `large_withdrawal_threshold`, it also requires authorization from
+the configured `approver`; an amount equal to the threshold needs only `to`.
+The threshold must be non-negative. Withdrawals remain available regardless
+of coverage status.
+
 `deposit` publishes `deposited` once the balance is written, then asks
 `is_covered` again with the same config and publishes `coverage_dropped
 {asset}` if that post-deposit answer is `false`. The second read is fresh
@@ -788,6 +834,8 @@ therefore cannot learn about a coverage drop from a refused deposit, only from
 the `coverage_dropped` event on one that succeeds, or from `can_deposit()`.
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
+`InsufficientBalance = 3`, `InvalidThreshold = 4`. Causes and remedies, and the
+asset-contract errors a vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 `InsufficientBalance = 3`, `NoPendingAdmin = 4`. Causes and remedies, and the asset-contract errors a
 vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 `InsufficientBalance = 3`, `InvalidDelay = 4`, `NoPendingWithdrawal = 5`,
@@ -806,6 +854,7 @@ errors a vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 | Front end checks a reporter may post before asking them to sign | `coverage-ledger.can_post_report` |
 | Reporter sets a human-readable name shown by the dashboard | `reporter-registry.set_reporter_name`, `get_reporter_name` |
 | Maintainer onboards an auditor / transcriber / poster | `reporter-registry.set_reporter` |
+| Supply poster self-registers | `reporter-registry.register_reporter` (minimum XLM balance required) |
 | Maintainer onboards several reporters at once | `reporter-registry.batch_register` |
 | Maintainer caps how many reporters an asset may hold | `reporter-registry.set_max_reporters` |
 | Maintainer removes a bad actor | `reporter-registry.revoke` (their reports stop counting at once) |

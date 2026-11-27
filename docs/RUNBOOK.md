@@ -684,17 +684,50 @@ Roles: `1` Auditor (tier 3 reports), `2` Transcriber (tier 1 reports), `3`
 Supply poster. Issuers need no role: an asset's issuer account always posts at
 tier 2. Names are 1 to 64 characters.
 
+Supply posters must keep the configured minimum native XLM balance. The
+registry does not hold or lock their XLM; the ledger checks the poster's
+current balance each time it accepts a supply snapshot. Admin-managed
+`set_reporter` remains available for all roles, but it does not bypass this
+live balance check.
+
+To configure the minimum (with a multisig admin, run this call through section
+8), set `MIN_STAKE_STROOPS` to a non-negative amount in stroops:
+
+```bash
+export MIN_STAKE_STROOPS=100000000
+export NATIVE_XLM_SAC=$(stellar contract id asset --asset native --network "$NETWORK")
+stellar contract invoke --id "$REGISTRY" --source "$ADMIN_IDENTITY" --network "$NETWORK" -- \
+   set_stake_requirement --stake_asset "$NATIVE_XLM_SAC" --min_stake_stroops "$MIN_STAKE_STROOPS"
+```
+
+The `stake_requirement_set` event confirms the SAC address and minimum. Read
+back the amount with `min_stake_stroops` before onboarding posters.
+
 1. Confirm the address has no role yet:
 
    ```bash
-   export REPORTER=G<...>      # the reporter's account
+   export REPORTER_IDENTITY=plimsoll-indexer
+   export REPORTER=$(stellar keys address "$REPORTER_IDENTITY")
    stellar contract invoke --id "$REGISTRY" --source "$ADMIN_IDENTITY" --network "$NETWORK" --send=no -- role_of --reporter "$REPORTER"
    ```
 
    Expected: `null`. Any other value means the reporter already has a role.
    `set_reporter` would change it while keeping its original `added_at`.
 
-2. Grant the role (with a multisig admin, run this call through section 8):
+2. For a supply poster, register the role directly from that account after
+   funding it with at least `MIN_STAKE_STROOPS` native XLM:
+
+   ```bash
+   stellar contract invoke --id "$REGISTRY" --source "$REPORTER_IDENTITY" --network "$NETWORK" -- \
+     register_reporter --reporter "$REPORTER" --name "Example Indexer"
+   ```
+
+   Expected: `ReporterSet` with role `3`. Verify `has_minimum_stake` returns
+   `true`. If the admin registers a supply poster with `set_reporter` instead,
+   it must still meet the balance requirement before posting.
+
+3. For an auditor or transcriber, grant the role as admin (with a multisig
+   admin, run this call through section 8):
 
    ```bash
    stellar contract invoke --id "$REGISTRY" --source "$ADMIN_IDENTITY" --network "$NETWORK" -- \
@@ -707,16 +740,16 @@ tier 2. Names are 1 to 64 characters.
    📅 <REGISTRY> - Success - Event: ReporterSet (reporter_set), reporter: "<REPORTER>", role: 1, name: "Example Auditor"
    ```
 
-3. **Verify:**
+4. **Verify** the role and reporter record:
 
    ```bash
    stellar contract invoke --id "$REGISTRY" --source "$ADMIN_IDENTITY" --network "$NETWORK" --send=no -- role_of --reporter "$REPORTER"
    stellar contract invoke --id "$REGISTRY" --source "$ADMIN_IDENTITY" --network "$NETWORK" --send=no -- get_reporter --reporter "$REPORTER"
    ```
 
-   Expected: `1`, then `{"added_at":<unix time>,"name":"Example Auditor","role":1}`.
+   Expected: the selected role (`1`, `2`, or `3`), then its reporter record.
 
-4. Optional: once the reporter has posted a figure, confirm it counts:
+5. Optional: once the reporter has posted a figure, confirm it counts:
 
    ```bash
    stellar contract invoke --id "$LEDGER" --source "$ADMIN_IDENTITY" --network "$NETWORK" --send=no -- get_reports --sac "$SAC"
@@ -833,6 +866,10 @@ Revoking an address with no role fails with `Error(Contract, #1)`
 | reporter-registry | `Error(Contract, #2)` `InvalidName` | `set_reporter` or `batch_register` name empty or over 64 characters. |
 | reporter-registry | `Error(Contract, #3)` `UpgradeNotProposed` | `execute_upgrade` or `cancel_upgrade` with nothing pending. |
 | reporter-registry | `Error(Contract, #4)` `UpgradeDelayNotElapsed` | `execute_upgrade` before `executable_at_ledger`. |
+| reporter-registry | `Error(Contract, #5)` `InsufficientStake` | `register_reporter` balance is below the configured minimum. |
+| reporter-registry | `Error(Contract, #6)` `InvalidStakeAmount` | The configured minimum is negative. |
+| reporter-registry | `Error(Contract, #7)` `ReporterAlreadyRegistered` | `register_reporter` called for an address that already has a role. |
+| coverage-ledger | `Error(Contract, #16)` `InsufficientStake` | A supply poster's current XLM balance is below the minimum. |
 | reporter-registry | `Error(Contract, #5)` `InvalidMaxReporters` | `set_max_reporters` with `0`. |
 | reporter-registry | `Error(Contract, #6)` `EmptyBatch` | `batch_register` with an empty list. |
 | coverage-ledger | `Error(Contract, #14)` `UpgradeNotProposed` | As registry `#3`. |

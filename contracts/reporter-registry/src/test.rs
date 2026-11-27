@@ -4,6 +4,10 @@ use super::*;
 #[allow(unused_imports)]
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
+    token::StellarAssetClient,
+    Address, Bytes, BytesN, Env, IntoVal, String,
+
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
     xdr::ContractEventBody,
     Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
 };
@@ -68,6 +72,84 @@ fn set_reporter_emits_event() {
         &String::from_str(&env, "indexer"),
     );
     assert_eq!(env.events().all().events().len(), 1);
+}
+
+#[test]
+fn stake_requirement_is_configurable() {
+    let (env, _admin, client) = setup();
+    let stake_asset = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    client.set_stake_requirement(&stake_asset, &100);
+    assert_eq!(client.min_stake_stroops(), 100);
+}
+
+#[test]
+fn negative_stake_requirement_is_rejected() {
+    let (env, _admin, client) = setup();
+    let stake_asset = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    assert_eq!(
+        client.try_set_stake_requirement(&stake_asset, &-1),
+        Err(Ok(RegistryError::InvalidStakeAmount.into()))
+    );
+}
+
+#[test]
+fn register_reporter_rejects_insufficient_stake() {
+    let (env, _admin, client) = setup();
+    let stake = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    client.set_stake_requirement(&stake.address(), &100);
+    let reporter = Address::generate(&env);
+    StellarAssetClient::new(&env, &stake.address()).mint(&reporter, &99);
+
+    assert_eq!(
+        client.try_register_reporter(&reporter, &String::from_str(&env, "indexer")),
+        Err(Ok(RegistryError::InsufficientStake.into()))
+    );
+    assert_eq!(client.role_of(&reporter), None);
+}
+
+#[test]
+fn register_reporter_adds_a_supply_poster_with_sufficient_stake() {
+    let (env, _admin, client) = setup();
+    let stake = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    client.set_stake_requirement(&stake.address(), &100);
+    let reporter = Address::generate(&env);
+    StellarAssetClient::new(&env, &stake.address()).mint(&reporter, &100);
+
+    client.register_reporter(&reporter, &String::from_str(&env, "indexer"));
+
+    assert_eq!(client.role_of(&reporter), Some(Role::SupplyPoster));
+    assert!(client.has_minimum_stake(&reporter));
+}
+
+#[test]
+fn registered_reporter_must_keep_the_minimum_balance() {
+    let (env, _admin, client) = setup();
+    let stake = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    let stake_asset = stake.address();
+    client.set_stake_requirement(&stake_asset, &100);
+    let reporter = Address::generate(&env);
+    let token = StellarAssetClient::new(&env, &stake_asset);
+    token.mint(&reporter, &100);
+    client.register_reporter(&reporter, &String::from_str(&env, "indexer"));
+    token.burn(&reporter, &1);
+
+    assert!(!client.has_minimum_stake(&reporter));
+}
+
+#[test]
+fn reporter_cannot_self_register_twice() {
+    let (env, _admin, client) = setup();
+    let reporter = Address::generate(&env);
+    client.register_reporter(&reporter, &String::from_str(&env, "indexer"));
+
+    assert_eq!(
+        client.try_register_reporter(&reporter, &String::from_str(&env, "again")),
+        Err(Ok(RegistryError::ReporterAlreadyRegistered.into()))
+    );
 }
 
 #[test]

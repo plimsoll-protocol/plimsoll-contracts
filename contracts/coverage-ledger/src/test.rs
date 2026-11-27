@@ -6,6 +6,7 @@ use plimsoll_types::CoverageStatus;
 use reporter_registry::{ReporterRegistry, ReporterRegistryClient};
 use soroban_sdk::{
     testutils::{Address as _, AuthorizedFunction, Events, Ledger as _, MockAuth, MockAuthInvoke},
+    token::StellarAssetClient,
     xdr::{ContractEventBody, ScErrorCode, ScErrorType},
     Address, Bytes, BytesN, Env, Error, IntoVal, Map, String, Symbol, TryFromVal, Val,
 };
@@ -354,6 +355,22 @@ fn post_supply_requires_poster_role() {
         .ledger
         .try_post_supply(&f.auditor, &f.sac, &UNIT, &990, &hash(&f.env, 1));
     assert_eq!(res, Err(Ok(LedgerError::NotSupplyPoster.into())));
+}
+
+#[test]
+fn post_supply_rejects_poster_below_minimum_stake() {
+    let f = listed();
+    let stake = f
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&f.env));
+    f.registry.set_stake_requirement(&stake.address(), &100);
+    StellarAssetClient::new(&f.env, &stake.address()).mint(&f.poster, &99);
+
+    let res = f
+        .ledger
+        .try_post_supply(&f.poster, &f.sac, &UNIT, &990, &hash(&f.env, 1));
+    assert_eq!(res, Err(Ok(LedgerError::InsufficientStake.into())));
+    assert_eq!(f.ledger.get_supply(&f.sac), None);
 }
 
 #[test]

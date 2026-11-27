@@ -24,6 +24,16 @@ one that comes back. In practice:
   Stellar Asset Contract (SAC). If the transfer fails, the caller sees the
   **SAC's** error code, not a vault code. See
   [Errors from the asset contract](#errors-from-the-asset-contract).
+- `coverage-ledger` calls `reporter-registry.role_of` and
+  `has_minimum_stake`, and the SAC's `name` and `balance`. On a correctly
+  configured deployment these calls succeed; an insufficient balance returns
+  the ledger's `InsufficientStake` error.
+- `coverage-ledger.is_covered` and `coverage` never fail. Every reason an
+  asset might not qualify comes back as `false` or `None`.
+
+- `coverage-ledger` calls `reporter-registry.role_of` and the SAC's `name`,
+  but neither can fail on a valid deployment, so a ledger call only ever
+  fails with a ledger code.
 - `coverage-ledger` calls `reporter-registry.role_of`,
   `reporter-registry.max_reporters` and the SAC's `name`, but none of them can
   fail on a valid deployment, so a ledger call only ever fails with a ledger
@@ -81,6 +91,13 @@ entries today: every code below is covered.
 | ---: | --- | --- | --- |
 | 1 | [`ReporterNotFound`](#1-reporternotfound) | [`NotAStellarAsset`](#1-notastellarasset) | [`InvalidAmount`](#1-invalidamount) |
 | 2 | [`InvalidName`](#2-invalidname) | [`AlreadyListed`](#2-alreadylisted) | [`NotCovered`](#2-notcovered) |
+| 3 | | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
+| 4 | | | [`InvalidThreshold`](#4-invalidthreshold) |
+| 4 | | [`NotSupplyPoster`](#4-notsupplyposter) | |
+| 5 | [`InsufficientStake`](#5-insufficientstake) | [`NotReporter`](#5-notreporter) | |
+| 6 | [`InvalidStakeAmount`](#6-invalidstakeamount) | [`InvalidAmount`](#6-invalidamount) | |
+| 7 | [`ReporterAlreadyRegistered`](#7-reporteralreadyregistered) | [`FutureLedger`](#7-futureledger) | |
+
 | 3 | `UpgradeNotProposed` | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
 | 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | [`NoPendingAdmin`](#4-nopendingadmin) |
 | 5 | [`InvalidMetadata`](#5-invalidmetadata) | [`NotReporter`](#5-notreporter) | |
@@ -101,6 +118,8 @@ entries today: every code below is covered.
 | 11 | | [`InvalidUri`](#11-invaliduri) | |
 | 12 | | [`ImplausibleAmount`](#12-implausibleamount) | |
 | 13 | | [`TooManyReporters`](#13-toomanyreporters) | |
+| 16 | | [`InsufficientStake`](#16-insufficientstake) | |
+
 | 14 | | [`UpgradeNotProposed`](#14-upgradenotproposed) | |
 | 15 | | [`UpgradeDelayNotElapsed`](#15-upgradedelaynotelapsed) | |
 | 16 | | [`SelfAlias`](#16-selfalias) | |
@@ -111,6 +130,12 @@ entries today: every code below is covered.
 
 ## RegistryError
 
+Raised by `reporter-registry`. These errors can be returned by admin
+configuration or reporter self-registration.
+
+Raised by `reporter-registry`. The role and upgrade errors are admin-only, so
+they reach maintainers rather than end users; `InvalidMetadata` is raised to a
+registered reporter updating their own entry.
 Raised by `reporter-registry`. The role, upgrade, stake, cap and batch errors
 are admin-only, so they reach maintainers rather than end users;
 `InvalidMetadata` is raised to a registered reporter updating their own entry.
@@ -126,6 +151,8 @@ are admin-only, so they reach maintainers rather than end users;
 
 ### 2 `InvalidName`
 
+- **Raised by:** `set_reporter(reporter, role, name)` and
+  `register_reporter(reporter, name)`.
 - **Raised by:** `set_reporter(reporter, role, name)`,
   `batch_register(reporters)`.
 - **Cause:** `name` is empty or longer than 64 bytes. The limit is in UTF-8
@@ -134,6 +161,27 @@ are admin-only, so they reach maintainers rather than end users;
 - **Remedy:** Use a short, non-empty display name of 1 to 64 bytes. In a batch
   one bad name fails the whole call and nothing is written; the entry that
   caused it is the one to fix.
+
+### 5 `InsufficientStake`
+
+- **Raised by:** `register_reporter(reporter, name)`.
+- **Cause:** The reporter's current balance of the configured native XLM SAC
+  is below `min_stake_stroops`.
+- **Remedy:** Fund the reporter with the required XLM balance, then retry.
+
+### 6 `InvalidStakeAmount`
+
+- **Raised by:** `set_stake_requirement(stake_asset, min_stake_stroops)`.
+- **Cause:** The configured minimum is negative.
+- **Remedy:** Set a non-negative number of stroops.
+
+### 7 `ReporterAlreadyRegistered`
+
+- **Raised by:** `register_reporter(reporter, name)`.
+- **Cause:** The address already has a role. Self-registration only creates a
+  new supply-poster entry and cannot replace an admin-managed role.
+- **Remedy:** Continue using the existing role, or ask the registry admin to
+  change it with `set_reporter`.
 
 ### 5 `InvalidMetadata`
 
@@ -201,6 +249,10 @@ when several apply the caller sees the first:
 | Function | Order checked |
 | --- | --- |
 | `list_asset` | `NotAStellarAsset` (not a SAC), `AlreadyListed`, `NotAStellarAsset` (SAC name has no issuer) |
+| `post_supply` | auth, `NotSupplyPoster`, `AssetNotListed`, `InsufficientStake`, `InvalidAmount`, `FutureLedger`, `StaleLedger` |
+| `post_reserve` | auth, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+
+| `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` |
 | `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `LedgerTooOld`, `StaleLedger` |
 | `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters`, `TooManyReportersPerAsset` |
 | `is_covered_at` | `FutureLedger`, `Paused` |
@@ -244,7 +296,16 @@ when several apply the caller sees the first:
   It was never added, was revoked, or holds a different role. An auditor
   cannot post supply.
 - **Remedy:** Sign with the registered supply-poster account. A maintainer can
-  grant the role with `reporter-registry.set_reporter(poster, SupplyPoster, name)`.
+  grant the role with `reporter-registry.set_reporter(poster, SupplyPoster, name)`;
+  the poster must also keep the configured minimum XLM balance.
+
+### 16 `InsufficientStake`
+
+- **Raised by:** `post_supply`.
+- **Cause:** The poster is registered as a supply poster but its current XLM
+  balance is below the minimum configured in reporter-registry.
+- **Remedy:** Restore the required XLM balance and retry. The check is live on
+  every submission; registering once does not lock or custody the balance.
 
 ### 5 `NotReporter`
 
@@ -447,6 +508,11 @@ users meet most.
 - **Cause:** `amount` is more than the caller's balance in the vault.
 - **Remedy:** Read `balance(of)` and withdraw at most that.
 
+### 4 `InvalidThreshold`
+
+- **Raised by:** the vault constructor.
+- **Cause:** `large_withdrawal_threshold` is negative.
+- **Remedy:** Configure a non-negative amount in the asset's smallest unit.
 ### 4 `NoPendingAdmin`
 
 - **Raised by:** `accept_admin`.
