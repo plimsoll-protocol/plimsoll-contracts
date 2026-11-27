@@ -1478,3 +1478,4 @@ fn reporter_name_leaves_the_existing_entry_unchanged_and_is_removed_on_revoke() 
     assert_eq!(client.get_reporter_name(&who), None);
 }
 }
+}

@@ -213,6 +213,7 @@ Decides who may speak. Holds no money.
 | `MaxReporters` | instance | `u32` (default `20`) |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 | `DisputeQuorum` | instance | `u32` (absent means `1`) |
+| `MaxReporters` | instance | `u32` (default `20`) |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
 | `ReporterIndex` | persistent, TTL extended on write and read | `Vec<Address>`: every registered reporter, in the order they were first indexed |
 
@@ -242,6 +243,7 @@ Decides who may speak. Holds no money.
 | `cleanup_expired_registration(reporter: Address)` | — | `bool` | — | `reporter_registration_expired {reporter}` (when expired) |
 | `get_pending_reporter(reporter: Address)` | — | `Option<PendingReporter>` | — | — |
 | `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `reporter_revoked {reporter}` |
+| `batch_register(reporters: Vec<ReporterEntry>)` | admin | `()` | `InvalidName`, `EmptyBatch` | one `reporter_set {reporter} role, name` per entry |
 | `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `stake_changed {reporter} old_stake, new_stake` (if stake > 0), `reporter_revoked {reporter}` |
 | `top_up_stake(reporter: Address, amount: i128)` | admin | `i128` (new stake) | `ReporterNotFound`, `InvalidStakeAmount` | `stake_changed {reporter} old_stake, new_stake` |
 | `reduce_stake(reporter: Address, amount: i128)` | admin | `i128` (new stake) | `ReporterNotFound`, `InvalidStakeAmount`, `InsufficientStake` | `stake_changed {reporter} old_stake, new_stake` |
@@ -262,6 +264,8 @@ Decides who may speak. Holds no money.
 | `dispute_quorum()` | — | `u32` | — | — |
 | `dispute_report(watcher: Address, report_id: BytesN<32>)` | watcher | `DisputeStatus` | `DuplicateDispute`, `DisputeAlreadyRejected`, `HoldingPeriodElapsed` | `report_disputed {report_id} watcher, dispute_count`, plus `report_rejected {report_id} dispute_count` when quorum is met |
 | `get_dispute(report_id: BytesN<32>)` | — | `Option<DisputeRecord>` | — | — |
+| `max_reporters()` | — | `u32` | — | — |
+| `set_max_reporters(max: u32)` | admin | `()` | `InvalidMaxReporters` (zero) | `max_reporters_set {max}` |
 | `transfer_admin(new_admin: Address)` | admin and new_admin | `()` | — | `admin_transferred {new_admin}` |
 | `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
 | `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
@@ -354,6 +358,8 @@ for `post_reserve` or `post_supply`. Expired pending entries are cleaned up by
 `cleanup_expired_registration`, which removes the entry and emits
 `reporter_registration_expired`.
 `InvalidMetadata = 5`, `InvalidStakeAmount = 6`, `InsufficientStake = 7`.
+`InvalidMetadata = 5`, `InvalidStakeAmount = 6`, `InsufficientStake = 7`,
+`InvalidMaxReporters = 8`, `EmptyBatch = 9`.
 
 Reporter metadata is optional and lives under its own `Metadata(Address)` key,
 not in `ReporterInfo`. A reporter registered before metadata existed therefore

@@ -12,6 +12,9 @@ use plimsoll_types::{
     PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
     PendingReporter, PendingUpgrade, ReporterInfo, ReporterMetadata, Role, INSTANCE_EXTEND_TO,
     INSTANCE_THRESHOLD, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
+    PendingUpgrade, ReporterEntry, ReporterInfo, ReporterMetadata, Role,
+    DEFAULT_MAX_REPORTERS_PER_ASSET, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, PERSISTENT_EXTEND_TO,
+    PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype,
@@ -102,6 +105,7 @@ pub struct DisputeRecord {
     /// list would change the encoding of every existing reporter entry.
     Score(Address),
     DisplayName(Address),
+    MaxReporters,
 }
 
 #[contracterror]
@@ -822,8 +826,32 @@ impl ReporterRegistry {
             reporter,
             role: pending.role,
             name: pending.name,
+        require_valid_name(&env, &name);
+        write_reporter(&env, &reporter, role, &name);
+        bump_instance(&env);
+    }
+
+    /// Add or change many reporters in one transaction, so populating the
+    /// registry does not take a transaction per reporter.
+    ///
+    /// Every entry is validated before the first one is written, and a failed
+    /// call reverts the whole transaction, so the batch is all or nothing. The
+    /// per-asset cap (`max_reporters`) is not a registry rule -- the registry
+    /// does not know which assets a reporter will speak for -- so the coverage
+    /// ledger applies it at post time and a batch cannot register its way past
+    /// it.
+    pub fn batch_register(env: Env, reporters: Vec<ReporterEntry>) {
+        admin(&env).require_auth();
+        if reporters.is_empty() {
+            panic_with_error!(&env, RegistryError::EmptyBatch);
         }
-        .publish(&env);
+        for entry in reporters.iter() {
+            require_valid_name(&env, &entry.name);
+        }
+        for entry in reporters.iter() {
+            write_reporter(&env, &entry.reporter, entry.role, &entry.name);
+        }
+        bump_instance(&env);
     }
 
     /// Remove an expired pending registration. Returns true if an expired

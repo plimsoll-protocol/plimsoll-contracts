@@ -359,6 +359,9 @@ pub trait RegistryInterface {
     /// The registry-level cap on how many reporters one asset may hold.
     fn max_reporters(env: Env) -> u32;
     fn record_report_outcome(env: Env, ledger: Address, reporter: Address, accepted: bool);
+
+    /// The registry-level cap on how many reporters one asset may hold.
+    fn max_reporters(env: Env) -> u32;
 }
 
 /// The subset of a SEP-41 token that coverage-ledger calls when an asset opts
