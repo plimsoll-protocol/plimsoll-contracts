@@ -418,6 +418,7 @@ fn covered_vault_event_schema_matches_the_snapshot() {
             10_000u32,
             DAY,
             Tier::IssuerSigned,
+            vault_admin,
         ),
     );
     let vault = CoveredVaultClient::new(&f.env, &vault_id);
@@ -434,7 +435,20 @@ fn covered_vault_event_schema_matches_the_snapshot() {
     vault.execute_withdraw(&user);
     events.extend(take(&f.env, &vault_id));
 
+    let next_vault_admin = Address::generate(&f.env);
+    vault.propose_admin(&next_vault_admin);
+    events.extend(take(&f.env, &vault_id));
+
+    vault.accept_admin();
+    events.extend(take(&f.env, &vault_id));
+
     let names: std::vec::Vec<&str> = events.iter().map(|event| event.name.as_str()).collect();
+    for expected in [
+        "deposited",
+        "withdrawn",
+        "vault_admin_proposed",
+        "vault_admin_transferred",
+    ] {
     for expected in ["deposited", "withdrawal_queued", "withdrawn"] {
         assert!(
             names.contains(&expected),

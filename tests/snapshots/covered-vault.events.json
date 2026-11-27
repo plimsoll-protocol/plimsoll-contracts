@@ -33,6 +33,23 @@
         "amount": 100000000,
         "balance_after": 300000000
       }
+    },
+    {
+      "name": "vault_admin_proposed",
+      "topics": [
+        "vault_admin_proposed",
+        "<account>"
+      ],
+      "data": {}
+    },
+    {
+      "name": "vault_admin_transferred",
+      "topics": [
+        "vault_admin_transferred",
+        "<account>",
+        "<account>"
+      ],
+      "data": {}
     }
   ]
 }

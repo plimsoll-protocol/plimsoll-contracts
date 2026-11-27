@@ -29,6 +29,8 @@ enum DataKey {
     Admin,
     Config,
     Balance(Address),
+    Admin,
+    PendingAdmin,
     PendingAdmin,
     Admin,
     WithdrawalDelay,
@@ -102,6 +104,11 @@ pub struct VaultAdminProposed {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultAdminTransferred {
     #[topic]
+    pub old_admin: Address,
+    #[topic]
+    pub new_admin: Address,
+}
+
     pub new_admin: Address,
 }
 
@@ -118,6 +125,19 @@ pub struct ThresholdsUpdated {
 
 #[contract]
 pub struct CoveredVault;
+
+fn admin(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .expect("admin is set in the constructor")
+}
+
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
+}
 
 fn config(env: &Env) -> VaultConfig {
     env.storage()
@@ -206,9 +226,8 @@ impl CoveredVault {
             min_tier,
         };
         env.storage().instance().set(&DataKey::Config, &cfg);
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        bump_instance(&env);
     }
 
     pub fn admin(env: Env) -> Address {
@@ -410,6 +429,40 @@ impl CoveredVault {
     }
 
     pub fn admin(env: Env) -> Address {
+        admin(&env)
+    }
+
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Propose a new admin for the vault's two-step admin transfer.
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        admin(&env).require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        bump_instance(&env);
+        VaultAdminProposed { new_admin }.publish(&env);
+    }
+
+    /// Accept a pending admin proposal, transferring admin control.
+    pub fn accept_admin(env: Env) {
+        let new_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, VaultError::NoPendingAdmin));
+        new_admin.require_auth();
+        let old_admin = admin(&env);
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        bump_instance(&env);
+        VaultAdminTransferred {
+            old_admin,
+            new_admin,
+        }
+        .publish(&env);
         config(&env).admin
     }
 

@@ -2927,6 +2927,90 @@ fn a_failing_native_query_without_a_snapshot_is_uncovered() {
     );
 }
 
+#[test]
+fn pending_reporter_cannot_post_reserve_until_confirmed() {
+    let f = listed();
+    let candidate = Address::generate(&f.env);
+    let name = String::from_str(&f.env, "PendingAudit");
+    f.registry
+        .register_reporter(&candidate, &Role::Auditor, &name, &50);
+
+    // Pending entry is not usable for post_reserve.
+    let res = f.ledger.try_post_reserve(
+        &candidate,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 9),
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::NotReporter.into())));
+
+    // After confirmation, posting succeeds.
+    f.registry.confirm_registration(&candidate);
+    let tier = f.ledger.post_reserve(
+        &candidate,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 9),
+        &uri(&f.env),
+    );
+    assert_eq!(tier, Tier::AuditorSigned);
+}
+
+#[test]
+fn stress_test_ttl_bump_across_100_sequential_operations() {
+    use plimsoll_types::{DAY_IN_LEDGERS, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD};
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let f = listed();
+    let mut seq = f.env.ledger().sequence();
+    let mut ts = T0;
+    let step_ledgers = 61 * DAY_IN_LEDGERS;
+    let step_seconds = 60u64;
+
+    let supply_key = DataKey::Supply(f.sac.clone());
+    let report_key = DataKey::ReportBy(f.sac.clone(), Tier::AuditorSigned, f.auditor.clone());
+
+    for i in 1..=100u32 {
+        seq += step_ledgers;
+        ts += step_seconds;
+        f.env.ledger().set_sequence_number(seq);
+        f.env.ledger().set_timestamp(ts);
+
+        f.ledger
+            .post_supply(&f.poster, &f.sac, &(100 * UNIT), &seq, &hash(&f.env, 1));
+        let supply_ttl = f.env.as_contract(&f.ledger.address, || {
+            f.env.storage().persistent().get_ttl(&supply_key)
+        });
+        assert!(
+            supply_ttl >= PERSISTENT_THRESHOLD,
+            "supply TTL not extended on iteration {i}: {supply_ttl}"
+        );
+        assert_eq!(supply_ttl, PERSISTENT_EXTEND_TO);
+
+        f.ledger.post_reserve(
+            &f.auditor,
+            &f.sac,
+            &(100 * UNIT),
+            &ts,
+            &hash(&f.env, 2),
+            &uri(&f.env),
+        );
+        let report_ttl = f.env.as_contract(&f.ledger.address, || {
+            f.env.storage().persistent().get_ttl(&report_key)
+        });
+        assert!(
+            report_ttl >= PERSISTENT_THRESHOLD,
+            "report TTL not extended on iteration {i}: {report_ttl}"
+        );
+        assert_eq!(report_ttl, PERSISTENT_EXTEND_TO);
+
+        assert!(f
+            .ledger
+            .is_covered(&f.sac, &10_000, &3_600, &Tier::AuditorSigned));
+    }
 fn try_post_now(f: &Fixture, who: &Address) -> Result<(), LedgerError> {
     match f
         .ledger

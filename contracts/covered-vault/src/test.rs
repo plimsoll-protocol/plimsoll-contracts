@@ -17,6 +17,7 @@ const UNIT: i128 = 10_000_000;
 
 struct Fixture {
     env: Env,
+    admin: Address,
     vault: CoveredVaultClient<'static>,
     ledger: LedgerClient<'static>,
     token: TokenClient<'static>,
@@ -65,6 +66,7 @@ fn setup() -> Fixture {
             10_000u32,
             DAY,
             Tier::IssuerSigned,
+            admin.clone(),
             vault_admin.clone(),
         ),
     );
@@ -76,6 +78,7 @@ fn setup() -> Fixture {
 
     Fixture {
         env,
+        admin,
         vault,
         ledger,
         token,
@@ -322,6 +325,7 @@ fn deposit_emits_coverage_dropped_when_post_deposit_coverage_is_false() {
         .address();
     let admin = Address::generate(&env);
     let ledger = env.register(FlakyLedger, ());
+    let vault_admin = Address::generate(&env);
     let vault_id = env.register(
         CoveredVault,
         (
@@ -332,6 +336,7 @@ fn deposit_emits_coverage_dropped_when_post_deposit_coverage_is_false() {
             10_000u32,
             DAY,
             Tier::IssuerSigned,
+            vault_admin,
         ),
     );
     let vault = CoveredVaultClient::new(&env, &vault_id);
@@ -535,6 +540,53 @@ fn deposit_propagates_a_paused_ledger() {
 }
 
 #[test]
+fn propose_and_accept_admin_transfers_role_and_emits_events() {
+    let f = setup();
+    assert_eq!(f.vault.admin(), f.admin);
+    assert_eq!(f.vault.pending_admin(), None);
+
+    let next_admin = Address::generate(&f.env);
+    f.vault.propose_admin(&next_admin);
+    assert_eq!(f.env.auths()[0].0, f.admin);
+
+    let events = f.env.events().all().filter_by_contract(&f.vault.address);
+    let (topics, data) = decode_event(&f.env, events.events().last().unwrap());
+    let expected_topics: Vec<Val> = (
+        Symbol::new(&f.env, "vault_admin_proposed"),
+        next_admin.clone(),
+    )
+        .into_val(&f.env);
+    assert_eq!(topics, expected_topics);
+    assert!(Map::<Symbol, Val>::try_from_val(&f.env, &data)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.vault.pending_admin(), Some(next_admin.clone()));
+    assert_eq!(f.vault.admin(), f.admin);
+
+    f.vault.accept_admin();
+    assert_eq!(f.env.auths()[0].0, next_admin);
+
+    let events = f.env.events().all().filter_by_contract(&f.vault.address);
+    let (topics, data) = decode_event(&f.env, events.events().last().unwrap());
+    let expected_topics: Vec<Val> = (
+        Symbol::new(&f.env, "vault_admin_transferred"),
+        f.admin.clone(),
+        next_admin.clone(),
+    )
+        .into_val(&f.env);
+    assert_eq!(topics, expected_topics);
+    assert!(Map::<Symbol, Val>::try_from_val(&f.env, &data)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.vault.admin(), next_admin);
+    assert_eq!(f.vault.pending_admin(), None);
+}
+
+#[test]
+fn accept_admin_without_proposal_fails() {
+    let f = setup();
+    let res = f.vault.try_accept_admin();
+    assert_eq!(res, Err(Ok(VaultError::NoPendingAdmin.into())));
 fn propose_and_accept_vault_admin_transfers_the_role() {
     let f = setup();
     let new_admin = Address::generate(&f.env);

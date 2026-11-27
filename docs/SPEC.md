@@ -128,6 +128,9 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 
 | Entry | Extended by |
 | --- | --- |
+| `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `register_reporter`, `confirm_registration`, `cleanup_expired_registration`, `revoke` |
+| `Reporter(Address)` (persistent) | `set_reporter` / `confirm_registration` (write), `get_reporter` / `role_of` (read) |
+| `PendingReporter(Address)` (persistent) | `register_reporter` (write), `get_pending_reporter` (read), `confirm_registration` / `cleanup_expired_registration` / `revoke` (remove) |
 | `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `revoke`, `top_up_stake`, `reduce_stake` |
 | `Reporter(Address)` (persistent) | `set_reporter` (write), `get_reporter` / `role_of` (read) |
 | `Metadata(Address)` (persistent) | `update_reporter_metadata` (write), `get_reporter_metadata` (read) |
@@ -151,6 +154,8 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 
 | Entry | Extended by |
 | --- | --- |
+| `Config`, `Admin`, `PendingAdmin` (instance) | `__constructor`, `deposit`, `withdraw`, `propose_admin`, `accept_admin` |
+| `Balance(Address)` (persistent) | `deposit` (write), `withdraw` (write), `balance` (read) |
 | `Config`, `Admin`, `WithdrawalDelay` (instance) | `__constructor`, `deposit`, `request_withdraw`, `execute_withdraw`, `set_withdrawal_delay` |
 | `Balance(Address)` (persistent) | `deposit`, `execute_withdraw` (write), `balance`, `request_withdraw` (read) |
 | `PendingWithdrawal(Address)` (persistent) | `request_withdraw` (write), `execute_withdraw` (read and remove) |
@@ -198,6 +203,7 @@ Decides who may speak. Holds no money.
 | --- | --- | --- |
 | `Admin` | instance | `Address` |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
+| `PendingReporter(Address)` | persistent, TTL extended on write and read | `PendingReporter` |
 | `Metadata(Address)` | persistent, TTL extended on write and read | `ReporterMetadata` |
 | `DisplayName(Address)` | persistent, TTL extended on write and read | `Symbol` |
 | `Stake(Address)` | persistent, TTL extended on write and read | `i128` |
@@ -210,6 +216,11 @@ Decides who may speak. Holds no money.
 | `__constructor(admin: Address)` | — | — | — | — |
 | `admin()` | — | `Address` | — | — |
 | `set_reporter(reporter: Address, role: Role, name: String)` | admin | `()` | `InvalidName` (len 0 or > 64) | `reporter_set {reporter} role, name` |
+| `register_reporter(reporter: Address, role: Role, name: String, confirm_window_ledgers: u32)` | admin | `()` | `InvalidName` (len 0 or > 64), `InvalidConfirmWindow` (0) | `reporter_registration_proposed {reporter} role, name, expires_at_ledger` |
+| `confirm_registration(reporter: Address)` | reporter | `()` | `PendingRegistrationNotFound`, `RegistrationExpired` | `reporter_registration_confirmed {reporter} role, name` |
+| `cleanup_expired_registration(reporter: Address)` | — | `bool` | — | `reporter_registration_expired {reporter}` (when expired) |
+| `get_pending_reporter(reporter: Address)` | — | `Option<PendingReporter>` | — | — |
+| `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `reporter_revoked {reporter}` |
 | `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `stake_changed {reporter} old_stake, new_stake` (if stake > 0), `reporter_revoked {reporter}` |
 | `top_up_stake(reporter: Address, amount: i128)` | admin | `i128` (new stake) | `ReporterNotFound`, `InvalidStakeAmount` | `stake_changed {reporter} old_stake, new_stake` |
 | `reduce_stake(reporter: Address, amount: i128)` | admin | `i128` (new stake) | `ReporterNotFound`, `InvalidStakeAmount`, `InsufficientStake` | `stake_changed {reporter} old_stake, new_stake` |
@@ -227,6 +238,18 @@ Decides who may speak. Holds no money.
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
+`UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`, `InvalidMetadata = 5`,
+`InvalidConfirmWindow = 6`, `PendingRegistrationNotFound = 7`,
+`RegistrationExpired = 8`.
+
+Two-factor reporter activation splits onboarding into `register_reporter`
+(admin creates a `PendingReporter` entry expiring at `current_ledger +
+confirm_window_ledgers`) and `confirm_registration` (the reporter themselves
+accepts before expiry, moving the entry to `Reporter(Address)`). While pending,
+`role_of` and `get_reporter` return `None`, so pending entries cannot be used
+for `post_reserve` or `post_supply`. Expired pending entries are cleaned up by
+`cleanup_expired_registration`, which removes the entry and emits
+`reporter_registration_expired`.
 `InvalidMetadata = 5`, `InvalidStakeAmount = 6`, `InsufficientStake = 7`.
 
 Reporter metadata is optional and lives under its own `Metadata(Address)` key,
@@ -621,6 +644,7 @@ must be requested before they can be executed.
 | Function | Auth | Returns | Errors | Event |
 | --- | --- | --- | --- | --- |
 | `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier, admin: Address)` | — | — | — | — |
+| `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount`, `coverage_dropped {asset}` |
 | `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount` |
 | `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
 | `__constructor(admin: Address, ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
@@ -633,6 +657,10 @@ must be requested before they can be executed.
 | `config()` | — | `VaultConfig` | — | — |
 | `admin()` | — | `Address` | — | — |
 | `can_deposit()` | — | `bool` | — | — |
+| `admin()` | — | `Address` | — | — |
+| `pending_admin()` | — | `Option<Address>` | — | — |
+| `propose_admin(new_admin: Address)` | admin | `()` | — | `vault_admin_proposed {new_admin}` |
+| `accept_admin()` | pending admin | `()` | `NoPendingAdmin` | `vault_admin_transferred {old_admin, new_admin}` |
 | `update_thresholds(min_bps: u32, max_age: u64, min_tier: Tier)` | admin | `()` | — | `thresholds_updated old_min_bps, old_max_age, old_min_tier, new_min_bps, new_max_age, new_min_tier` |
 
 `can_deposit()` returns true exactly when a positive deposit would pass the
@@ -680,6 +708,8 @@ therefore cannot learn about a coverage drop from a refused deposit, only from
 the `coverage_dropped` event on one that succeeds, or from `can_deposit()`.
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
+`InsufficientBalance = 3`, `NoPendingAdmin = 4`. Causes and remedies, and the asset-contract errors a
+vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 `InsufficientBalance = 3`, `InvalidDelay = 4`, `NoPendingWithdrawal = 5`,
 `WithdrawalDelayNotElapsed = 6`. Causes and remedies, and the asset-contract
 errors a vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).

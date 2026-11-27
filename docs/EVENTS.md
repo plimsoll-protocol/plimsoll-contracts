@@ -224,6 +224,42 @@ Testnet: the indexer's supply poster was registered in
 [`6f9bce5a…`](https://stellar.expert/explorer/testnet/tx/6f9bce5af1b52dc53058c3d172591a36cb3b4e1839c726a56aca0a83ae3fd4ee)
 (`role = 2`).
 
+### `reporter_registration_proposed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reporter_registration_proposed` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `role` | `Role` (`u32`) |
+| data | `name` | `String` |
+| data | `expires_at_ledger` | `u32` |
+
+Raised by `register_reporter` when the admin creates a pending reporter entry.
+The reporter is not active until `confirm_registration` is called before
+`expires_at_ledger`.
+
+### `reporter_registration_confirmed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reporter_registration_confirmed` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `role` | `Role` (`u32`) |
+| data | `name` | `String` |
+
+Raised by `confirm_registration` when the reporter accepts their pending
+registration within the confirmation window.
+
+### `reporter_registration_expired`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reporter_registration_expired` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+
+No data map. Raised by `cleanup_expired_registration` when an expired pending
+entry is removed.
+
 ### `reporter_metadata_updated`
 
 | | Name | Type |
@@ -351,6 +387,26 @@ No testnet example yet.
 Raised by `request_withdraw` after the request is stored. A new request for the
 same address replaces the previous request and restarts the delay; changing the
 configured delay does not affect a request already queued.
+
+### `vault_admin_proposed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `vault_admin_proposed` | `Symbol` |
+| topic 1 | `new_admin` | `Address` |
+
+No data map. Raised by `propose_admin` when the current vault admin proposes a
+new admin address.
+
+### `vault_admin_transferred`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `vault_admin_transferred` | `Symbol` |
+| topic 1 | `old_admin` | `Address` |
+| topic 2 | `new_admin` | `Address` |
+
+No data map. Raised by `accept_admin` when the proposed admin accepts the role.
 
 ## Reading these events
 

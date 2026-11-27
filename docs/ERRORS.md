@@ -80,6 +80,11 @@ entries today: every code below is covered.
 | 1 | [`ReporterNotFound`](#1-reporternotfound) | [`NotAStellarAsset`](#1-notastellarasset) | [`InvalidAmount`](#1-invalidamount) |
 | 2 | [`InvalidName`](#2-invalidname) | [`AlreadyListed`](#2-alreadylisted) | [`NotCovered`](#2-notcovered) |
 | 3 | `UpgradeNotProposed` | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
+| 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | [`NoPendingAdmin`](#4-nopendingadmin) |
+| 5 | [`InvalidMetadata`](#5-invalidmetadata) | [`NotReporter`](#5-notreporter) | |
+| 6 | [`InvalidConfirmWindow`](#6-invalidconfirmwindow) | [`InvalidAmount`](#6-invalidamount) | |
+| 7 | [`PendingRegistrationNotFound`](#7-pendingregistrationnotfound) | [`FutureLedger`](#7-futureledger) | |
+| 8 | [`RegistrationExpired`](#8-registrationexpired) | [`StaleLedger`](#8-staleledger) | |
 | 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | [`InvalidDelay`](#4-invaliddelay) |
 | 5 | [`InvalidMetadata`](#5-invalidmetadata) | [`NotReporter`](#5-notreporter) | [`NoPendingWithdrawal`](#5-nopendingwithdrawal) |
 | 6 | | [`InvalidAmount`](#6-invalidamount) | [`WithdrawalDelayNotElapsed`](#6-withdrawaldelaynotelapsed) |
@@ -130,6 +135,24 @@ registered reporter updating their own entry.
 - **Remedy:** Shorten the URL or omit those fields. The `name` field is a
   `Symbol` and is already limited to 32 bytes by the host.
 
+### 6 `InvalidConfirmWindow`
+
+- **Raised by:** `register_reporter(reporter, role, name, confirm_window_ledgers)`.
+- **Cause:** `confirm_window_ledgers` is `0`.
+- **Remedy:** Pass a positive confirmation window in ledgers.
+
+### 7 `PendingRegistrationNotFound`
+
+- **Raised by:** `confirm_registration(reporter)`.
+- **Cause:** No pending registration exists for `reporter`.
+- **Remedy:** Have the admin call `register_reporter` first.
+
+### 8 `RegistrationExpired`
+
+- **Raised by:** `confirm_registration(reporter)`.
+- **Cause:** The current ledger sequence is past `expires_at_ledger`.
+- **Remedy:** Clean up with `cleanup_expired_registration` and have the admin
+  re-register the reporter.
 ### 6 `InvalidStakeAmount`
 
 - **Raised by:** `top_up_stake(reporter, amount)`, `reduce_stake(reporter, amount)`.
@@ -379,6 +402,11 @@ users meet most.
 - **Cause:** `amount` is more than the caller's balance in the vault.
 - **Remedy:** Read `balance(of)` and withdraw at most that.
 
+### 4 `NoPendingAdmin`
+
+- **Raised by:** `accept_admin`.
+- **Cause:** No admin transfer has been proposed with `propose_admin`.
+- **Remedy:** Have the current vault admin call `propose_admin(new_admin)` first.
 ### 4 `InvalidDelay`
 
 - **Raised by:** `set_withdrawal_delay`, `request_withdraw`.
