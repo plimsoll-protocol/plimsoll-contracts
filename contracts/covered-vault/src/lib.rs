@@ -157,6 +157,9 @@ pub struct ThresholdsUpdated {
     pub new_min_tier: Tier,
 }
 
+    pub new_admin: Address,
+}
+
 #[contract]
 pub struct CoveredVault;
 
@@ -231,6 +234,11 @@ fn pending_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::PendingAdmin)
 }
 
+fn pending_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::PendingAdmin)
+}
+
+/// The coverage check `deposit` makes, with the stored config.
 fn is_open(env: &Env, cfg: &VaultConfig) -> bool {
     CoverageLedgerClient::new(env, &cfg.ledger).is_covered(
         &cfg.asset,
@@ -673,6 +681,7 @@ impl CoveredVault {
             new_admin,
         }
         .publish(&env);
+    pub fn admin(env: Env) -> Address {
         config(&env).admin
     }
 

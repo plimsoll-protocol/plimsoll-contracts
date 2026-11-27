@@ -74,6 +74,7 @@ fn setup() -> Fixture {
     let vault_id = env.register(
         CoveredVault,
         (
+            admin.clone(),
             ledger_id,
             sac.clone(),
             10_000u32,
