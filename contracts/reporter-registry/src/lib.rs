@@ -110,6 +110,9 @@ pub struct DisputeRecord {
     DisplayName(Address),
     MaxReporters,
     PendingReporter(Address),
+    /// Every reporter ever registered and not since revoked, in registration
+    /// order. Append-only, so stored keys keep their discriminants.
+    Reporters,
 }
 
 #[contracterror]
@@ -347,6 +350,27 @@ fn read_index(env: &Env) -> Vec<Address> {
 
 fn write_index(env: &Env, index: &Vec<Address>) {
     let key = DataKey::ReporterIndex;
+/// Addresses the registry has entries for, in the order they were first
+/// registered. Reading an existing index extends its TTL like `get_reporter`.
+fn reporters(env: &Env) -> Vec<Address> {
+    let key = DataKey::Reporters;
+    let index = env.storage().persistent().get::<_, Vec<Address>>(&key);
+    if index.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+    }
+    index.unwrap_or_else(|| Vec::new(env))
+}
+
+/// Store the index, or remove it when the last reporter is revoked so an empty
+/// registry leaves nothing behind.
+fn write_reporters(env: &Env, index: &Vec<Address>) {
+    let key = DataKey::Reporters;
+    if index.is_empty() {
+        env.storage().persistent().remove(&key);
+        return;
+    }
     env.storage().persistent().set(&key, index);
     env.storage()
         .persistent()
@@ -830,6 +854,12 @@ impl ReporterRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        // A role or name change for an existing reporter is not a new entry.
+        let mut index = reporters(&env);
+        if !index.contains(&reporter) {
+            index.push_back(reporter.clone());
+            write_reporters(&env, &index);
+        }
         bump_instance(&env);
         ReporterRegistrationConfirmed {
             reporter,
@@ -1055,6 +1085,36 @@ impl ReporterRegistry {
                 .publish(&env);
             }
         }
+        let mut index = reporters(&env);
+        if let Some(position) = index
+            .iter()
+            .position(|indexed| indexed == reporter)
+            .and_then(|i| u32::try_from(i).ok())
+        {
+            index.remove(position);
+            write_reporters(&env, &index);
+        }
+        bump_instance(&env);
+        ReporterRevoked { reporter }.publish(&env);
+    }
+
+    /// How many reporters are currently active: every indexed address whose
+    /// `Reporter(Address)` entry is still present. `revoke` drops the address
+    /// from the index in the same transaction, so the two normally agree;
+    /// checking the entry as well keeps the answer tied to the registrations
+    /// if an index entry ever outlives its reporter.
+    pub fn reporter_count(env: Env) -> u32 {
+        let mut count = 0u32;
+        for reporter in reporters(&env).iter() {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::Reporter(reporter))
+            {
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Top up a registered reporter's tracked stake by `amount`.

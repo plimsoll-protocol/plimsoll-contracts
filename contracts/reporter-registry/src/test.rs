@@ -1480,4 +1480,88 @@ fn reporter_name_leaves_the_existing_entry_unchanged_and_is_removed_on_revoke() 
     assert_eq!(client.get_reporter_name(&who), None);
 }
 }
+
+// ---- reporter_count (#119) ------------------------------------------------
+
+#[test]
+fn reporter_count_starts_at_zero() {
+    let (_env, _admin, client) = setup();
+    assert_eq!(client.reporter_count(), 0);
+}
+
+#[test]
+fn reporter_count_counts_each_active_reporter_once() {
+    let (env, _admin, client) = setup();
+    let first = registered(&env, &client);
+    registered(&env, &client);
+    registered(&env, &client);
+    assert_eq!(client.reporter_count(), 3);
+
+    // Changing an existing reporter's role and name is not a second reporter.
+    client.set_reporter(
+        &first,
+        &Role::Transcriber,
+        &String::from_str(&env, "Acme, now transcribing"),
+    );
+    assert_eq!(client.reporter_count(), 3);
+}
+
+#[test]
+fn reporter_count_drops_when_a_reporter_is_revoked() {
+    let (env, _admin, client) = setup();
+    let first = registered(&env, &client);
+    registered(&env, &client);
+    assert_eq!(client.reporter_count(), 2);
+
+    client.revoke(&first);
+    assert_eq!(client.reporter_count(), 1);
+}
+
+#[test]
+fn reporter_count_reaches_zero_when_everyone_is_revoked() {
+    let (env, _admin, client) = setup();
+    let first = registered(&env, &client);
+    let second = registered(&env, &client);
+
+    client.revoke(&first);
+    client.revoke(&second);
+    assert_eq!(client.reporter_count(), 0);
+
+    // The index is removed with the last entry, and re-adding starts it again
+    // without a duplicate.
+    client.set_reporter(&first, &Role::Auditor, &String::from_str(&env, "back"));
+    assert_eq!(client.reporter_count(), 1);
+}
+
+#[test]
+fn reporter_count_ignores_metadata_and_stake_activity() {
+    let (env, _admin, client) = setup();
+    let who = registered(&env, &client);
+    client.update_reporter_metadata(
+        &who,
+        &Some(Symbol::new(&env, "Acme")),
+        &Some(String::from_str(&env, "https://acme.example")),
+        &None,
+    );
+    client.top_up_stake(&who, &1_000);
+    client.set_reporter_name(&who, &Symbol::new(&env, "Acme"));
+
+    assert_eq!(client.reporter_count(), 1);
+}
+
+// The count follows the entries, not the index: a registration that is gone
+// (however it went) is not active.
+#[test]
+fn reporter_count_ignores_an_index_entry_with_no_registration() {
+    let (env, _admin, client) = setup();
+    let who = registered(&env, &client);
+    assert_eq!(client.reporter_count(), 1);
+
+    let contract = client.address.clone();
+    let key = DataKey::Reporter(who.clone());
+    env.as_contract(&contract, || {
+        env.storage().persistent().remove(&key);
+    });
+
+    assert_eq!(client.reporter_count(), 0);
 }

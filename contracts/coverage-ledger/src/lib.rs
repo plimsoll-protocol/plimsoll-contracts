@@ -140,6 +140,11 @@ contractmeta!(
 
 /// Maximum coverage snapshots kept per asset in the history ring buffer.
 pub const HISTORY_CAPACITY: u32 = 10;
+/// Shortest `doc_uri` `post_reserve` accepts until an admin sets
+/// [`CoverageLedger::set_min_doc_uri_len`]. Ten characters rejects placeholder
+/// values that carry no information (`n/a`, `TODO`, `x`) without refusing a
+/// real link such as `ipfs://Qm...`.
+pub const DEFAULT_MIN_DOC_URI_LEN: u32 = 10;
 
 #[contracttype]
 #[derive(Clone)]
@@ -181,6 +186,9 @@ enum DataKey {
     Assets,
     SupplyPostedLedger(Address),
     ReportPostedLedger(Address, Tier, Address),
+    /// Shortest `doc_uri` `post_reserve` accepts. Absent means
+    /// `DEFAULT_MIN_DOC_URI_LEN`.
+    MinDocUriLen,
 }
 
 #[contracterror]
@@ -213,6 +221,7 @@ pub enum LedgerError {
     LedgerTooOld = 18,
     NoReportToRetract = 19,
     TooManyReportersPerAsset = 20,
+    UriTooShort = 20,
 }
 
 #[contractevent]
@@ -449,6 +458,29 @@ fn write_persistent<V: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
         .extend_ttl(key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
 }
 
+/// Read a persistent entry without extending its TTL. Views that promise to
+/// write nothing use this instead of [`read_persistent`].
+fn peek<V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
+    env: &Env,
+    key: &DataKey,
+) -> Option<V> {
+    env.storage().persistent().get::<_, V>(key)
+}
+
+/// [`read_persistent`] or [`peek`], chosen per call, so one implementation of
+/// a query serves both the TTL-maintaining and the side-effect-free paths.
+fn read_or_peek<V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
+    env: &Env,
+    key: &DataKey,
+    peek_only: bool,
+) -> Option<V> {
+    if peek_only {
+        peek(env, key)
+    } else {
+        read_persistent(env, key)
+    }
+}
+
 fn require_listed(env: &Env, sac: &Address) -> AssetRecord {
     match read_persistent::<AssetRecord>(env, &DataKey::Asset(sac.clone())) {
         Some(asset) => asset,
@@ -496,32 +528,52 @@ fn assets(env: &Env) -> Vec<Address> {
 /// Every stored report at `tier`: a not-yet-migrated v0.1 entry first, then
 /// the indexed reporters' in first-post order.
 fn reports_at(env: &Env, sac: &Address, tier: Tier) -> Vec<ReserveReport> {
+    gather_reports_at(env, sac, tier, false)
+}
+
+/// [`reports_at`], reading through [`read_or_peek`] so a view can gather the
+/// same candidates without extending any TTL.
+fn gather_reports_at(
+    env: &Env,
+    sac: &Address,
+    tier: Tier,
+    peek_only: bool,
+) -> Vec<ReserveReport> {
     let mut out = Vec::new(env);
-    if let Some(legacy) = read_persistent::<ReserveReport>(env, &DataKey::Report(sac.clone(), tier))
-    {
+    let legacy_key = DataKey::Report(sac.clone(), tier);
+    if let Some(legacy) = read_or_peek::<ReserveReport>(env, &legacy_key, peek_only) {
         out.push_back(legacy);
     }
-    for reporter in reporters(env, sac, tier).iter() {
-        if let Some(report) =
-            read_persistent::<ReserveReport>(env, &DataKey::ReportBy(sac.clone(), tier, reporter))
-        {
+    // Read the index directly rather than through `reporters`, which always
+    // extends its TTL.
+    let index_key = DataKey::Reporters(sac.clone(), tier);
+    let stored: Option<Vec<Address>> = read_or_peek(env, &index_key, peek_only);
+    let index = stored.unwrap_or_else(|| Vec::new(env));
+    for reporter in index.iter() {
+        let report_key = DataKey::ReportBy(sac.clone(), tier, reporter);
+        if let Some(report) = read_or_peek::<ReserveReport>(env, &report_key, peek_only) {
             out.push_back(report);
         }
     }
     out
 }
 
-fn reports_at_ledger(
+/// Every stored report at `tier` whose current version was posted at or
+/// before `as_of_ledger`, with the TTL behaviour chosen by `peek_only`.
+fn gather_reports_at_ledger(
     env: &Env,
     sac: &Address,
     tier: Tier,
     as_of_ledger: u32,
+    peek_only: bool,
 ) -> Vec<ReserveReport> {
     let mut out = Vec::new(env);
-    for report in reports_at(env, sac, tier).iter() {
+    for report in gather_reports_at(env, sac, tier, peek_only).iter() {
         let key = DataKey::ReportPostedLedger(sac.clone(), tier, report.reporter.clone());
-        let posted_ledger =
-            read_persistent::<u32>(env, &key).unwrap_or_else(|| env.ledger().sequence());
+        let posted_ledger = match read_or_peek::<u32>(env, &key, peek_only) {
+            Some(ledger) => ledger,
+            None => env.ledger().sequence(),
+        };
         if posted_ledger <= as_of_ledger {
             out.push_back(report);
         }
@@ -604,10 +656,18 @@ fn effective_supply(env: &Env, sac: &Address) -> Option<SupplyFigure> {
     })
 }
 
-fn posted_supply_at_ledger(env: &Env, sac: &Address, as_of_ledger: u32) -> Option<SupplyFigure> {
-    let snapshot = read_persistent::<SupplySnapshot>(env, &DataKey::Supply(sac.clone()))?;
-    let posted_ledger = read_persistent::<u32>(env, &DataKey::SupplyPostedLedger(sac.clone()))
-        .unwrap_or_else(|| env.ledger().sequence());
+fn posted_supply_at_ledger(
+    env: &Env,
+    sac: &Address,
+    as_of_ledger: u32,
+    peek_only: bool,
+) -> Option<SupplyFigure> {
+    let snapshot = read_or_peek::<SupplySnapshot>(env, &DataKey::Supply(sac.clone()), peek_only)?;
+    let posted_key = DataKey::SupplyPostedLedger(sac.clone());
+    let posted_ledger = match read_or_peek::<u32>(env, &posted_key, peek_only) {
+        Some(ledger) => ledger,
+        None => env.ledger().sequence(),
+    };
     if posted_ledger > as_of_ledger {
         return None;
     }
@@ -627,6 +687,27 @@ fn counts_for_tier(registry: &RegistryClient, tier: Tier, reporter: &Address) ->
         Tier::Transcribed => Role::Transcriber,
     };
     registry.role_of(reporter) == Some(needed)
+/// The `Coverage` a supply figure and a report make together.
+fn coverage_of(supply: &SupplyFigure, report: &ReserveReport) -> Coverage {
+    Coverage {
+        bps: coverage_bps(report.amount, supply.amount),
+        supply: supply.amount,
+        reserves: report.amount,
+        tier: report.tier,
+        supply_ledger: supply.ledger,
+        supply_timestamp: supply.timestamp,
+        report_as_of: report.as_of,
+    }
+}
+
+/// The shortest `doc_uri` `post_reserve` accepts. `MinDocUriLen` is absent on
+/// any deployment that has never set it, including a ledger upgraded from
+/// v0.1, so the default lives in code rather than in the constructor.
+fn configured_min_doc_uri_len(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MinDocUriLen)
+        .unwrap_or(DEFAULT_MIN_DOC_URI_LEN)
 }
 
 /// Whether a stored report still counts: its reporter must still be entitled
@@ -780,10 +861,22 @@ fn best_report_at_ledger(
     min_tier: Tier,
     as_of_ledger: u32,
 ) -> Option<ReserveReport> {
+    best_report_as_of(env, sac, min_tier, as_of_ledger, false)
+}
+
+/// [`best_report_at_ledger`], with the TTL behaviour chosen by `peek_only`.
+fn best_report_as_of(
+    env: &Env,
+    sac: &Address,
+    min_tier: Tier,
+    as_of_ledger: u32,
+    peek_only: bool,
+) -> Option<ReserveReport> {
     let mut candidates = Vec::new(env);
     for tier in Tier::ALL_DESC {
         if tier >= min_tier {
-            candidates.append(&reports_at_ledger(env, sac, tier, as_of_ledger));
+            let at_tier = gather_reports_at_ledger(env, sac, tier, as_of_ledger, peek_only);
+            candidates.append(&at_tier);
         }
     }
     pick_counting(env, candidates)
@@ -1325,6 +1418,18 @@ impl CoverageLedger {
             Ok(tier) => tier,
             Err(error) => panic_with_error!(&env, error),
         };
+        if amount < 0 {
+            panic_with_error!(&env, LedgerError::InvalidAmount);
+        }
+        if doc_uri.is_empty() || doc_uri.len() > MAX_URI_LEN {
+            panic_with_error!(&env, LedgerError::InvalidUri);
+        }
+        // A placeholder is not a source document. The floor is admin-settable
+        // because the length that carries information depends on the scheme
+        // a reporter uses (`ipfs://` needs fewer bytes than `https://`).
+        if doc_uri.len() < configured_min_doc_uri_len(&env) {
+            panic_with_error!(&env, LedgerError::UriTooShort);
+        }
         let now = env.ledger().timestamp();
         if as_of > now {
             panic_with_error!(&env, LedgerError::FutureTimestamp);
@@ -1775,6 +1880,7 @@ impl CoverageLedger {
             supply_timestamp: supply.timestamp,
             report_as_of: report.as_of,
         })
+        Some(coverage_of(&supply, &report))
     }
 
     /// Return `true` when both the supply snapshot and the chosen report are at
@@ -1880,7 +1986,7 @@ impl CoverageLedger {
         }
         let resolved =
             read_persistent::<Address>(&env, &DataKey::Alias(sac.clone())).unwrap_or(sac);
-        let supply = match posted_supply_at_ledger(&env, &resolved, as_of_ledger) {
+        let supply = match posted_supply_at_ledger(&env, &resolved, as_of_ledger, false) {
             Some(supply) => supply,
             None => return false,
         };
@@ -1941,6 +2047,30 @@ impl CoverageLedger {
             return None;
         }
         Some(u128::from(coverage_bps(report.amount, supply.amount)))
+    /// The coverage `coverage` reported at ledger `as_of_ledger`, from the
+    /// figures that were on chain by then: the posted supply snapshot and the
+    /// freshest counting report posted at or before that ledger. Any tier
+    /// qualifies, exactly as `coverage(sac, Tier::Transcribed)` does.
+    ///
+    /// `None` is a clean miss, not an error: it means no supply snapshot had
+    /// been posted by that ledger, or no report had. Replaced figures are not
+    /// retained, so a newer version of a figure that was live at
+    /// `as_of_ledger` hides the older one; the events carry that history.
+    ///
+    /// Read-only: it writes no state and extends no TTL, so it can be
+    /// simulated freely and costs no rent. Native supply is not consulted —
+    /// `total_supply()` can only answer for the current ledger, so a snapshot
+    /// is always judged against the posted figure.
+    ///
+    /// A registered alias is followed, at most one hop, like `coverage`.
+    pub fn get_coverage_snapshot(env: Env, sac: Address, as_of_ledger: u32) -> Option<Coverage> {
+        if as_of_ledger > env.ledger().sequence() {
+            panic_with_error!(&env, LedgerError::FutureLedger);
+        }
+        let resolved = peek::<Address>(&env, &DataKey::Alias(sac.clone())).unwrap_or(sac);
+        let supply = posted_supply_at_ledger(&env, &resolved, as_of_ledger, true)?;
+        let report = best_report_as_of(&env, &resolved, Tier::Transcribed, as_of_ledger, true)?;
+        Some(coverage_of(&supply, &report))
     }
 
     /// `coverage` with the reason attached, in one call. Precedence: paused,
@@ -2203,6 +2333,26 @@ impl CoverageLedger {
             bump_instance(&env);
         }
         grace
+    /// Set the shortest `doc_uri` `post_reserve` accepts. `0` disables the
+    /// floor; an empty URI is still `InvalidUri`. Values above `MAX_URI_LEN`
+    /// are rejected with `InvalidUri`, since they would refuse every URI the
+    /// contract can accept. Absent means [`DEFAULT_MIN_DOC_URI_LEN`], so an
+    /// upgraded deployment keeps the documented default until an admin acts.
+    pub fn set_min_doc_uri_len(env: Env, min_len: u32) {
+        admin(&env).require_auth();
+        if min_len > MAX_URI_LEN {
+            panic_with_error!(&env, LedgerError::InvalidUri);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MinDocUriLen, &min_len);
+        bump_instance(&env);
+    }
+
+    /// The shortest `doc_uri` `post_reserve` accepts, `0` when the floor is
+    /// disabled.
+    pub fn min_doc_uri_len(env: Env) -> u32 {
+        configured_min_doc_uri_len(&env)
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) {

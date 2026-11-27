@@ -130,6 +130,7 @@ entries today: every code below is covered.
 | 18 | | [`LedgerTooOld`](#18-ledgertooold) | |
 | 19 | | [`NoReportToRetract`](#19-noreporttoretract) | |
 | 20 | | [`TooManyReportersPerAsset`](#20-toomanyreportersperasset) | |
+| 20 | | [`UriTooShort`](#20-uritoshort) | |
 
 ## RegistryError
 
@@ -280,7 +281,9 @@ when several apply the caller sees the first:
 | `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `LedgerTooOld`, `StaleLedger` |
 | `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters`, `TooManyReportersPerAsset` |
 | `is_covered_at` | `FutureLedger`, `Paused` |
-| `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+| `get_coverage_snapshot` | `FutureLedger` |
+| `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `UriTooShort`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+| `set_min_doc_uri_len` | auth, `InvalidUri` (above `MAX_URI_LEN`) |
 | `retract_reserve` | auth, `AssetNotListed`, `NotReporter`, `NoReportToRetract` |
 | `enable_native_supply` | auth, `AssetNotListed` |
 
@@ -392,11 +395,13 @@ when several apply the caller sees the first:
 
 ### 11 `InvalidUri`
 
-- **Raised by:** `post_reserve`.
+- **Raised by:** `post_reserve`, `set_min_doc_uri_len`.
 - **Cause:** `doc_uri` is empty or longer than 256 bytes.
 - **Remedy:** Point at the source document with a URI of 1 to 256 bytes. Use a
   stable, shorter link, or content-addressed storage such as `ipfs://...`. The
   `doc_hash` is what proves the content, so the URI only has to find it.
+  A non-empty URI below the configured minimum gets `UriTooShort` instead; see
+  below.
 
 ### 12 `ImplausibleAmount`
 
@@ -491,6 +496,18 @@ when several apply the caller sees the first:
   `reporter-registry.set_max_reporters(n)`. With the default cap this error is
   unreachable, because the per-tier caps allow at most twelve entries per
   asset and `TooManyReporters` is checked first.
+### 20 `UriTooShort`
+
+- **Raised by:** `post_reserve`.
+- **Cause:** `doc_uri` is non-empty but shorter than the configured minimum,
+  `min_doc_uri_len()`, which is 10 bytes until an admin changes it. It exists
+  to refuse placeholders such as `TODO` that would otherwise look like a
+  source document.
+- **Remedy:** Post the real location of the document. If the scheme genuinely
+  needs fewer bytes, ask the maintainer to lower the floor with
+  `set_min_doc_uri_len` (`0` disables it, and an empty URI is then still
+  `InvalidUri`). `doc_hash` is what proves the content, so a stable, short
+  link is fine.
 
 ## VaultError
 
