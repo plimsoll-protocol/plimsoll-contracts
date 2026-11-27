@@ -4,7 +4,8 @@ use super::*;
 #[allow(unused_imports)]
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
-    Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    xdr::ContractEventBody,
+    Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val,
 };
 
 #[allow(dead_code)]
@@ -361,4 +362,154 @@ fn transfer_admin_without_new_admin_auth_fails() {
     let res = client.try_transfer_admin(&next);
     assert!(res.is_err());
     assert_eq!(client.admin(), admin);
+}
+
+fn decode_stake_events(env: &Env, contract: &Address) -> std::vec::Vec<(Address, i128, i128)> {
+    let events = env.events().all().filter_by_contract(contract);
+    let mut out = std::vec::Vec::new();
+    for event in events.events().iter() {
+        let ContractEventBody::V0(body) = &event.body;
+        let topics: std::vec::Vec<Val> = body
+            .topics
+            .iter()
+            .map(|t| Val::try_from_val(env, t).unwrap())
+            .collect();
+        let name = Symbol::try_from_val(env, &topics[0]).unwrap();
+        if name != Symbol::new(env, "stake_changed") {
+            continue;
+        }
+        let reporter = Address::try_from_val(env, &topics[1]).unwrap();
+        let data_val = Val::try_from_val(env, &body.data).unwrap();
+        let data = Map::<Symbol, Val>::try_from_val(env, &data_val).unwrap();
+        let old_stake =
+            i128::try_from_val(env, &data.get(Symbol::new(env, "old_stake")).unwrap()).unwrap();
+        let new_stake =
+            i128::try_from_val(env, &data.get(Symbol::new(env, "new_stake")).unwrap()).unwrap();
+        out.push((reporter, old_stake, new_stake));
+    }
+    out
+}
+
+#[test]
+fn top_up_and_reduce_stake_emit_stake_changed() {
+    let (env, admin, client) = setup();
+    let reporter = Address::generate(&env);
+    assert_eq!(client.stake_of(&reporter), 0);
+
+    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "Acme"));
+
+    assert_eq!(client.top_up_stake(&reporter, &500), 500);
+    assert_eq!(env.auths()[0].0, admin);
+    assert_eq!(
+        decode_stake_events(&env, &client.address),
+        std::vec![(reporter.clone(), 0, 500)]
+    );
+    assert_eq!(client.stake_of(&reporter), 500);
+
+    assert_eq!(client.top_up_stake(&reporter, &300), 800);
+    assert_eq!(
+        decode_stake_events(&env, &client.address),
+        std::vec![(reporter.clone(), 500, 800)]
+    );
+    assert_eq!(client.stake_of(&reporter), 800);
+
+    assert_eq!(client.reduce_stake(&reporter, &250), 550);
+    assert_eq!(env.auths()[0].0, admin);
+    assert_eq!(
+        decode_stake_events(&env, &client.address),
+        std::vec![(reporter.clone(), 800, 550)]
+    );
+    assert_eq!(client.stake_of(&reporter), 550);
+
+    assert_eq!(client.reduce_stake(&reporter, &550), 0);
+    assert_eq!(
+        decode_stake_events(&env, &client.address),
+        std::vec![(reporter.clone(), 550, 0)]
+    );
+    assert_eq!(client.stake_of(&reporter), 0);
+}
+
+#[test]
+fn stake_operations_reject_unknown_invalid_and_insufficient() {
+    let (env, _admin, client) = setup();
+    let unknown = Address::generate(&env);
+    assert_eq!(
+        client.try_top_up_stake(&unknown, &100),
+        Err(Ok(RegistryError::ReporterNotFound.into()))
+    );
+    assert_eq!(
+        client.try_reduce_stake(&unknown, &100),
+        Err(Ok(RegistryError::ReporterNotFound.into()))
+    );
+
+    let reporter = Address::generate(&env);
+    client.set_reporter(
+        &reporter,
+        &Role::Transcriber,
+        &String::from_str(&env, "vol"),
+    );
+
+    assert_eq!(
+        client.try_top_up_stake(&reporter, &0),
+        Err(Ok(RegistryError::InvalidStakeAmount.into()))
+    );
+    assert_eq!(
+        client.try_top_up_stake(&reporter, &-10),
+        Err(Ok(RegistryError::InvalidStakeAmount.into()))
+    );
+    assert_eq!(
+        client.try_reduce_stake(&reporter, &0),
+        Err(Ok(RegistryError::InvalidStakeAmount.into()))
+    );
+    assert_eq!(
+        client.try_reduce_stake(&reporter, &-5),
+        Err(Ok(RegistryError::InvalidStakeAmount.into()))
+    );
+    assert_eq!(
+        client.try_reduce_stake(&reporter, &1),
+        Err(Ok(RegistryError::InsufficientStake.into()))
+    );
+
+    client.top_up_stake(&reporter, &100);
+    assert_eq!(
+        client.try_reduce_stake(&reporter, &101),
+        Err(Ok(RegistryError::InsufficientStake.into()))
+    );
+    assert_eq!(
+        client.try_top_up_stake(&reporter, &i128::MAX),
+        Err(Ok(RegistryError::InvalidStakeAmount.into()))
+    );
+    assert_eq!(client.stake_of(&reporter), 100);
+}
+
+#[test]
+fn stake_operations_require_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+    let reporter = Address::generate(&env);
+    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "Acme"));
+    client.top_up_stake(&reporter, &100);
+
+    env.mock_auths(&[]);
+    assert!(client.try_top_up_stake(&reporter, &50).is_err());
+    assert!(client.try_reduce_stake(&reporter, &50).is_err());
+    assert_eq!(client.stake_of(&reporter), 100);
+}
+
+#[test]
+fn revoke_clears_stake_and_emits_stake_changed() {
+    let (env, _admin, client) = setup();
+    let reporter = Address::generate(&env);
+    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "Acme"));
+    client.top_up_stake(&reporter, &250);
+
+    client.revoke(&reporter);
+    assert_eq!(
+        decode_stake_events(&env, &client.address),
+        std::vec![(reporter.clone(), 250, 0)]
+    );
+    assert_eq!(client.stake_of(&reporter), 0);
 }
