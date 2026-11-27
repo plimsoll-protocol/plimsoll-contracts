@@ -369,6 +369,29 @@ What each number means, and why it can never move, is in
 Security reports: see [SECURITY.md](SECURITY.md). Do not open public issues for vulnerabilities.
 Trust assumptions per actor: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
+### Keeping `docs/SPEC.md` in step with the code
+
+[docs/SPEC.md](docs/SPEC.md) is the source of truth for the contract
+interface, and the indexer, the SDK and every front end decode against it. A
+change to a `pub fn` signature is therefore a specification change, and the
+CI job `spec-sync` fails a pull request that makes one without updating
+SPEC.md in the same change.
+
+The check compares the `pub fn` signatures in `contracts/*/src/lib.rs` and
+`crates/types/src/lib.rs` (the cross-contract traits and the types they encode)
+between the pull request's merge base and its head. Signatures only: bodies,
+comments, tests and docs can change without touching SPEC.md. Update SPEC.md
+-- and [ERRORS.md](docs/ERRORS.md) or [EVENTS.md](docs/EVENTS.md) when an error
+code or an event layout changed too -- before the signature.
+
+Run it locally against your branch's base:
+
+```bash
+./.github/scripts/check-spec-sync.sh origin/main HEAD
+```
+
+It exits non-zero and prints the signature diff when SPEC.md is missing, so
+the failure names exactly what a reviewer would have had to reconstruct.
 ## Commit conventions
 
 Commit messages and pull request titles follow [Conventional
@@ -400,6 +423,3 @@ cannot be merged.
 ## License
 
 [Apache-2.0](LICENSE)
-
-
-

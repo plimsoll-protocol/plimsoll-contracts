@@ -415,6 +415,199 @@ fn transfer_admin_without_new_admin_auth_fails() {
     assert_eq!(client.admin(), admin);
 }
 
+// ---- the per-asset reporter cap (#109) -----------------------------------
+
+#[test]
+fn max_reporters_defaults_to_twenty() {
+    let (_env, _admin, client) = setup();
+    assert_eq!(client.max_reporters(), DEFAULT_MAX_REPORTERS_PER_ASSET);
+    assert_eq!(client.max_reporters(), 20);
+}
+
+#[test]
+fn set_max_reporters_changes_the_cap() {
+    let (env, admin, client) = setup();
+    client.set_max_reporters(&3);
+
+    assert_eq!(env.auths()[0].0, admin);
+    assert_eq!(client.max_reporters(), 3);
+}
+
+#[test]
+fn set_max_reporters_emits_event() {
+    let (env, _admin, client) = setup();
+    client.set_max_reporters(&7);
+    assert_eq!(env.events().all().events().len(), 1);
+}
+
+#[test]
+fn set_max_reporters_rejects_zero() {
+    let (_env, _admin, client) = setup();
+    let res = client.try_set_max_reporters(&0);
+    assert_eq!(res, Err(Ok(RegistryError::InvalidMaxReporters.into())));
+    // The refused call left the default in force.
+    assert_eq!(client.max_reporters(), DEFAULT_MAX_REPORTERS_PER_ASSET);
+}
+
+#[test]
+fn set_max_reporters_requires_admin_auth() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+
+    assert!(client.try_set_max_reporters(&5).is_err());
+    assert_eq!(client.max_reporters(), DEFAULT_MAX_REPORTERS_PER_ASSET);
+}
+
+// ---- batch_register (#111) -----------------------------------------------
+
+fn entry(env: &Env, reporter: &Address, role: Role, name: &str) -> ReporterEntry {
+    ReporterEntry {
+        reporter: reporter.clone(),
+        role,
+        name: String::from_str(env, name),
+    }
+}
+
+#[test]
+fn batch_register_registers_every_entry() {
+    let (env, admin, client) = setup();
+    let auditor = Address::generate(&env);
+    let poster = Address::generate(&env);
+    client.batch_register(&Vec::from_array(
+        &env,
+        [
+            entry(&env, &auditor, Role::Auditor, "Acme Audit"),
+            entry(&env, &poster, Role::SupplyPoster, "indexer"),
+        ],
+    ));
+
+    assert_eq!(env.auths()[0].0, admin);
+    let info = client.get_reporter(&auditor).unwrap();
+    assert_eq!(info.role, Role::Auditor);
+    assert_eq!(info.name, String::from_str(&env, "Acme Audit"));
+    assert_eq!(info.added_at, 1_700_000_000);
+    assert_eq!(client.role_of(&poster), Some(Role::SupplyPoster));
+}
+
+#[test]
+fn batch_register_changes_an_existing_reporter_and_keeps_added_at() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Transcriber, &String::from_str(&env, "vol"));
+    env.ledger().set_timestamp(1_800_000_000);
+    client.batch_register(&Vec::from_array(
+        &env,
+        [entry(&env, &who, Role::Auditor, "vol, now audit")],
+    ));
+
+    let info = client.get_reporter(&who).unwrap();
+    assert_eq!(info.role, Role::Auditor);
+    assert_eq!(info.added_at, 1_700_000_000);
+}
+
+#[test]
+fn batch_register_emits_one_event_per_entry() {
+    let (env, _admin, client) = setup();
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    client.batch_register(&Vec::from_array(
+        &env,
+        [
+            entry(&env, &first, Role::Auditor, "first"),
+            entry(&env, &second, Role::Transcriber, "second"),
+        ],
+    ));
+
+    assert_eq!(env.events().all().events().len(), 2);
+}
+
+#[test]
+fn batch_register_is_atomic() {
+    let (env, _admin, client) = setup();
+    let good = Address::generate(&env);
+    let bad = Address::generate(&env);
+    let res = client.try_batch_register(&Vec::from_array(
+        &env,
+        [
+            entry(&env, &good, Role::Auditor, "good"),
+            entry(&env, &bad, Role::Auditor, ""),
+        ],
+    ));
+
+    assert_eq!(res, Err(Ok(RegistryError::InvalidName.into())));
+    // Nothing from the batch was written, not even the valid first entry.
+    assert_eq!(client.get_reporter(&good), None);
+    assert_eq!(client.get_reporter(&bad), None);
+}
+
+#[test]
+fn batch_register_rejects_an_empty_batch() {
+    let (env, _admin, client) = setup();
+    let res = client.try_batch_register(&Vec::new(&env));
+    assert_eq!(res, Err(Ok(RegistryError::EmptyBatch.into())));
+}
+
+#[test]
+fn batch_register_requires_admin_auth() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+    let who = Address::generate(&env);
+
+    let res = client.try_batch_register(&Vec::from_array(
+        &env,
+        [entry(&env, &who, Role::Auditor, "nobody")],
+    ));
+    assert!(res.is_err());
+    assert_eq!(client.get_reporter(&who), None);
+}
+
+#[test]
+fn a_duplicate_in_a_batch_applies_in_order() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.batch_register(&Vec::from_array(
+        &env,
+        [
+            entry(&env, &who, Role::Auditor, "first"),
+            entry(&env, &who, Role::Transcriber, "second"),
+        ],
+    ));
+
+    let info = client.get_reporter(&who).unwrap();
+    assert_eq!(info.role, Role::Transcriber);
+    assert_eq!(info.name, String::from_str(&env, "second"));
+}
+
+fn decode_stake_events(env: &Env, contract: &Address) -> std::vec::Vec<(Address, i128, i128)> {
+    let events = env.events().all().filter_by_contract(contract);
+    let mut out = std::vec::Vec::new();
+    for event in events.events().iter() {
+        let ContractEventBody::V0(body) = &event.body;
+        let topics: std::vec::Vec<Val> = body
+            .topics
+            .iter()
+            .map(|t| Val::try_from_val(env, t).unwrap())
+            .collect();
+        let name = Symbol::try_from_val(env, &topics[0]).unwrap();
+        if name != Symbol::new(env, "stake_changed") {
+            continue;
+        }
+        let reporter = Address::try_from_val(env, &topics[1]).unwrap();
+        let data_val = Val::try_from_val(env, &body.data).unwrap();
+        let data = Map::<Symbol, Val>::try_from_val(env, &data_val).unwrap();
+        let old_stake =
+            i128::try_from_val(env, &data.get(Symbol::new(env, "old_stake")).unwrap()).unwrap();
+        let new_stake =
+            i128::try_from_val(env, &data.get(Symbol::new(env, "new_stake")).unwrap()).unwrap();
+        out.push((reporter, old_stake, new_stake));
+    }
+    out
+}
+
 #[test]
 fn reporter_can_set_and_read_display_name() {
     let (env, _admin, client) = setup();
@@ -902,4 +1095,5 @@ fn reporter_name_leaves_the_existing_entry_unchanged_and_is_removed_on_revoke() 
     // Re-adding the reporter does not bring the old name back.
     client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme Audit"));
     assert_eq!(client.get_reporter_name(&who), None);
+}
 }

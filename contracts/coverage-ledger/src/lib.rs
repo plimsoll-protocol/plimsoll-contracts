@@ -91,6 +91,7 @@ pub enum LedgerError {
     Paused = 17,
     LedgerTooOld = 18,
     NoReportToRetract = 19,
+    TooManyReportersPerAsset = 20,
 }
 
 #[contractevent]
@@ -511,6 +512,40 @@ fn best_report(env: &Env, sac: &Address, min_tier: Tier) -> Option<ReserveReport
     pick_counting(env, candidates)
 }
 
+/// The distinct reporters that hold a stored report for `sac`, strongest tier
+/// first and first-post order within a tier. A v0.1 `Report(sac, tier)` entry
+/// counts until its tier is migrated, because it is still a reporter of this
+/// asset to anyone reading it.
+fn asset_reporters(env: &Env, sac: &Address) -> Vec<Address> {
+    let mut out = Vec::new(env);
+    for tier in Tier::ALL_DESC {
+        for reporter in reporters(env, sac, tier).iter() {
+            if !out.contains(&reporter) {
+                out.push_back(reporter);
+            }
+        }
+        let legacy_key = DataKey::Report(sac.clone(), tier);
+        if let Some(legacy) = read_persistent::<ReserveReport>(env, &legacy_key) {
+            if !out.contains(&legacy.reporter) {
+                out.push_back(legacy.reporter);
+            }
+        }
+    }
+    out
+}
+
+/// Drop tier-index entries, and their reports, whose reporter no longer counts
+/// at every tier of `sac`. Called only when the asset is at the registry's
+/// reporter cap, so a revoked or promoted reporter cannot hold a slot against a
+/// working one.
+fn reclaim_asset(env: &Env, registry: &RegistryClient, sac: &Address) {
+    for tier in Tier::ALL_DESC {
+        let index = reporters(env, sac, tier);
+        let kept = reclaim_slots(env, registry, sac, tier, &index);
+        if kept.len() != index.len() {
+            write_persistent(env, &DataKey::Reporters(sac.clone(), tier), &kept);
+        }
+    }
 fn best_report_at_ledger(
     env: &Env,
     sac: &Address,
@@ -898,12 +933,26 @@ impl CoverageLedger {
         let key = DataKey::ReportBy(sac.clone(), tier, reporter.clone());
         let mut index = reporters(&env, &sac, tier);
         if !index.contains(&reporter) {
+            let registry_client = RegistryClient::new(&env, &registry(&env));
             if index.len() >= MAX_REPORTERS_PER_TIER {
-                let registry = RegistryClient::new(&env, &registry(&env));
-                index = reclaim_slots(&env, &registry, &sac, tier, &index);
+                index = reclaim_slots(&env, &registry_client, &sac, tier, &index);
             }
             if index.len() >= MAX_REPORTERS_PER_TIER {
                 panic_with_error!(&env, LedgerError::TooManyReporters);
+            }
+            // The registry's cap on how many reporters one asset may hold. A
+            // reporter who already speaks for this asset at another tier keeps
+            // their slot: the cap counts reporters, not entries.
+            let mut asset = asset_reporters(&env, &sac);
+            if !asset.contains(&reporter) {
+                let max = registry_client.max_reporters();
+                if asset.len() >= max {
+                    reclaim_asset(&env, &registry_client, &sac);
+                    asset = asset_reporters(&env, &sac);
+                }
+                if asset.len() >= max {
+                    panic_with_error!(&env, LedgerError::TooManyReportersPerAsset);
+                }
             }
             index.push_back(reporter.clone());
             write_persistent(&env, &DataKey::Reporters(sac.clone(), tier), &index);

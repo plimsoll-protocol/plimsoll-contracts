@@ -40,6 +40,10 @@ pub const MIN_PLAUSIBLE_BPS: u32 = 1;
 /// says more about the reporter than the reserves.
 pub const MAX_PLAUSIBLE_BPS: u32 = 1_000_000;
 
+/// How many reporters one asset may hold unless the registry admin changes
+/// it. The registry stores the setting; the coverage ledger applies it when a
+/// reporter posts a figure for an asset for the first time.
+pub const DEFAULT_MAX_REPORTERS_PER_ASSET: u32 = 20;
 /// Whether an asset is covered, stale, or uncovered. Ordered: higher is better.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -111,6 +115,16 @@ pub struct ReporterMetadata {
     /// Hash of the reporter's preferred contact details. The preimage is
     /// never stored on-chain.
     pub contact_hash: Option<Bytes>,
+}
+
+/// One reporter in a reporter-registry `batch_register` call: the arguments
+/// `set_reporter` takes, so a batch is a list of those calls.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReporterEntry {
+    pub reporter: Address,
+    pub role: Role,
+    pub name: String,
 }
 
 #[contracttype]
@@ -273,6 +287,9 @@ pub fn coverage_bps(reserves: i128, supply: i128) -> u32 {
 #[contractclient(name = "RegistryClient")]
 pub trait RegistryInterface {
     fn role_of(env: Env, reporter: Address) -> Option<Role>;
+
+    /// The registry-level cap on how many reporters one asset may hold.
+    fn max_reporters(env: Env) -> u32;
     fn record_report_outcome(env: Env, ledger: Address, reporter: Address, accepted: bool);
 }
 

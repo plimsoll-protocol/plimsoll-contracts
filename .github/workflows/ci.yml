@@ -115,6 +115,23 @@ jobs:
           path: target/coverage/lcov.info
           if-no-files-found: error
 
+  spec-sync:
+    name: spec-sync
+    runs-on: ubuntu-latest
+    # A pull request is the only place a base and a head are both available to
+    # compare, and the only place the rule applies: one commit moves both.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The check diffs the pull request against its merge base, so both
+          # sides of the history have to be in the clone.
+          fetch-depth: 0
+      - name: Check docs/SPEC.md tracks interface changes
+        env:
+          SPEC_SYNC_BASE: ${{ github.event.pull_request.base.sha }}
+          SPEC_SYNC_HEAD: ${{ github.sha }}
+        run: ./.github/scripts/check-spec-sync.sh
   wasm-size-report:
     name: wasm size report
     if: github.event_name == 'pull_request'

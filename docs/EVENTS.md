@@ -225,6 +225,9 @@ No data map. Raised by `cancel_upgrade`, which clears the pending proposal.
 
 Raised both when a reporter is first registered and when its role or name
 changes, so a reader should treat it as an upsert keyed on `reporter`.
+`set_reporter` raises one; `batch_register` raises one per entry, in entry
+order, so a reader sees the same events whether the admin onboarded reporters
+one at a time or in one transaction.
 
 Testnet: the indexer's supply poster was registered in
 [`f4681dc3…`](https://stellar.expert/explorer/testnet/tx/f4681dc3ea065f770a1e715f1f43ae08171e40ef9cb6228c791d12c45a5b1c34)
@@ -316,6 +319,17 @@ treat the reporter's reports as inactive from this event until a later
 `reporter_set` gives the role back. The indexer leaves the history in place. No
 testnet example: nothing has been revoked on the demo deployment.
 
+### `max_reporters_set`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `max_reporters_set` | `Symbol` |
+| topic 1 | `max` | `u32` |
+
+No data map. Raised by `set_max_reporters` with the new registry-level cap on
+how many reporters one asset may hold. The cap itself is a view: read
+`max_reporters()` for the value in force, including the default of 20 that no
+event reports.
 ### `dispute_quorum_set`
 
 | | Name | Type |
@@ -478,6 +492,7 @@ pasted:
 | `reporter_set` | `AAAADwAAAAxyZXBvcnRlcl9zZXQ=` |
 | `reporter_metadata_updated` | `AAAADwAAABlyZXBvcnRlcl9tZXRhZGF0YV91cGRhdGVk` |
 | `reporter_revoked` | `AAAADwAAABByZXBvcnRlcl9yZXZva2Vk` |
+| `max_reporters_set` | `AAAADwAAABFtYXhfcmVwb3J0ZXJzX3NldA==` |
 | `admin_transferred` | `AAAADwAAABFhZG1pbl90cmFuc2ZlcnJlZAAAAA==` |
 | `upgrade_proposed` | `AAAADwAAABB1cGdyYWRlX3Byb3Bvc2Vk` |
 | `upgrade_executed` | `AAAADwAAABB1cGdyYWRlX2V4ZWN1dGVk` |

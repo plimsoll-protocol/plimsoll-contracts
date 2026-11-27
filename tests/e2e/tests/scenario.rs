@@ -16,7 +16,7 @@
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     token::{StellarAssetClient, TokenClient},
-    Address, Bytes, BytesN, Env, Error, Executable, String,
+    Address, Bytes, BytesN, Env, Error, Executable, String, Vec,
 };
 
 mod registry {
@@ -117,23 +117,31 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     assert_eq!(vault.config().ledger, ledger_id);
 
     // ---- 1. register reporters --------------------------------------------
+    // Both reporters in one transaction, as an initial population would be.
     let poster = Address::generate(&env);
     let auditor = Address::generate(&env);
-    registry.set_reporter(
-        &poster,
-        &registry::Role::SupplyPoster,
-        &String::from_str(&env, "indexer"),
-    );
-    registry.set_reporter(
-        &auditor,
-        &registry::Role::Auditor,
-        &String::from_str(&env, "Acme Audit"),
-    );
+    registry.batch_register(&Vec::from_array(
+        &env,
+        [
+            registry::ReporterEntry {
+                reporter: poster.clone(),
+                role: registry::Role::SupplyPoster,
+                name: String::from_str(&env, "indexer"),
+            },
+            registry::ReporterEntry {
+                reporter: auditor.clone(),
+                role: registry::Role::Auditor,
+                name: String::from_str(&env, "Acme Audit"),
+            },
+        ],
+    ));
     assert_eq!(
         registry.role_of(&poster),
         Some(registry::Role::SupplyPoster)
     );
     assert_eq!(registry.role_of(&auditor), Some(registry::Role::Auditor));
+    // The ledger reads this cap across the wasm boundary on a first post.
+    assert_eq!(registry.max_reporters(), 20);
 
     // ---- 2. list the asset ------------------------------------------------
     // Nothing can be posted for an asset that is not listed.

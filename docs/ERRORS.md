@@ -24,9 +24,11 @@ one that comes back. In practice:
   Stellar Asset Contract (SAC). If the transfer fails, the caller sees the
   **SAC's** error code, not a vault code. See
   [Errors from the asset contract](#errors-from-the-asset-contract).
-- `coverage-ledger` calls `reporter-registry.role_of` and the SAC's `name`,
-  but neither can fail on a valid deployment, so a ledger call only ever
-  fails with a ledger code.
+- `coverage-ledger` calls `reporter-registry.role_of`,
+  `reporter-registry.max_reporters` and the SAC's `name`, but none of them can
+  fail on a valid deployment, so a ledger call only ever fails with a ledger
+  code. (A ledger upgraded ahead of its registry is not a valid deployment:
+  see [SPEC.md](SPEC.md#upgrading-a-v01-deployment).)
 - `coverage-ledger.is_covered` fails only with `Paused`, and only while an
   admin has paused the ledger. Every other reason an asset might not qualify
   comes back as `false`. `coverage` never fails; it returns `None`.
@@ -82,6 +84,10 @@ entries today: every code below is covered.
 | 3 | `UpgradeNotProposed` | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
 | 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | [`NoPendingAdmin`](#4-nopendingadmin) |
 | 5 | [`InvalidMetadata`](#5-invalidmetadata) | [`NotReporter`](#5-notreporter) | |
+| 6 | [`InvalidStakeAmount`](#6-invalidstakeamount) | [`InvalidAmount`](#6-invalidamount) | |
+| 7 | [`InsufficientStake`](#7-insufficientstake) | [`FutureLedger`](#7-futureledger) | |
+| 8 | [`InvalidMaxReporters`](#8-invalidmaxreporters) | [`StaleLedger`](#8-staleledger) | |
+| 9 | [`EmptyBatch`](#9-emptybatch) | [`FutureTimestamp`](#9-futuretimestamp) | |
 | 6 | [`InvalidConfirmWindow`](#6-invalidconfirmwindow) | [`InvalidAmount`](#6-invalidamount) | |
 | 7 | [`PendingRegistrationNotFound`](#7-pendingregistrationnotfound) | [`FutureLedger`](#7-futureledger) | |
 | 8 | [`RegistrationExpired`](#8-registrationexpired) | [`StaleLedger`](#8-staleledger) | |
@@ -101,12 +107,13 @@ entries today: every code below is covered.
 | 17 | | [`Paused`](#17-paused) | |
 | 18 | | [`LedgerTooOld`](#18-ledgertooold) | |
 | 19 | | [`NoReportToRetract`](#19-noreporttoretract) | |
+| 20 | | [`TooManyReportersPerAsset`](#20-toomanyreportersperasset) | |
 
 ## RegistryError
 
-Raised by `reporter-registry`. The role and upgrade errors are admin-only, so
-they reach maintainers rather than end users; `InvalidMetadata` is raised to a
-registered reporter updating their own entry.
+Raised by `reporter-registry`. The role, upgrade, stake, cap and batch errors
+are admin-only, so they reach maintainers rather than end users;
+`InvalidMetadata` is raised to a registered reporter updating their own entry.
 
 ### 1 `ReporterNotFound`
 
@@ -119,11 +126,14 @@ registered reporter updating their own entry.
 
 ### 2 `InvalidName`
 
-- **Raised by:** `set_reporter(reporter, role, name)`.
+- **Raised by:** `set_reporter(reporter, role, name)`,
+  `batch_register(reporters)`.
 - **Cause:** `name` is empty or longer than 64 bytes. The limit is in UTF-8
   bytes, not characters, so a 30-character name in a non-Latin script can
   exceed it.
-- **Remedy:** Use a short, non-empty display name of 1 to 64 bytes.
+- **Remedy:** Use a short, non-empty display name of 1 to 64 bytes. In a batch
+  one bad name fails the whole call and nothing is written; the entry that
+  caused it is the one to fix.
 
 ### 5 `InvalidMetadata`
 
@@ -166,6 +176,23 @@ registered reporter updating their own entry.
 - **Cause:** `amount` exceeds the reporter's currently tracked stake (`stake_of`).
 - **Remedy:** Query `stake_of(reporter)` and reduce by at most that amount.
 
+### 8 `InvalidMaxReporters`
+
+- **Raised by:** `set_max_reporters(max)`.
+- **Cause:** `max` is zero, which would stop every asset taking a new
+  reporter.
+- **Remedy:** Set at least 1. The default is 20, above what the per-tier caps
+  allow, so a value only changes anything when the admin lowers it.
+
+### 9 `EmptyBatch`
+
+- **Raised by:** `batch_register(reporters)`.
+- **Cause:** the list is empty, so the call would do nothing. It is refused
+  rather than succeeding silently, because an empty list is usually a bug in
+  the caller that built it.
+- **Remedy:** Pass at least one entry. A single reporter can also go through
+  `set_reporter`.
+
 ## LedgerError
 
 Raised by `coverage-ledger`. Each write checks its errors in a fixed order, so
@@ -175,6 +202,7 @@ when several apply the caller sees the first:
 | --- | --- |
 | `list_asset` | `NotAStellarAsset` (not a SAC), `AlreadyListed`, `NotAStellarAsset` (SAC name has no issuer) |
 | `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `LedgerTooOld`, `StaleLedger` |
+| `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters`, `TooManyReportersPerAsset` |
 | `is_covered_at` | `FutureLedger`, `Paused` |
 | `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
 | `retract_reserve` | auth, `AssetNotListed`, `NotReporter`, `NoReportToRetract` |
@@ -361,6 +389,23 @@ when several apply the caller sees the first:
   reporter address, even when another reporter has a report at that tier.
 - **Remedy:** Sign with the address that posted the report, and confirm the
   report still exists at the reporter's current tier.
+
+### 20 `TooManyReportersPerAsset`
+
+- **Raised by:** `post_reserve`.
+- **Cause:** the asset already holds reports from
+  `reporter-registry.max_reporters()` distinct reporters, and this reporter
+  has no report for it at any tier. The default is 20. Before failing, the
+  ledger drops the entries of reporters who no longer count (revoked, or
+  moved to another role) at every tier, so this error means the cap is full
+  of reporters that still count. The asset's issuer occupies a slot like
+  anyone else, and a v0.1 report counts until its tier is migrated.
+- **Remedy:** A reporter already speaking for the asset can keep posting new
+  figures. A new reporter needs a maintainer to revoke one of the reporters
+  holding a slot, or to raise the cap with
+  `reporter-registry.set_max_reporters(n)`. With the default cap this error is
+  unreachable, because the per-tier caps allow at most twelve entries per
+  asset and `TooManyReporters` is checked first.
 
 ## VaultError
 

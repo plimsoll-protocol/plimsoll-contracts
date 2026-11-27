@@ -3,6 +3,9 @@
 #![no_std]
 
 use plimsoll_types::{
+    PendingUpgrade, ReporterEntry, ReporterInfo, ReporterMetadata, Role,
+    DEFAULT_MAX_REPORTERS_PER_ASSET, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, PERSISTENT_EXTEND_TO,
+    PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
     PendingReporter, PendingUpgrade, ReporterInfo, ReporterMetadata, Role, INSTANCE_EXTEND_TO,
     INSTANCE_THRESHOLD, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, UPGRADE_DELAY_LEDGERS,
 };
@@ -30,6 +33,7 @@ enum DataKey {
     Metadata(Address),
     Stake(Address),
     PendingUpgrade,
+    MaxReporters,
     DisputeQuorum,
     Dispute(BytesN<32>),
 }
@@ -83,6 +87,8 @@ pub enum RegistryError {
     RegistrationExpired = 8,
     InvalidStakeAmount = 6,
     InsufficientStake = 7,
+    InvalidMaxReporters = 8,
+    EmptyBatch = 9,
     TooManyTags = 8,
     UntrustedLedger = 9,
 }
@@ -157,6 +163,9 @@ pub struct AdminTransferred {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaxReportersSet {
+    #[topic]
+    pub max: u32,
 pub struct ReporterTagsUpdated {
     #[topic]
     pub reporter: Address,
@@ -242,6 +251,16 @@ fn bump_instance(env: &Env) {
 
 fn pending(env: &Env) -> Option<PendingUpgrade> {
     env.storage().instance().get(&DataKey::PendingUpgrade)
+}
+
+/// The admin's per-asset reporter cap, or `DEFAULT_MAX_REPORTERS_PER_ASSET`
+/// while it has not been set. A registry upgraded from v0.1 has no stored
+/// value, so it answers the default without a migration.
+fn configured_max_reporters(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MaxReporters)
+        .unwrap_or(DEFAULT_MAX_REPORTERS_PER_ASSET)
 }
 
 fn require_registered(env: &Env, reporter: &Address) {
@@ -359,6 +378,39 @@ fn write_stake(env: &Env, reporter: &Address, old_stake: i128, new_stake: i128) 
     .publish(env);
 }
 
+fn require_valid_name(env: &Env, name: &String) {
+    if name.is_empty() || name.len() > MAX_NAME_LEN {
+        panic_with_error!(env, RegistryError::InvalidName);
+    }
+}
+
+/// Add a reporter, or change an existing reporter's role and name. Used by
+/// both the single and the batch entry point, so the two can never drift.
+fn write_reporter(env: &Env, reporter: &Address, role: Role, name: &String) {
+    let key = DataKey::Reporter(reporter.clone());
+    let added_at = env
+        .storage()
+        .persistent()
+        .get::<_, ReporterInfo>(&key)
+        .map(|existing| existing.added_at)
+        .unwrap_or_else(|| env.ledger().timestamp());
+    let info = ReporterInfo {
+        role,
+        name: name.clone(),
+        added_at,
+    };
+    env.storage().persistent().set(&key, &info);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+    ReporterSet {
+        reporter: reporter.clone(),
+        role,
+        name: name.clone(),
+    }
+    .publish(env);
+}
+
 #[contractimpl]
 impl ReporterRegistry {
     pub fn __constructor(env: Env, admin: Address) {
@@ -373,32 +425,32 @@ impl ReporterRegistry {
     /// Add a reporter, or change an existing reporter's role and name.
     pub fn set_reporter(env: Env, reporter: Address, role: Role, name: String) {
         admin(&env).require_auth();
-        if name.is_empty() || name.len() > MAX_NAME_LEN {
-            panic_with_error!(&env, RegistryError::InvalidName);
-        }
-        let key = DataKey::Reporter(reporter.clone());
-        let added_at = env
-            .storage()
-            .persistent()
-            .get::<_, ReporterInfo>(&key)
-            .map(|existing| existing.added_at)
-            .unwrap_or_else(|| env.ledger().timestamp());
-        let info = ReporterInfo {
-            role,
-            name: name.clone(),
-            added_at,
-        };
-        env.storage().persistent().set(&key, &info);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        require_valid_name(&env, &name);
+        write_reporter(&env, &reporter, role, &name);
         bump_instance(&env);
-        ReporterSet {
-            reporter,
-            role,
-            name,
+    }
+
+    /// Add or change many reporters in one transaction, so populating the
+    /// registry does not take a transaction per reporter.
+    ///
+    /// Every entry is validated before the first one is written, and a failed
+    /// call reverts the whole transaction, so the batch is all or nothing. The
+    /// per-asset cap (`max_reporters`) is not a registry rule -- the registry
+    /// does not know which assets a reporter will speak for -- so the coverage
+    /// ledger applies it at post time and a batch cannot register its way past
+    /// it.
+    pub fn batch_register(env: Env, reporters: Vec<ReporterEntry>) {
+        admin(&env).require_auth();
+        if reporters.is_empty() {
+            panic_with_error!(&env, RegistryError::EmptyBatch);
         }
-        .publish(&env);
+        for entry in reporters.iter() {
+            require_valid_name(&env, &entry.name);
+        }
+        for entry in reporters.iter() {
+            write_reporter(&env, &entry.reporter, entry.role, &entry.name);
+        }
+        bump_instance(&env);
     }
 
     /// Create a pending reporter registration that the reporter must confirm
@@ -801,6 +853,23 @@ impl ReporterRegistry {
         info
     }
 
+    /// The registry-level cap on how many reporters one asset may hold. The
+    /// coverage ledger reads it when a reporter posts for an asset for the
+    /// first time.
+    pub fn max_reporters(env: Env) -> u32 {
+        configured_max_reporters(&env)
+    }
+
+    /// Set the per-asset reporter cap. Zero would stop every asset taking a
+    /// new reporter, so it is refused; one is the tightest useful setting.
+    pub fn set_max_reporters(env: Env, max: u32) {
+        admin(&env).require_auth();
+        if max == 0 {
+            panic_with_error!(&env, RegistryError::InvalidMaxReporters);
+        }
+        env.storage().instance().set(&DataKey::MaxReporters, &max);
+        bump_instance(&env);
+        MaxReportersSet { max }.publish(&env);
     /// Set the caller reporter's optional human-readable display name.
     pub fn set_reporter_name(env: Env, reporter: Address, name: Symbol) {
         reporter.require_auth();
