@@ -69,10 +69,13 @@ who must sign; reads need no signature.
 | --- | --- | --- |
 | `balance(of)`, `config()`, `can_deposit()` | anyone (read) | — |
 | `deposit(from, amount)` | `from`, with its own funds | Host auth failure; `NotCovered` (`2`) when the asset is not covered under the vault's policy; `InvalidAmount` for a non-positive amount |
-| `withdraw(to, amount)` | `to`, for its own balance | Host auth failure; `InsufficientBalance` (`3`) when the balance is too small; `InvalidAmount` for a non-positive amount |
+| `request_withdraw(to, amount)` | `to`, for its own balance | Host auth failure; `InsufficientBalance` (`3`) when the balance is too small; `InvalidAmount` for a non-positive amount |
+| `execute_withdraw(to)` | `to`, for its own queued withdrawal | Host auth failure; `NoPendingWithdrawal` (`5`) or `WithdrawalDelayNotElapsed` (`6`) |
+| `set_withdrawal_delay(delay_seconds)` | vault deployer/admin | Host auth failure; `InvalidDelay` (`4`) if the timestamp would overflow |
 
 `__constructor` is called once by the deployer when the contract is deployed
-and is not callable afterwards. It is the only point at which an admin is set.
+and is not callable afterwards. The deployer supplies the vault admin address
+as a constructor argument.
 
 ## What "unauthorised" looks like
 

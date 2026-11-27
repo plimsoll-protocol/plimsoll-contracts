@@ -21,14 +21,17 @@ const UNIT: i128 = 10_000_000;
 
 struct Fixture {
     env: Env,
+    admin: Address,
     vault: CoveredVaultClient<'static>,
     ledger: LedgerClient<'static>,
     token: TokenClient<'static>,
+    admin: Address,
     sac: Address,
     issuer: Address,
     poster: Address,
     user: Address,
     approver: Address,
+    vault_admin: Address,
 }
 
 fn setup() -> Fixture {
@@ -49,7 +52,7 @@ fn setup() -> Fixture {
     let handle = env.register_stellar_asset_contract_v2(sac_admin);
     let sac = handle.address();
     let issuer = handle.issuer().address();
-    ledger.list_asset(&sac);
+    ledger.list_asset(&sac, &None);
 
     let poster = Address::generate(&env);
     registry.set_reporter(
@@ -62,6 +65,11 @@ fn setup() -> Fixture {
     let vault_id = env.register(
         CoveredVault,
         (
+    let vault_admin = Address::generate(&env);
+    let vault_id = env.register(
+        CoveredVault,
+        (
+            admin.clone(),
             ledger_id,
             sac.clone(),
             10_000u32,
@@ -69,6 +77,8 @@ fn setup() -> Fixture {
             Tier::IssuerSigned,
             approver.clone(),
             50 * UNIT,
+            admin.clone(),
+            vault_admin.clone(),
         ),
     );
     let vault = CoveredVaultClient::new(&env, &vault_id);
@@ -79,14 +89,17 @@ fn setup() -> Fixture {
 
     Fixture {
         env,
+        admin,
         vault,
         ledger,
         token,
+        admin,
         sac,
         issuer,
         poster,
         user,
         approver,
+        vault_admin,
     }
 }
 
@@ -166,7 +179,8 @@ fn withdraw_works_even_when_not_covered() {
     f.vault.deposit(&f.user, &(100 * UNIT));
     // Coverage lapses; the user can still get out.
     f.env.ledger().set_timestamp(T0 + 10 * DAY);
-    let bal = f.vault.withdraw(&f.user, &(40 * UNIT));
+    f.vault.request_withdraw(&f.user, &(40 * UNIT));
+    let bal = f.vault.execute_withdraw(&f.user);
     assert_eq!(bal, 60 * UNIT);
     assert_eq!(f.token.balance(&f.user), 940 * UNIT);
 }
@@ -207,7 +221,7 @@ fn withdraw_more_than_balance_fails() {
     let f = setup();
     report(&f, 1_000 * UNIT, 1_000 * UNIT);
     f.vault.deposit(&f.user, &(10 * UNIT));
-    let res = f.vault.try_withdraw(&f.user, &(11 * UNIT));
+    let res = f.vault.try_request_withdraw(&f.user, &(11 * UNIT));
     assert_eq!(res, Err(Ok(VaultError::InsufficientBalance.into())));
 }
 
@@ -219,8 +233,98 @@ fn zero_amounts_rejected() {
         Err(Ok(VaultError::InvalidAmount.into()))
     );
     assert_eq!(
-        f.vault.try_withdraw(&f.user, &0),
+        f.vault.try_request_withdraw(&f.user, &0),
         Err(Ok(VaultError::InvalidAmount.into()))
+    );
+}
+
+#[test]
+fn get_balance_reads_the_on_chain_token_balance() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    assert_eq!(f.vault.get_balance(), 0);
+    f.vault.deposit(&f.user, &(100 * UNIT));
+    assert_eq!(f.vault.get_balance(), 100 * UNIT);
+    assert_eq!(f.vault.get_balance(), f.token.balance(&f.vault.address));
+    f.vault.withdraw(&f.user, &(40 * UNIT));
+    assert_eq!(f.vault.get_balance(), 60 * UNIT);
+}
+
+#[test]
+fn withdrawal_delay_blocks_execution_until_available() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    f.vault.deposit(&f.user, &(100 * UNIT));
+    f.vault.set_withdrawal_delay(&3_600);
+    assert_eq!(f.vault.withdrawal_delay_seconds(), 3_600);
+    assert_eq!(f.vault.request_withdraw(&f.user, &(40 * UNIT)), T0 + 3_600);
+    assert_eq!(
+        f.vault.try_execute_withdraw(&f.user),
+        Err(Ok(VaultError::WithdrawalDelayNotElapsed.into()))
+    );
+
+    f.env.ledger().set_timestamp(T0 + 3_600);
+    assert_eq!(f.vault.execute_withdraw(&f.user), 60 * UNIT);
+}
+
+#[test]
+fn withdrawal_delay_can_be_updated_by_admin_only() {
+    let f = setup();
+    f.vault.set_withdrawal_delay(&60);
+    f.vault.set_withdrawal_delay(&120);
+    assert_eq!(f.vault.withdrawal_delay_seconds(), 120);
+
+    f.env.mock_auths(&[]);
+    assert!(f.vault.try_set_withdrawal_delay(&0).is_err());
+    assert_eq!(f.vault.withdrawal_delay_seconds(), 120);
+}
+
+#[test]
+fn withdrawal_requires_a_pending_request() {
+    let f = setup();
+    assert_eq!(
+        f.vault.try_execute_withdraw(&f.user),
+        Err(Ok(VaultError::NoPendingWithdrawal.into()))
+    );
+}
+
+#[test]
+fn withdrawal_delay_rejects_timestamp_overflow() {
+    let f = setup();
+    assert_eq!(
+        f.vault.try_set_withdrawal_delay(&u64::MAX),
+        Err(Ok(VaultError::InvalidDelay.into()))
+    );
+}
+
+#[test]
+fn request_withdraw_rejects_available_time_overflow() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    f.vault.deposit(&f.user, &UNIT);
+    f.vault.set_withdrawal_delay(&(u64::MAX - T0));
+    f.env.ledger().set_timestamp(T0 + 1);
+    assert_eq!(
+        f.vault.try_request_withdraw(&f.user, &UNIT),
+        Err(Ok(VaultError::InvalidDelay.into()))
+    );
+}
+
+#[test]
+fn execute_withdraw_rechecks_balance() {
+    let f = setup();
+    f.env.as_contract(&f.vault.address, || {
+        f.env.storage().persistent().set(
+            &DataKey::PendingWithdrawal(f.user.clone()),
+            &PendingWithdrawal {
+                amount: UNIT,
+                available_at: T0,
+            },
+        );
+    });
+    assert_eq!(
+        f.vault.try_execute_withdraw(&f.user),
+        Err(Ok(VaultError::InsufficientBalance.into()))
     );
 }
 
@@ -278,10 +382,21 @@ fn deposit_emits_coverage_dropped_when_post_deposit_coverage_is_false() {
     let sac = env
         .register_stellar_asset_contract_v2(Address::generate(&env))
         .address();
+    let admin = Address::generate(&env);
     let ledger = env.register(FlakyLedger, ());
+    let vault_admin = Address::generate(&env);
     let vault_id = env.register(
         CoveredVault,
-        (ledger, sac.clone(), 10_000u32, DAY, Tier::IssuerSigned),
+        (
+            admin,
+            Address::generate(&env),
+            ledger,
+            sac.clone(),
+            10_000u32,
+            DAY,
+            Tier::IssuerSigned,
+            vault_admin,
+        ),
     );
     let vault = CoveredVaultClient::new(&env, &vault_id);
     let user = Address::generate(&env);
@@ -422,6 +537,53 @@ fn can_deposit_uses_the_stored_min_tier() {
     );
 }
 
+// ---- admin / update_thresholds -------------------------------------------
+
+#[test]
+fn admin_round_trips() {
+    let f = setup();
+    assert_eq!(f.vault.admin(), f.vault_admin);
+}
+
+#[test]
+fn update_thresholds_changes_config() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    // Raise min_bps above 100% → vault closes.
+    f.vault
+        .update_thresholds(&f.vault_admin, &10_001u32, &DAY, &Tier::IssuerSigned);
+    assert!(!f.vault.can_deposit());
+    // Restore to 100% → vault opens again.
+    f.vault
+        .update_thresholds(&f.vault_admin, &10_000u32, &DAY, &Tier::IssuerSigned);
+    assert!(f.vault.can_deposit());
+    let cfg = f.vault.config();
+    assert_eq!(cfg.min_bps, 10_000);
+    assert_eq!(cfg.max_age, DAY);
+    assert_eq!(cfg.min_tier, Tier::IssuerSigned);
+}
+
+#[test]
+fn update_thresholds_emits_event() {
+    let f = setup();
+    f.vault
+        .update_thresholds(&f.vault_admin, &9_000u32, &(2 * DAY), &Tier::Transcribed);
+    let cfg = f.vault.config();
+    assert_eq!(cfg.min_bps, 9_000);
+    assert_eq!(cfg.max_age, 2 * DAY);
+    assert_eq!(cfg.min_tier, Tier::Transcribed);
+}
+
+#[test]
+fn update_thresholds_tightens_deposit_gate() {
+    let f = setup();
+    report(&f, 1_000 * UNIT, 1_000 * UNIT);
+    // Currently open (IssuerSigned satisfied).
+    assert!(f.vault.can_deposit());
+    // Require AuditorSigned — no such report exists.
+    f.vault
+        .update_thresholds(&f.vault_admin, &10_000u32, &DAY, &Tier::AuditorSigned);
+    assert!(!f.vault.can_deposit());
 #[test]
 fn deposit_propagates_a_paused_ledger() {
     let f = setup();
@@ -433,5 +595,110 @@ fn deposit_propagates_a_paused_ledger() {
     assert_eq!(
         f.vault.try_deposit(&f.user, &UNIT),
         Err(Ok(LedgerError::Paused.into()))
+    );
+}
+
+#[test]
+fn propose_and_accept_admin_transfers_role_and_emits_events() {
+    let f = setup();
+    assert_eq!(f.vault.admin(), f.admin);
+    assert_eq!(f.vault.pending_admin(), None);
+
+    let next_admin = Address::generate(&f.env);
+    f.vault.propose_admin(&next_admin);
+    assert_eq!(f.env.auths()[0].0, f.admin);
+
+    let events = f.env.events().all().filter_by_contract(&f.vault.address);
+    let (topics, data) = decode_event(&f.env, events.events().last().unwrap());
+    let expected_topics: Vec<Val> = (
+        Symbol::new(&f.env, "vault_admin_proposed"),
+        next_admin.clone(),
+    )
+        .into_val(&f.env);
+    assert_eq!(topics, expected_topics);
+    assert!(Map::<Symbol, Val>::try_from_val(&f.env, &data)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.vault.pending_admin(), Some(next_admin.clone()));
+    assert_eq!(f.vault.admin(), f.admin);
+
+    f.vault.accept_admin();
+    assert_eq!(f.env.auths()[0].0, next_admin);
+
+    let events = f.env.events().all().filter_by_contract(&f.vault.address);
+    let (topics, data) = decode_event(&f.env, events.events().last().unwrap());
+    let expected_topics: Vec<Val> = (
+        Symbol::new(&f.env, "vault_admin_transferred"),
+        f.admin.clone(),
+        next_admin.clone(),
+    )
+        .into_val(&f.env);
+    assert_eq!(topics, expected_topics);
+    assert!(Map::<Symbol, Val>::try_from_val(&f.env, &data)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.vault.admin(), next_admin);
+    assert_eq!(f.vault.pending_admin(), None);
+}
+
+#[test]
+fn accept_admin_without_proposal_fails() {
+    let f = setup();
+    let res = f.vault.try_accept_admin();
+    assert_eq!(res, Err(Ok(VaultError::NoPendingAdmin.into())));
+fn propose_and_accept_vault_admin_transfers_the_role() {
+    let f = setup();
+    let new_admin = Address::generate(&f.env);
+
+    f.vault.propose_vault_admin(&new_admin);
+    assert_eq!(f.vault.pending_vault_admin(), Some(new_admin.clone()));
+
+    f.vault.accept_vault_admin();
+    assert_eq!(f.vault.admin(), new_admin);
+    assert_eq!(f.vault.pending_vault_admin(), None);
+}
+
+#[test]
+fn only_current_admin_can_propose_vault_admin() {
+    let f = setup();
+    let new_admin = Address::generate(&f.env);
+    f.vault.propose_vault_admin(&new_admin);
+
+    let auths = f.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, f.admin);
+}
+
+#[test]
+fn propose_vault_admin_without_admin_auth_fails() {
+    let f = setup();
+    let new_admin = Address::generate(&f.env);
+    // Clear mocked auths so require_auth() has nothing to satisfy.
+    f.env.mock_auths(&[]);
+    let res = f.vault.try_propose_vault_admin(&new_admin);
+    assert!(res.is_err());
+    assert_eq!(f.vault.pending_vault_admin(), None);
+}
+
+#[test]
+fn a_new_proposal_cancels_the_pending_one() {
+    let f = setup();
+    let first = Address::generate(&f.env);
+    let second = Address::generate(&f.env);
+
+    f.vault.propose_vault_admin(&first);
+    f.vault.propose_vault_admin(&second);
+    assert_eq!(f.vault.pending_vault_admin(), Some(second.clone()));
+
+    f.vault.accept_vault_admin();
+    assert_eq!(f.vault.admin(), second);
+}
+
+#[test]
+fn accept_vault_admin_without_a_pending_proposal_fails() {
+    let f = setup();
+    assert_eq!(
+        f.vault.try_accept_vault_admin(),
+        Err(Ok(VaultError::NoPendingAdmin.into()))
     );
 }

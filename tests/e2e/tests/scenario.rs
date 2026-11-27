@@ -16,7 +16,7 @@
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     token::{StellarAssetClient, TokenClient},
-    Address, Bytes, BytesN, Env, Error, Executable, String,
+    Address, Bytes, BytesN, Env, Error, Executable, String, Vec,
 };
 
 mod registry {
@@ -95,14 +95,17 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     let issuer = handle.issuer().address();
     let token = TokenClient::new(&env, &sac);
 
+    let vault_admin = Address::generate(&env);
     let vault_id = env.register(
         vault::WASM,
         (
+            admin.clone(),
             ledger_id.clone(),
             sac.clone(),
             MIN_BPS,
             MAX_AGE,
             vault::Tier::IssuerSigned,
+            vault_admin.clone(),
         ),
     );
     let vault = vault::Client::new(&env, &vault_id);
@@ -114,23 +117,31 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     assert_eq!(vault.config().ledger, ledger_id);
 
     // ---- 1. register reporters --------------------------------------------
+    // Both reporters in one transaction, as an initial population would be.
     let poster = Address::generate(&env);
     let auditor = Address::generate(&env);
-    registry.set_reporter(
-        &poster,
-        &registry::Role::SupplyPoster,
-        &String::from_str(&env, "indexer"),
-    );
-    registry.set_reporter(
-        &auditor,
-        &registry::Role::Auditor,
-        &String::from_str(&env, "Acme Audit"),
-    );
+    registry.batch_register(&Vec::from_array(
+        &env,
+        [
+            registry::ReporterEntry {
+                reporter: poster.clone(),
+                role: registry::Role::SupplyPoster,
+                name: String::from_str(&env, "indexer"),
+            },
+            registry::ReporterEntry {
+                reporter: auditor.clone(),
+                role: registry::Role::Auditor,
+                name: String::from_str(&env, "Acme Audit"),
+            },
+        ],
+    ));
     assert_eq!(
         registry.role_of(&poster),
         Some(registry::Role::SupplyPoster)
     );
     assert_eq!(registry.role_of(&auditor), Some(registry::Role::Auditor));
+    // The ledger reads this cap across the wasm boundary on a first post.
+    assert_eq!(registry.max_reporters(), 20);
 
     // ---- 2. list the asset ------------------------------------------------
     // Nothing can be posted for an asset that is not listed.
@@ -199,10 +210,16 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     assert_eq!(coverage.reserves, 1_020 * UNIT);
     assert_eq!(coverage.tier, ledger::Tier::IssuerSigned);
     assert_eq!(coverage.report_as_of, T0);
-    assert!(ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::IssuerSigned));
+    assert_eq!(
+        ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::IssuerSigned),
+        ledger::CoverageStatus::Covered
+    );
     // The vault's policy demands no more than the issuer tier, so an auditor
     // requirement is a different question with a different answer.
-    assert!(!ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::AuditorSigned));
+    assert_eq!(
+        ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::AuditorSigned),
+        ledger::CoverageStatus::Uncovered
+    );
 
     // ---- 4. deposit -------------------------------------------------------
     let user = Address::generate(&env);
@@ -234,7 +251,10 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     assert_eq!(coverage.bps, 10_200);
     assert_eq!(coverage.supply_timestamp, now);
     assert_eq!(now - coverage.report_as_of, MAX_AGE + 1);
-    assert!(!ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::IssuerSigned));
+    assert_eq!(
+        ledger.is_covered(&sac, &MIN_BPS, &MAX_AGE, &ledger::Tier::IssuerSigned),
+        ledger::CoverageStatus::Uncovered
+    );
     assert!(!vault.can_deposit());
 
     // ---- 6. deposit refused -----------------------------------------------
@@ -246,16 +266,18 @@ fn deposit_gated_on_fresh_coverage_and_withdraw_never_blocked() {
     assert_eq!(token.balance(&vault_id), 100 * UNIT);
     assert_eq!(token.balance(&user), 400 * UNIT);
 
-    // ---- 7. withdraw still works ------------------------------------------
-    assert_eq!(vault.withdraw(&user, &(40 * UNIT)), 60 * UNIT);
+    // ---- 7. withdrawals remain available with the zero-delay default -----
+    vault.request_withdraw(&user, &(40 * UNIT));
+    assert_eq!(vault.execute_withdraw(&user), 60 * UNIT);
     assert_eq!(vault.balance(&user), 60 * UNIT);
     assert_eq!(token.balance(&vault_id), 60 * UNIT);
     assert_eq!(token.balance(&user), 440 * UNIT);
     assert_eq!(
-        vault.try_withdraw(&user, &(61 * UNIT)),
+        vault.try_request_withdraw(&user, &(61 * UNIT)),
         Err(Ok(contract_error(VAULT_INSUFFICIENT_BALANCE)))
     );
-    assert_eq!(vault.withdraw(&user, &(60 * UNIT)), 0);
+    vault.request_withdraw(&user, &(60 * UNIT));
+    assert_eq!(vault.execute_withdraw(&user), 0);
     assert_eq!(token.balance(&vault_id), 0);
     assert_eq!(token.balance(&user), 500 * UNIT);
 
