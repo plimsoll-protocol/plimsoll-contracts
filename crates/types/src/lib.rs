@@ -2,7 +2,7 @@
 //! cross-contract calls between them.
 #![no_std]
 
-use soroban_sdk::{contractclient, contracttype, Address, BytesN, Env, String};
+use soroban_sdk::{contractclient, contracttype, Address, Bytes, BytesN, Env, String, Symbol};
 
 /// One day of ledgers at a 5-second close time.
 pub const DAY_IN_LEDGERS: u32 = 17_280;
@@ -18,6 +18,10 @@ pub const INSTANCE_EXTEND_TO: u32 = 90 * DAY_IN_LEDGERS;
 /// 5-second close time. Long enough for watchers to alert and consumers to
 /// pause, short enough to ship a fix during an incident.
 pub const UPGRADE_DELAY_LEDGERS: u32 = DAY_IN_LEDGERS;
+
+/// Seconds per ledger, used only to render an age in ledgers for display.
+/// Freshness itself is always judged in seconds.
+pub const SECONDS_PER_LEDGER: u64 = 5;
 
 /// Basis-point denominator: 10_000 bps = 100%.
 pub const BPS_DENOMINATOR: i128 = 10_000;
@@ -82,6 +86,23 @@ pub struct ReporterInfo {
     pub added_at: u64,
 }
 
+/// Optional public details a reporter publishes about themselves.
+///
+/// Kept in its own storage key rather than added to `ReporterInfo`: changing
+/// that struct's field list would change the encoding of every existing
+/// reporter entry. A reporter with no metadata simply has no entry.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReporterMetadata {
+    /// A short display handle. `Symbol` limits it to 32 bytes of letters,
+    /// digits and underscores, so it is not the registered legal name.
+    pub name: Option<Symbol>,
+    pub website_uri: Option<String>,
+    /// Hash of the reporter's preferred contact details. The preimage is
+    /// never stored on-chain.
+    pub contact_hash: Option<Bytes>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssetRecord {
@@ -123,6 +144,37 @@ pub struct Coverage {
     pub supply_ledger: u32,
     pub supply_timestamp: u64,
     pub report_as_of: u64,
+}
+
+/// The ratio a `CoverageStatus::Covered` answer carries.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoveredInfo {
+    pub bps: u32,
+}
+
+/// The last ratio and its age, carried by a `CoverageStatus::Stale` answer.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaleInfo {
+    pub last_bps: u32,
+    /// Estimated from the 5-second close time; for display, not consensus.
+    pub age_ledgers: u32,
+}
+
+/// Why an asset is or is not covered, ready to render without a second call.
+/// The precedence is Paused, then Stale, then Uncovered, then Covered.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CoverageStatus {
+    /// Fresh figures give at least the requested minimum.
+    Covered(CoveredInfo),
+    /// Figures exist but at least one is older than the requested maximum.
+    Stale(StaleInfo),
+    /// No figure exists yet, or fresh figures are below the requested minimum.
+    Uncovered,
+    /// The ledger's incident switch is on.
+    Paused,
 }
 
 /// A proposed contract upgrade and the first ledger at which it may execute.
@@ -192,6 +244,14 @@ pub fn coverage_bps(reserves: i128, supply: i128) -> u32 {
 #[contractclient(name = "RegistryClient")]
 pub trait RegistryInterface {
     fn role_of(env: Env, reporter: Address) -> Option<Role>;
+    fn record_report_outcome(env: Env, ledger: Address, reporter: Address, accepted: bool);
+}
+
+/// The subset of a SEP-41 token that coverage-ledger calls when an asset opts
+/// in to a native supply source.
+#[contractclient(name = "SupplyTokenClient")]
+pub trait SupplyTokenInterface {
+    fn total_supply(env: Env) -> i128;
 }
 
 /// The subset of coverage-ledger that consumers call.
@@ -199,6 +259,22 @@ pub trait RegistryInterface {
 pub trait CoverageLedgerInterface {
     fn coverage(env: Env, sac: Address, min_tier: Tier) -> Option<Coverage>;
     fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> CoverageStatus;
+    fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool;
+    fn is_covered_at(
+        env: Env,
+        sac: Address,
+        min_bps: u32,
+        max_age: u64,
+        min_tier: Tier,
+        as_of_ledger: u32,
+    ) -> bool;
+    fn coverage_status(
+        env: Env,
+        sac: Address,
+        min_bps: u32,
+        max_age: u64,
+        min_tier: Tier,
+    ) -> CoverageStatus;
 }
 
 #[cfg(test)]

@@ -5,6 +5,10 @@ extern crate std;
 use super::*;
 use coverage_ledger::{CoverageLedger, CoverageLedgerClient as LedgerClient};
 use plimsoll_types::{CoverageStatus, Role, PERSISTENT_EXTEND_TO};
+use coverage_ledger::{
+    CoverageLedger, CoverageLedgerClient as LedgerClient, MAX_SUPPLY_LEDGER_AGE,
+};
+use plimsoll_types::{Role, PERSISTENT_EXTEND_TO};
 use reporter_registry::{ReporterRegistry, ReporterRegistryClient};
 use soroban_sdk::{
     testutils::{storage::Persistent as _, Address as _, Ledger as _},
@@ -245,15 +249,15 @@ fn report_freshness_uses_as_of_not_post_time() {
 }
 
 #[test]
-fn snapshot_freshness_uses_post_time_not_its_ledger() {
+fn snapshot_freshness_uses_post_time_within_the_ledger_age_bound() {
     let f = setup();
     advance(&f.env, 3 * DAY);
-    // Computed at a ledger two days back, but posted just now: fresh.
-    let two_days_ago = f.env.ledger().sequence() - (2 * DAY / 5) as u32;
-    f.supply_at(1_000 * UNIT, two_days_ago);
+    // At the maximum accepted ledger lag, a newly posted snapshot is fresh.
+    let oldest_accepted = f.env.ledger().sequence() - MAX_SUPPLY_LEDGER_AGE;
+    f.supply_at(1_000 * UNIT, oldest_accepted);
     f.reserve(&f.issuer, 1_000 * UNIT, f.now());
     assert!(f.gate.is_open());
-    // A day and a second later the snapshot is stale, whatever its ledger.
+    // A day and a second later the snapshot is stale based on its post time.
     advance(&f.env, DAY + 1);
     f.reserve(&f.issuer, 1_000 * UNIT, f.now());
     assert!(!f.gate.is_open());

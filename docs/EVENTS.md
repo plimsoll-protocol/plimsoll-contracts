@@ -109,6 +109,21 @@ Testnet, issuer-signed, 10,200,000 PUSD as of 2026-10-05:
 Auditor-signed, 10,150,000 as of 2026-10-04:
 [`b434db8d…`](https://stellar.expert/explorer/testnet/tx/b434db8d240502176ef22f066a1d16ad3e9a4e9c35a283d0e2837bede3a811ce).
 
+### `reserve_retracted`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reserve_retracted` | `Symbol` |
+| topic 1 | `sac` | `Address` (contract) |
+| topic 2 | `tier` | `Tier` (`u32`) |
+| data | `reporter` | `Address` (account) |
+| data | `as_of` | `u64` |
+
+Raised after the reporter's latest report at the resolved tier is removed.
+The reporter must be the one who posted that report. Events retain the
+retracted report's identity and effective date for off-chain history; the next
+qualifying report, if any, becomes eligible for coverage.
+
 ### `admin_transferred`
 
 | | Name | Type |
@@ -119,6 +134,39 @@ Auditor-signed, 10,150,000 as of 2026-10-04:
 Raised by `transfer_admin`, which requires both the outgoing and incoming
 admin to authorise. No testnet example: admin has never been transferred on the
 demo deployment.
+
+### `paused`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `paused` | `Symbol` |
+| data | `by` | `Address` (account) |
+
+Raised by `pause()` after the flag is set. The ledger stops recording figures
+and `is_covered` raises `Paused`; see [SPEC.md](SPEC.md#emergency-pause).
+Idempotent: calling `pause()` while already paused still emits the event, so a
+watcher sees the admin asserting the state either way.
+
+### `unpaused`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `unpaused` | `Symbol` |
+| data | `by` | `Address` (account) |
+
+Raised by `unpause()` after the flag is cleared.
+
+### `native_supply_enabled`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `native_supply_enabled` | `Symbol` |
+| topic 1 | `sac` | `Address` (contract) |
+| data | `token` | `Address` (contract) |
+
+Raised by `enable_native_supply`, which opts an asset in to reading supply
+from a SEP-41 token's `total_supply()` instead of the posted snapshot. The
+snapshot is kept and is used again if the token call fails.
 
 ### `upgrade_proposed`
 
@@ -176,12 +224,41 @@ Testnet: the indexer's supply poster was registered in
 [`6f9bce5a…`](https://stellar.expert/explorer/testnet/tx/6f9bce5af1b52dc53058c3d172591a36cb3b4e1839c726a56aca0a83ae3fd4ee)
 (`role = 2`).
 
+### `reporter_metadata_updated`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `reporter_metadata_updated` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `name` | `Option<Symbol>` |
+| data | `website_uri` | `Option<String>` |
+| data | `contact_hash` | `Option<Bytes>` |
+
+Raised by `update_reporter_metadata` when a registered reporter replaces their
+optional public metadata. An absent field is encoded as ScVal void, so a reader
+must treat "no key" and "void" as the same thing. The preimage of
+`contact_hash` is never published on-chain. `revoke` removes the metadata
+entry without a separate event; treat `reporter_revoked` as clearing it.
+
 ### `reporter_revoked`
 
 | | Name | Type |
 | --- | --- | --- |
 | topic 0 | `reporter_revoked` | `Symbol` |
 | topic 1 | `reporter` | `Address` (account) |
+
+### `stake_changed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `stake_changed` | `Symbol` |
+| topic 1 | `reporter` | `Address` (account) |
+| data | `old_stake` | `i128` |
+| data | `new_stake` | `i128` |
+
+Raised by `top_up_stake` and `reduce_stake` whenever a reporter's tracked stake
+is updated, and by `revoke` (with `new_stake = 0`) if the revoked reporter held
+a positive tracked stake.
 
 No data map. Revocation does not delete the reports a reporter already posted,
 but from that transaction on the coverage ledger stops counting them:
@@ -219,12 +296,35 @@ ingest its events.
 | topic 0 | `deposited` | `Symbol` |
 | topic 1 | `from` | `Address` |
 | data | `amount` | `i128` |
+| data | `balance_after` | `i128` |
 
 Raised only after `is_covered` returned true, which is the point of the example:
 a deposit of an under-backed asset never reaches this event.
 
 Testnet:
 [`f86eecaa…`](https://stellar.expert/explorer/testnet/tx/f86eecaa2eb6252bd4e79708966fc510573b8a9878771641b8f8b514d2804b5b).
+
+### `coverage_dropped`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `coverage_dropped` | `Symbol` |
+| topic 1 | `asset` | `Address` (contract) |
+
+No data map. Raised by `deposit` after its own `deposited` event, when a
+second `is_covered` call, made once the deposit is recorded, answers `false`
+with the vault's stored config. The gate that let the deposit through asked
+the same question before the transfer, and a deposit writes no supply snapshot
+and no report, so on the ledger described in [SPEC.md](SPEC.md) the two
+answers agree and this event is not published. It appears when the ledger's
+answer changes between the two reads, which is the case a keeper watching the
+vault needs in order to restate reserves; subscribe by topic and filter on
+`contract_id` when several vaults share an asset.
+
+A refused deposit publishes nothing at all: the `NotCovered` error rolls the
+transaction back, and a rolled-back transaction keeps no events, so this is
+the only vault event a keeper can learn a drop from. No testnet example: no
+deposit has been made while coverage was failing.
 
 ### `withdrawn`
 
@@ -233,9 +333,24 @@ Testnet:
 | topic 0 | `withdrawn` | `Symbol` |
 | topic 1 | `to` | `Address` |
 | data | `amount` | `i128` |
+| data | `balance_after` | `i128` |
 
-Withdrawal is not gated on coverage: a depositor can always leave. No testnet
-example yet.
+Raised when a queued withdrawal is executed. Withdrawal is not gated on
+coverage: a depositor can always leave once any configured delay has elapsed.
+No testnet example yet.
+
+### `withdrawal_queued`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `withdrawal_queued` | `Symbol` |
+| topic 1 | `to` | `Address` |
+| data | `amount` | `i128` |
+| data | `available_at` | `u64` |
+
+Raised by `request_withdraw` after the request is stored. A new request for the
+same address replaces the previous request and restarts the delay; changing the
+configured delay does not affect a request already queued.
 
 ## Reading these events
 
@@ -262,11 +377,15 @@ pasted:
 | `supply_posted` | `AAAADwAAAA1zdXBwbHlfcG9zdGVkAAAA` |
 | `reserve_posted` | `AAAADwAAAA5yZXNlcnZlX3Bvc3RlZAAA` |
 | `reporter_set` | `AAAADwAAAAxyZXBvcnRlcl9zZXQ=` |
+| `reporter_metadata_updated` | `AAAADwAAABlyZXBvcnRlcl9tZXRhZGF0YV91cGRhdGVk` |
 | `reporter_revoked` | `AAAADwAAABByZXBvcnRlcl9yZXZva2Vk` |
 | `admin_transferred` | `AAAADwAAABFhZG1pbl90cmFuc2ZlcnJlZAAAAA==` |
 | `upgrade_proposed` | `AAAADwAAABB1cGdyYWRlX3Byb3Bvc2Vk` |
 | `upgrade_executed` | `AAAADwAAABB1cGdyYWRlX2V4ZWN1dGVk` |
 | `upgrade_cancelled` | `AAAADwAAABF1cGdyYWRlX2NhbmNlbGxlZA==` |
+| `paused` | `AAAADwAAAAZwYXVzZWQAAA==` |
+| `unpaused` | `AAAADwAAAAh1bnBhdXNlZA==` |
+| `native_supply_enabled` | `AAAADwAAABVuYXRpdmVfc3VwcGx5X2VuYWJsZWQAAAA=` |
 
 ```bash
 # supply posts for any asset: name, then any sac
@@ -281,3 +400,24 @@ stellar events --network testnet \
   --start-ledger 5466000 --output json \
   --topic 'AAAADwAAAA5yZXNlcnZlX3Bvc3RlZAAA,*,AAAAAwAAAAM='
 ```
+
+## Snapshot tests
+
+The shape of every event above is pinned by
+[`tests/events`](../tests/events/tests/snapshots.rs). It drives the ledger and
+the vault through every event they can emit, normalises addresses, byte arrays
+and strings to type placeholders, and compares the resulting topics and data
+to the checked-in files under [`tests/snapshots`](snapshots). A change to an
+event name, a topic's position or type, a data key, or a field's type fails
+that test, which is what makes an unintentional event-schema change fail CI.
+
+When a change is intentional, update [SPEC.md](SPEC.md) and this file, then
+regenerate and review the snapshot:
+
+```bash
+UPDATE_SNAPSHOTS=1 cargo test -p plimsoll-event-snapshots
+```
+
+The snapshot records field **types and values that are not caller-specific**
+(numbers, symbols, the tier topic), not addresses or hashes, because those are
+random in the test host and are not part of the schema.

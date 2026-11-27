@@ -15,9 +15,9 @@ without an issue that says so: the indexer decodes them.
 | Item | Version |
 | --- | --- |
 | Rust | 1.100.0, pinned in `rust-toolchain.toml` (edition 2021) |
-| soroban-sdk | 28.0.0 (workspace dependency) |
+| soroban-sdk | 29.0.1 (workspace dependency) |
 | Target | `wasm32v1-none` |
-| Stellar CLI | 28.1.0 (`stellar contract build` is required by soroban-sdk 28) |
+| Stellar CLI | 28.1.0 (`stellar contract build` is required by soroban-sdk 28+) |
 
 ## Layout
 
@@ -26,6 +26,8 @@ crates/types/src/lib.rs              shared types, bps math, TTL constants, clie
 contracts/reporter-registry/src/     lib.rs + test.rs
 contracts/coverage-ledger/src/       lib.rs + test.rs
 contracts/covered-vault/src/         lib.rs + test.rs
+tests/events/                        event-schema snapshot harness
+tests/snapshots/                     checked-in event schemas
 scripts/deploy-testnet.sh            dependency-ordered deployment
 deployments/testnet.json             current ids
 ```
@@ -54,12 +56,19 @@ using `client.try_*` and `Err(Ok(Error::X.into()))`. Use
 `env.register_stellar_asset_contract_v2(admin)` for assets and take the issuer
 from `handle.issuer().address()` (a G-account), not `Address::generate`.
 
+Every event a contract emits must appear in `tests/events`, which compares the
+normalised topics and data map with `tests/snapshots/`. If an event change is
+intentional, update SPEC.md and EVENTS.md first, then regenerate with
+`UPDATE_SNAPSHOTS=1 cargo test -p plimsoll-event-snapshots` and commit the
+diff with the change.
+
 ## Before every commit
 
 ```bash
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 cargo test
+python3 scripts/check_error_coverage.py
 stellar contract build
 ```
 

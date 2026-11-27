@@ -47,11 +47,15 @@ it exists to show the integration in about 100 lines.
 | `Tier` | `u32` enum | `Transcribed = 1`, `IssuerSigned = 2`, `AuditorSigned = 3` (ordered: higher is stronger) |
 | `CoverageStatus` | `u32` enum | `Uncovered = 0`, `Stale = 1`, `Covered = 2` (ordered: higher is better) |
 | `ReporterInfo` | struct | `role: Role`, `name: String`, `added_at: u64` |
+| `ReporterMetadata` | struct | `name: Option<Symbol>`, `website_uri: Option<String>`, `contact_hash: Option<Bytes>` |
 | `AssetRecord` | struct | `sac: Address`, `code: String`, `issuer: Address`, `listed_at: u64` |
 | `SupplySnapshot` | struct | `amount: i128`, `ledger: u32`, `timestamp: u64`, `breakdown_hash: BytesN<32>`, `poster: Address` |
 | `ReserveReport` | struct | `amount: i128`, `as_of: u64`, `posted_at: u64`, `tier: Tier`, `reporter: Address`, `doc_hash: BytesN<32>`, `doc_uri: String` |
 | `Coverage` | struct | `bps: u32`, `supply: i128`, `reserves: i128`, `tier: Tier`, `supply_ledger: u32`, `supply_timestamp: u64`, `report_as_of: u64` |
 | `PendingUpgrade` | struct | `wasm_hash: BytesN<32>`, `executable_at_ledger: u32` |
+| `CoveredInfo` | struct | `bps: u32` |
+| `StaleInfo` | struct | `last_bps: u32`, `age_ledgers: u32` |
+| `CoverageStatus` | enum | `Covered(CoveredInfo)`, `Stale(StaleInfo)`, `Uncovered`, `Paused` |
 
 Amounts are in the asset's smallest unit (Stellar classic assets: 7 decimals,
 so `1_0000000` is one unit). No floats anywhere. Coverage is basis points:
@@ -124,24 +128,32 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 
 | Entry | Extended by |
 | --- | --- |
-| `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `revoke` |
+| `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `revoke`, `top_up_stake`, `reduce_stake` |
 | `Reporter(Address)` (persistent) | `set_reporter` (write), `get_reporter` / `role_of` (read) |
+| `Metadata(Address)` (persistent) | `update_reporter_metadata` (write), `get_reporter_metadata` (read) |
+| `DisplayName(Address)` (persistent) | `set_reporter_name` (write), `get_reporter_name` (read) |
+| `Stake(Address)` (persistent) | `top_up_stake`, `reduce_stake` (write), `stake_of` (read) |
 
 **coverage-ledger**
 
 | Entry | Extended by |
 | --- | --- |
-| `Admin`, `Registry` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `list_asset`, `post_supply`, `post_reserve` |
-| `Asset(Address)` (persistent) | `list_asset` (write), `get_asset` (read) |
-| `Supply(Address)` (persistent) | `post_supply` (write), `get_supply`, `coverage`, `is_covered` (read) |
-| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `coverage`, `is_covered` (read) |
+| `Admin`, `Registry`, `Paused` (instance) | `__constructor`, `transfer_admin`, `list_asset`, `post_supply`, `post_reserve`, `pause`, `unpause`, `propose_upgrade`, `execute_upgrade`, `cancel_upgrade` |
+| `Asset(Address)` (persistent) | `list_asset` (write), `get_asset`, `last_updated` (existence read) |
+| `Supply(Address)` (persistent) | `post_supply` (write), `get_supply`, `coverage`, `is_covered`, `is_covered_at`, `coverage_status` (read) |
+| `SupplyPostedLedger(Address)` (persistent) | `post_supply` (write), `is_covered_at`, `historical_coverage_bps` (read) |
+| `NativeSupply(Address)` (persistent) | `enable_native_supply` (write), `native_supply_token`, `coverage`, `is_covered`, `coverage_status` (read) |
+| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `get_all_reports`, `last_updated`, `get_all_latest_reports`, `coverage`, `is_covered`, `is_covered_at`, `coverage_status` (read) |
+| `ReportPostedLedger(Address, Tier, Address)` (persistent) | `post_reserve` (write), `is_covered_at`, `historical_coverage_bps` (read) |
+| `Assets` (persistent) | `list_asset` (write), `asset_reporter_pairs`, `get_all_latest_reports` (read) |
 
 **covered-vault**
 
 | Entry | Extended by |
 | --- | --- |
-| `Config` (instance) | `__constructor`, `deposit`, `withdraw` |
-| `Balance(Address)` (persistent) | `deposit` (write), `withdraw` (write), `balance` (read) |
+| `Config`, `Admin`, `WithdrawalDelay` (instance) | `__constructor`, `deposit`, `request_withdraw`, `execute_withdraw`, `set_withdrawal_delay` |
+| `Balance(Address)` (persistent) | `deposit`, `execute_withdraw` (write), `balance`, `request_withdraw` (read) |
+| `PendingWithdrawal(Address)` (persistent) | `request_withdraw` (write), `execute_withdraw` (read and remove) |
 
 ### Archival behaviour
 
@@ -186,6 +198,9 @@ Decides who may speak. Holds no money.
 | --- | --- | --- |
 | `Admin` | instance | `Address` |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
+| `Metadata(Address)` | persistent, TTL extended on write and read | `ReporterMetadata` |
+| `DisplayName(Address)` | persistent, TTL extended on write and read | `Symbol` |
+| `Stake(Address)` | persistent, TTL extended on write and read | `i128` |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 
 **Functions**
@@ -195,7 +210,14 @@ Decides who may speak. Holds no money.
 | `__constructor(admin: Address)` | — | — | — | — |
 | `admin()` | — | `Address` | — | — |
 | `set_reporter(reporter: Address, role: Role, name: String)` | admin | `()` | `InvalidName` (len 0 or > 64) | `reporter_set {reporter} role, name` |
-| `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `reporter_revoked {reporter}` |
+| `revoke(reporter: Address)` | admin | `()` | `ReporterNotFound` | `stake_changed {reporter} old_stake, new_stake` (if stake > 0), `reporter_revoked {reporter}` |
+| `top_up_stake(reporter: Address, amount: i128)` | admin | `i128` (new stake) | `ReporterNotFound`, `InvalidStakeAmount` | `stake_changed {reporter} old_stake, new_stake` |
+| `reduce_stake(reporter: Address, amount: i128)` | admin | `i128` (new stake) | `ReporterNotFound`, `InvalidStakeAmount`, `InsufficientStake` | `stake_changed {reporter} old_stake, new_stake` |
+| `stake_of(reporter: Address)` | — | `i128` | — | — |
+| `update_reporter_metadata(reporter: Address, name: Option<Symbol>, website_uri: Option<String>, contact_hash: Option<Bytes>)` | reporter | `()` | `ReporterNotFound`, `InvalidMetadata` (URI empty or > 256 bytes; contact hash > 64 bytes) | `reporter_metadata_updated {reporter} name, website_uri, contact_hash` |
+| `get_reporter_metadata(reporter: Address)` | — | `Option<ReporterMetadata>` | — | — |
+| `set_reporter_name(reporter: Address, name: Symbol)` | reporter | `()` | `ReporterNotFound` | — |
+| `get_reporter_name(reporter: Address)` | — | `Option<Symbol>` | — | — |
 | `role_of(reporter: Address)` | — | `Option<Role>` | — | — |
 | `get_reporter(reporter: Address)` | — | `Option<ReporterInfo>` | — | — |
 | `transfer_admin(new_admin: Address)` | admin and new_admin | `()` | — | `admin_transferred {new_admin}` |
@@ -204,7 +226,30 @@ Decides who may speak. Holds no money.
 | `cancel_upgrade()` | admin | `()` | `UpgradeNotProposed` | `upgrade_cancelled {wasm_hash}` |
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
 
-Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`.
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
+`InvalidMetadata = 5`, `InvalidStakeAmount = 6`, `InsufficientStake = 7`.
+
+Reporter metadata is optional and lives under its own `Metadata(Address)` key,
+not in `ReporterInfo`. A reporter registered before metadata existed therefore
+keeps its stored entry, and `get_reporter` keeps its old shape. `revoke`
+removes both entries (and clears any tracked `Stake(Address)` entry, emitting
+`stake_changed` to `0` when the previous stake was positive). `update_reporter_metadata` replaces the whole metadata
+record: a `None` field clears that field, and the reporter must be registered.
+`set_reporter` does not touch metadata or stake.
+
+A reporter's on-chain display name is optional and lives under its own
+`DisplayName(Address)` key, so entries stored before it existed are
+unaffected and `get_reporter` keeps its shape. Only the registered reporter
+can set it, with `set_reporter_name`; calling it again replaces the name.
+The 32-character maximum is enforced by the `Symbol` type itself (a longer
+symbol cannot be constructed or passed in). `get_reporter_name` returns
+`None` until a name is set, and `revoke` removes the name with the other
+entries. `set_reporter` does not touch it.
+
+Tracked stake lives under `Stake(Address)` and defaults to `0` when absent.
+`top_up_stake` and `reduce_stake` require positive `amount` (`> 0`), and
+`reduce_stake` removes the key when the balance reaches `0`. Both emit
+`stake_changed {reporter} old_stake, new_stake` after the state change.
 Causes and remedies: [ERRORS.md](ERRORS.md#registryerror).
 
 ## coverage-ledger
@@ -219,11 +264,15 @@ Records what was said, and answers coverage questions.
 | `Registry` | instance | `Address` |
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 | `TtlGrace` | instance | `u32` (ledger count; default 0) |
+| `Paused` | instance | `bool` (absent means not paused) |
 | `Asset(Address)` | persistent | `AssetRecord` |
 | `Supply(Address)` | persistent | `SupplySnapshot` (latest only) |
+| `NativeSupply(Address)` | persistent | `Address`: the SEP-41 token queried for supply when the opt-in is set |
 | `ReportBy(Address, Tier, Address)` | persistent | `ReserveReport`: the latest from one reporter at one tier for one asset |
 | `Reporters(Address, Tier)` | persistent | `Vec<Address>`: the reporters with a `ReportBy` entry at that tier, in the order they first posted; at most `MAX_REPORTERS_PER_TIER = 4` |
+| `Assets` | persistent | `Vec<Address>`: every listed asset, in listing order. The `asset_reporter_pairs` index |
 | `Report(Address, Tier)` | persistent | `ReserveReport`: the v0.1 layout (one per tier). Read until migrated, never written; see [Upgrading a v0.1 deployment](#upgrading-a-v01-deployment) |
+| `Alias(Address)` | persistent | `Address`: maps a deprecated asset SAC to its successor SAC |
 
 Every reporter keeps their own figure. Two auditors' reports coexist, and a
 transcriber who posts a later `as_of` adds a fresher figure without erasing
@@ -263,16 +312,33 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | --- | --- | --- | --- | --- |
 | `__constructor(admin: Address, registry: Address)` | — | — | — | — |
 | `list_asset(sac: Address)` | none (permissionless) | `AssetRecord` | `NotAStellarAsset`, `AlreadyListed` | `asset_listed {sac} code, issuer` |
-| `post_supply(poster: Address, sac: Address, amount: i128, ledger: u32, breakdown_hash: BytesN<32>)` | poster | `()` | `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` | `supply_posted {sac} amount, ledger, breakdown_hash, poster` |
+| `post_supply(poster: Address, sac: Address, amount: i128, ledger: u32, breakdown_hash: BytesN<32>)` | poster | `()` | `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger`, `LedgerTooOld` | `supply_posted {sac} amount, ledger, breakdown_hash, poster` |
 | `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `ImplausibleAmount`, `TooManyReporters` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
+| `retract_reserve(reporter: Address, sac: Address)` | reporter | `()` | `AssetNotListed`, `NotReporter`, `NoReportToRetract` | `reserve_retracted {sac, tier} reporter, as_of` |
 | `get_asset(sac)` | — | `Option<AssetRecord>` | — | — |
 | `get_supply(sac)` | — | `Option<SupplySnapshot>` | — | — |
 | `get_report(sac, tier: Tier)` | — | `Option<ReserveReport>` (the freshest report at that tier that counts) | — | — |
 | `get_reports(sac)` | — | `Vec<ReserveReport>` (every stored report that counts: strongest tier first, then first-post order within a tier) | — | — |
+| `can_post_report(reporter: Address, asset: Address)` | — | `Result<(), LedgerError>` | `Paused`, `AssetNotListed`, `NotReporter`, `TooManyReporters` | — |
+| `get_all_reports(sac)` | — | `Vec<ReserveReport>` (live, non-expired counting reports, strongest tier first, capped at `MAX_ALL_REPORTS = 20`) | — | — |
+| `last_updated(asset: Address)` | — | `Option<u64>` (the ledger timestamp of the asset's most recent reserve post; `None` when unlisted or never reported) | — | — |
+| `get_all_latest_reports(cursor: Option<u32>, limit: u32)` | — | `Vec<ReserveReport>` (one figure per (asset, reporter) pair, up to `MAX_PAIRS_PER_CALL = 50`) | — | — |
+| `historical_coverage_bps(asset: Address, max_age: u32, as_of_ledger: u32)` | — | `Option<u128>` (coverage as the figures posted by `as_of_ledger` gave it; `None` outside the `max_age`-ledger window) | — | — |
+| `reporter_last_post(reporter: Address, asset: Address)` | — | `Option<u64>` (the ledger timestamp of that reporter's most recent post for the asset) | — | — |
+| `asset_reporter_pairs(cursor: Option<u32>, limit: u32)` | — | `Vec<(Address, Address)>` (up to `MAX_PAIRS_PER_CALL = 50` (asset, reporter) pairs) | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
 | `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `CoverageStatus` | — | — |
 | `set_ttl_grace(admin: Address, grace_ledgers: u32)` | admin | `()` | — | `ttl_grace_updated grace_ledgers` |
 | `ttl_grace()` | — | `u32` | — | — |
+| `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `bool` | `Paused` | — |
+| `is_covered_at(sac, min_bps: u32, max_age: u64, min_tier: Tier, as_of_ledger: u32)` | — | `bool` | `FutureLedger`, `Paused` | — |
+| `coverage_status(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `CoverageStatus` | — | — |
+| `pause()` / `unpause()` | admin | `()` | — | `paused` / `unpaused` `by` |
+| `is_paused()` | — | `bool` | — | — |
+| `enable_native_supply(sac, token: Address)` | admin | `()` | `AssetNotListed` | `native_supply_enabled {sac} token` |
+| `native_supply_token(sac)` | — | `Option<Address>` | — | — |
+| `alias_asset(old: Address, new: Address)` | admin | `()` | `AssetNotListed` (either SAC unlisted), `SelfAlias` | `asset_aliased {old, new}` |
+| `get_alias(asset: Address)` | — | `Option<Address>` | — | — |
 | `registry()` / `admin()` | — | `Address` | — | — |
 | `transfer_admin(new_admin)` | admin and new_admin | `()` | — | `admin_transferred` |
 | `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
@@ -297,6 +363,26 @@ Rules:
   forward per reporter: `as_of` strictly greater than that reporter's stored
   report at that tier, and not in the future. Another reporter's report at the
   same tier does not make a figure stale.
+- A supply snapshot's `ledger` must be no more than 720 ledgers behind the
+  current ledger. This is approximately one hour at Stellar's usual five
+  seconds per ledger; the sequence-number bound avoids treating a fresh
+  submission time as evidence that an old snapshot is fresh. A snapshot
+  exactly 720 ledgers behind is accepted.
+- `can_post_report` is a read-only pre-flight for `post_reserve`. It runs
+  the checks that depend only on the reporter and the asset, in the same
+  order and with the same errors: `Paused`, `AssetNotListed`, `NotReporter`
+  (tier resolution), then `TooManyReporters` (counting only slots that
+  `post_reserve` would not reclaim). It writes no storage and extends no TTL.
+  Checks that depend on the figure itself (`InvalidAmount`, `InvalidUri`,
+  `FutureTimestamp`, `StaleReport`, `ImplausibleAmount`) are not covered,
+  so `Ok(())` means the reporter may post to the asset, not that any given
+  figure will be accepted.
+- `retract_reserve` resolves the reporter's tier exactly as `post_reserve`
+  does, then removes only that reporter's stored report at that tier. If no
+  such report exists, it fails with `NoReportToRetract`. Retraction frees the
+  reporter's slot at that tier, and coverage falls back to the next qualifying
+  report or returns `None`. The `reserve_retracted` event preserves the
+  removed report's identity and `as_of`; history remains off-chain in events.
 - Each tier holds reports from at most `MAX_REPORTERS_PER_TIER = 4` reporters
   per asset. When a reporter with no report at a tier posts to a full tier,
   `post_reserve` first drops the entries whose reporter no longer counts
@@ -331,13 +417,138 @@ Rules:
   Callers receive `Stale` during the grace window instead of `Uncovered`, which
   lets them decide whether stale data is acceptable. Zero disables the grace window.
 - `ttl_grace` returns the stored grace window, or `0` when not set.
+  `None` if there is no supply figure or no qualifying report. The supply
+  figure is the latest snapshot, or the token's `total_supply()` when the
+  asset has opted in to a native supply source (see below).
+- `is_covered` is true only if `coverage` is `Some`, both the supply figure
+  and the report are no older than `max_age` seconds, and `bps >= min_bps`.
+  It raises `Paused` rather than answering while the ledger is paused.
+  The comparison is **inclusive**: a coverage ratio exactly equal to `min_bps`
+  returns `true`. This matters at exact round numbers such as `min_bps = 10_000`
+  (100 %): an asset with reserves equal to its circulating supply passes the
+  gate.
+- `is_covered_at` evaluates the latest stored supply snapshot and the latest
+  stored report per reporter as they stood no later than `as_of_ledger`. It
+  raises `FutureLedger` when `as_of_ledger` exceeds the executing ledger, and
+  raises `Paused` while the ledger is paused. The target ledger's timestamp is
+  estimated from the current ledger timestamp and the five-second ledger
+  cadence; `max_age` remains in seconds. Historical queries use posted supply
+  snapshots, not a live native-supply token. The ledger does not retain prior
+  versions of replaced snapshots or reports, so it cannot reconstruct a
+  figure that has since been replaced; such a value is excluded if its current
+  stored version was posted after `as_of_ledger`. Entries written before this
+  query was introduced have no posting-ledger metadata and are eligible only
+  for a query at the current ledger.
+- `last_updated(asset)` answers when the asset was last reported on: the latest
+  `posted_at` across every tier, including a not-yet-migrated v0.1 entry. The
+  registry is not consulted, so a figure whose reporter was later revoked still
+  counts as a post, and a stale figure answers with when it was posted;
+  `get_reports` answers which figures count now. `None` means the asset is
+  unlisted or has never been reported on, which is not the same answer as a very
+  old post. Like `coverage`, a registered alias is followed.
+- `asset_reporter_pairs` and `get_all_latest_reports` walk the pair index the
+  same way: assets in listing order, tiers strongest first within an asset,
+  first-post order within a tier, one entry per reporter per asset.
+  `get_all_latest_reports` carries that reporter's freshest figure (latest
+  `as_of`, ties to the stronger tier). Both page with `cursor` (the index of the
+  first pair, `0` when absent) and `limit`, capped at `MAX_PAIRS_PER_CALL = 50`;
+  an empty page means the cursor is at or past the last pair. Neither consults
+  the registry, so a revoked reporter's figure is still listed. A figure that
+  exists only as a not-yet-migrated v0.1 entry is listed by neither: the pair
+  index is the per-tier reporter index.
+- `historical_coverage_bps(asset, max_age, as_of_ledger)` reads the figures
+  posted no later than `as_of_ledger` and returns
+  `coverage_bps(reserves, supply)` widened to `u128`. The supply snapshot and
+  the chosen report (the freshest at `Transcribed` or stronger posted by then)
+  must both have been posted at most `max_age` **ledgers** before
+  `as_of_ledger`, inclusive — the ledger equivalent of `is_covered`'s seconds.
+  It returns `None` when `as_of_ledger` is in the future (the view cannot fail,
+  so it answers `None` rather than raising `FutureLedger`), when either side has
+  no figure posted by then, or when either is older than `max_age`. The target
+  is a ledger, not a timestamp, so no cadence is assumed. Like `is_covered_at`
+  it reads the stored figures: replaced and retracted ones are not retained, so
+  a ratio they gave cannot be reconstructed here, and the events are the source
+  for that.
+
+- `alias_asset(old, new)` creates or replaces the alias mapping `old → new`.
+  Both `old` and `new` must be listed assets; `old == new` is rejected with
+  `SelfAlias`. Only one alias hop is ever followed: `is_covered(old, ...)` and
+  `coverage(old, ...)` resolve to `new`, but if `new` itself has an alias it is
+  ignored (no chaining). The admin may call `alias_asset` a second time with the
+  same `old` to point it at a different successor, or to `old` itself (which
+  would be rejected with `SelfAlias`; to remove an alias, use a new listing for
+  `old`).
+- `get_alias(asset)` returns the successor address if one has been registered,
+  or `None`.
 
 Errors (`LedgerError`): `NotAStellarAsset = 1`, `AlreadyListed = 2`,
 `AssetNotListed = 3`, `NotSupplyPoster = 4`, `NotReporter = 5`,
 `InvalidAmount = 6`, `FutureLedger = 7`, `StaleLedger = 8`,
 `FutureTimestamp = 9`, `StaleReport = 10`, `InvalidUri = 11`,
-`ImplausibleAmount = 12`, `TooManyReporters = 13`.
+`ImplausibleAmount = 12`, `TooManyReporters = 13`, `UpgradeNotProposed = 14`,
+`UpgradeDelayNotElapsed = 15`, `SelfAlias = 16`, `Paused = 17`,
+`LedgerTooOld = 18`, `NoReportToRetract = 19`.
 Causes, remedies and the order they are checked in: [ERRORS.md](ERRORS.md#ledgererror).
+
+### Emergency pause
+
+`pause()` and `unpause()` are admin-gated switches for an incident. While the
+ledger is paused:
+
+- `post_supply` and `post_reserve` fail with `Paused` before any other check
+  except authentication, so no figure is recorded from either side.
+- `is_covered` raises `Paused` instead of returning false. A consumer such as
+  `covered-vault.deposit` propagates that error, so a pause reads as a pause
+  and not as an under-backed asset.
+- `coverage`, `coverage_status`, all views and `list_asset` keep working. A
+  dashboard can still show the last recorded state, and `coverage_status`
+  returns `Paused`.
+
+Both calls are idempotent and publish an event every time: `paused {by}` or
+`unpaused {by}`, where `by` is the admin that signed. Keeping `unpause`
+non-failing means an admin who is unsure of the current state can still assert
+the state they want. The flag lives in instance storage and defaults to false
+when absent, so an upgrade from a deployment without it starts unpaused.
+
+### Coverage status
+
+`coverage_status(sac, min_bps, max_age, min_tier)` answers the same question as
+`is_covered` with enough detail for a UI, in one call:
+
+| Variant | Meaning |
+| --- | --- |
+| `Paused` | The ledger is paused. Nothing is being recorded or gated. |
+| `Uncovered` | There is no supply figure, no qualifying report, or fresh figures give `bps < min_bps`. |
+| `Stale(StaleInfo { last_bps, age_ledgers })` | Figures exist and at least one of supply or report is older than `max_age` seconds. `last_bps` is the ratio they last gave; `age_ledgers` is the age of the older of the two in whole ledgers (seconds divided by the 5-second close time, rounded down). |
+| `Covered(CoveredInfo { bps })` | Fresh figures give at least `min_bps`. |
+
+The order is deliberate: paused first, stale second (a stale ratio is not a
+verdict on backing), then under-backed, then covered. `age_ledgers` is derived
+from the supply snapshot's `ledger` and the report's `as_of` timestamp using
+the 5-second ledger close; it is an estimate for display, not a consensus
+value. `is_covered` is exactly `CoverageStatus::Covered` while unpaused.
+
+### Native supply source
+
+By default the liability side is a posted snapshot. An asset can opt in to
+reading supply directly from a SEP-41 token contract instead:
+`enable_native_supply(sac, token)` is admin-gated and requires `sac` to be
+listed. It stores the token under `NativeSupply(sac)` and publishes
+`native_supply_enabled {sac} token`; `native_supply_token(sac)` returns it.
+
+When the opt-in is set, `coverage`, `is_covered` and `coverage_status` call
+`token.total_supply()` and treat the result as a supply figure stamped at the
+current ledger and timestamp, so it is always fresh. If the call fails (the
+token does not implement SEP-41 `total_supply`, traps, or returns a negative
+amount), those functions fall back to the posted `Supply(sac)` snapshot. The
+fallback is silent by design: a token that stops answering degrades to the
+last published figure rather than making every consumer fail. `post_supply`
+is unaffected, so a poster can keep publishing snapshots as a backstop.
+
+The snapshot itself is not deleted when the opt-in is enabled, and
+`get_supply` still returns it. `post_reserve`'s plausibility check also keeps
+using the posted snapshot: the check exists to catch a reporter's unit slip,
+and the native figure is not a statement the reporter made.
 
 ### Upgrading a v0.1 deployment
 
@@ -393,7 +604,9 @@ rollback should be followed by each reporter posting again.
 ## covered-vault (reference consumer)
 
 A deposit vault for one asset that refuses deposits while the asset is not
-covered. Withdrawals are never blocked.
+covered. The deployer supplies the vault admin, who can configure a withdrawal delay.
+Withdrawals are never gated on coverage, but when the delay is non-zero they
+must be requested before they can be executed.
 
 **Storage**
 
@@ -410,6 +623,12 @@ covered. Withdrawals are never blocked.
 | `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier, admin: Address)` | — | — | — | — |
 | `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount` |
 | `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
+| `__constructor(admin: Address, ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
+| `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount, balance_after`, `coverage_dropped {asset}` |
+| `request_withdraw(to: Address, amount: i128)` | to | `u64 available_at` | `InvalidAmount`, `InsufficientBalance`, `InvalidDelay` | `withdrawal_queued {to} amount, available_at` |
+| `execute_withdraw(to: Address)` | to | `i128` new balance | `NoPendingWithdrawal`, `WithdrawalDelayNotElapsed`, `InsufficientBalance` | `withdrawn {to} amount, balance_after` |
+| `set_withdrawal_delay(delay_seconds: u64)` | admin | `()` | `InvalidDelay` | — |
+| `withdrawal_delay_seconds()` | — | `u64` | — | — |
 | `balance(of: Address)` | — | `i128` | — | — |
 | `config()` | — | `VaultConfig` | — | — |
 | `admin()` | — | `Address` | — | — |
@@ -424,10 +643,46 @@ show whether the vault is open without simulating a deposit and reading a
 `update_thresholds` replaces the stored `min_bps`, `max_age`, and `min_tier` in
 one atomic call. The admin's auth is required. Existing deposits are unaffected;
 only future deposit attempts see the new thresholds.
+`request_withdraw` replaces any existing request for the same address and
+restarts its delay. It checks the current balance, stores the requested amount
+and `available_at = current timestamp + withdrawal_delay_seconds`, then emits
+`withdrawal_queued`. `execute_withdraw` requires the owner's auth, fails until
+the request's `available_at`, then removes the request, transfers the tokens,
+updates the balance, and emits `withdrawn`. A delay of zero is valid but still
+uses the two calls. The deployer supplies the vault admin as the `admin` constructor argument.
+`set_withdrawal_delay` requires that address's auth and fails with
+`InvalidDelay` if adding the delay to the current timestamp overflows `u64`;
+changing the delay affects newly queued withdrawals and does not change an
+existing request's `available_at`.
+
+`can_deposit()` makes the same `is_covered(asset, min_bps, max_age,
+min_tier)` call `deposit` makes, with the stored config, and returns its
+answer. It is true exactly when a positive deposit would pass the coverage
+gate, so a front end can show whether the vault is open without simulating a
+deposit and reading a `NotCovered` failure. It says nothing about the
+depositor's balance or authorisation.
+
+`deposit` publishes `deposited` once the balance is written, then asks
+`is_covered` again with the same config and publishes `coverage_dropped
+{asset}` if that post-deposit answer is `false`. The second read is fresh
+rather than the answer the gate used, so the event reports the coverage of the
+vault's post-deposit state and a keeper watching for it can restate reserves.
+A deposit writes no supply snapshot and no report, so on a ledger that behaves
+as this document specifies the two reads agree and the event is not published;
+it fires when the ledger's answer changes between the gate and the post-deposit
+read — a later ledger version whose `is_covered` depends on live state, for
+instance — which is exactly the case a keeper would otherwise miss. It costs
+one cross-contract call per successful deposit.
+
+A refused deposit publishes nothing at all: the `NotCovered` error rolls the
+transaction back, and a rolled-back transaction keeps no events. A keeper
+therefore cannot learn about a coverage drop from a refused deposit, only from
+the `coverage_dropped` event on one that succeeds, or from `can_deposit()`.
 
 Errors (`VaultError`): `InvalidAmount = 1`, `NotCovered = 2`,
-`InsufficientBalance = 3`. Causes and remedies, and the asset-contract errors a
-vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
+`InsufficientBalance = 3`, `InvalidDelay = 4`, `NoPendingWithdrawal = 5`,
+`WithdrawalDelayNotElapsed = 6`. Causes and remedies, and the asset-contract
+errors a vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 
 ## User flow → function map
 
@@ -438,15 +693,20 @@ vault call can surface: [ERRORS.md](ERRORS.md#vaulterror).
 | Issuer publishes monthly reserve figure | `coverage-ledger.post_reserve` (issuer account) |
 | Auditor publishes attestation | `coverage-ledger.post_reserve` (auditor) |
 | Volunteer copies a figure from a PDF report | `coverage-ledger.post_reserve` (transcriber) |
+| Front end checks a reporter may post before asking them to sign | `coverage-ledger.can_post_report` |
+| Reporter sets a human-readable name shown by the dashboard | `reporter-registry.set_reporter_name`, `get_reporter_name` |
 | Maintainer onboards an auditor / transcriber / poster | `reporter-registry.set_reporter` |
 | Maintainer removes a bad actor | `reporter-registry.revoke` (their reports stop counting at once) |
 | Dashboard shows ratio and freshness | `coverage-ledger.coverage`, `get_supply`, `get_reports` |
 | Lending pool refuses an under-backed asset | `coverage-ledger.is_covered` (see `covered-vault`) |
 | Front end shows whether the vault is taking deposits | `covered-vault.can_deposit` |
+| Keeper restates reserves after the vault reports a coverage drop | `covered-vault.deposit` (emits `coverage_dropped`) |
 
 ## Out of scope for v0.1
 
-- Soroban-native SEP-41 tokens (no standard total-supply function).
+- Listing a Soroban-native SEP-41 token as an asset. Its supply can be read
+  through `enable_native_supply`, but `list_asset` still accepts only a
+  Stellar Asset Contract, because the issuer and code come from the SAC name.
 - On-chain dispute of supply figures. Watchers recompute off-chain; disputes
   are tracked as an open issue.
 - Zero-knowledge proof of individual holder inclusion.

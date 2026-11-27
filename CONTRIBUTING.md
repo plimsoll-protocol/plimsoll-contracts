@@ -35,9 +35,24 @@ advisory has a comment explaining why it cannot be fixed yet.
 
 - [ ] One logical change per pull request. Link the issue (`Closes #12`).
 - [ ] `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and `cargo deny check` pass.
+- [ ] If an event changed, `tests/snapshots/` is regenerated with
+      `UPDATE_SNAPSHOTS=1 cargo test -p plimsoll-event-snapshots` and the diff
+      is reviewed alongside [docs/EVENTS.md](docs/EVENTS.md).
 - [ ] New public functions have tests for the success path **and** every error they can return.
+- [ ] Every `#[contracterror]` variant is asserted by a test:
+      `python3 scripts/check_error_coverage.py` passes. A variant that cannot be
+      reached is listed in that script with a reason.
 - [ ] If behaviour changed, [docs/SPEC.md](docs/SPEC.md) is updated in the same pull request.
 - [ ] Commit messages use [Conventional Commits](https://www.conventionalcommits.org/): `feat(ledger): …`, `fix(registry): …`, `test(vault): …`.
+
+## CI checks
+
+Besides tests, clippy and the absolute size budgets in `size-budgets.json`,
+every pull request gets a `wasm size report` comment comparing each
+contract's built wasm size on the PR head against its base branch, in KB and
+as a percentage change. The check fails if any contract grows by more than
+10% (`scripts/wasm_size_diff.py`); the comment is edited in place on each
+push rather than duplicated.
 
 ## Code standards
 
@@ -49,6 +64,9 @@ advisory has a comment explaining why it cannot be fixed yet.
 - Every persistent write extends TTL with the constants in `plimsoll-types`.
 - Every state change emits a `#[contractevent]`. The indexer depends on them;
   changing an event's fields is a breaking change and needs an issue first.
+  `tests/events` pins the topic and data shape of every ledger and vault event
+  against the files in `tests/snapshots/`; an unintentional change fails
+  `cargo test`.
 - `require_auth()` on the address whose authority is used, before any write.
 
 ## AI-assisted contributions

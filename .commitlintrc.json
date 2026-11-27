@@ -1,0 +1,26 @@
+{
+  "extends": ["@commitlint/config-conventional"],
+  "rules": {
+    "type-enum": [2, "always", [
+      "feat",
+      "fix",
+      "docs",
+      "ci",
+      "test",
+      "chore",
+      "perf",
+      "security"
+    ]],
+    "scope-enum": [2, "always", [
+      "types",
+      "registry",
+      "ledger",
+      "vault",
+      "spec",
+      "deploy",
+      "ci",
+      "deps"
+    ]],
+    "header-max-length": [2, "always", 100]
+  }
+}

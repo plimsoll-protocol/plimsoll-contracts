@@ -1,0 +1,19 @@
+[package]
+name = "plimsoll-event-snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Snapshot tests that pin the topic and data shape of every coverage-ledger and covered-vault event."
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+plimsoll-types = { workspace = true }
+coverage-ledger = { path = "../../contracts/coverage-ledger" }
+covered-vault = { path = "../../contracts/covered-vault" }
+reporter-registry = { path = "../../contracts/reporter-registry" }

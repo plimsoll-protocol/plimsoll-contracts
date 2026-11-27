@@ -20,15 +20,19 @@ that raised it.** The three contracts number their errors independently, so
 When a contract calls another and the callee fails, the callee's error is the
 one that comes back. In practice:
 
-- `covered-vault.deposit` and `withdraw` move tokens through the asset's
+- `covered-vault.deposit` and `execute_withdraw` move tokens through the asset's
   Stellar Asset Contract (SAC). If the transfer fails, the caller sees the
   **SAC's** error code, not a vault code. See
   [Errors from the asset contract](#errors-from-the-asset-contract).
 - `coverage-ledger` calls `reporter-registry.role_of` and the SAC's `name`,
   but neither can fail on a valid deployment, so a ledger call only ever
   fails with a ledger code.
-- `coverage-ledger.is_covered` and `coverage` never fail. Every reason an
-  asset might not qualify comes back as `false` or `None`.
+- `coverage-ledger.is_covered` fails only with `Paused`, and only while an
+  admin has paused the ledger. Every other reason an asset might not qualify
+  comes back as `false`. `coverage` never fails; it returns `None`.
+- `covered-vault.deposit` propagates the ledger's `Paused` error unchanged
+  when the ledger is paused, so a pause is distinguishable from
+  `NotCovered`.
 
 ### Numbers are never reused or renumbered
 
@@ -40,9 +44,34 @@ So a variant's number is fixed for good once it ships:
   anything else.
 - No existing variant is renumbered, whatever the reason.
 
-[AGENTS.md](../AGENTS.md) makes this a rule for every change, and the
-end-to-end test in [tests/e2e](../tests/e2e/tests/scenario.rs) asserts several
-codes as literal numbers, so a renumbering fails CI.
+[AGENTS.md](../AGENTS.md) makes this a rule for every change. The end-to-end
+test in [tests/e2e](../tests/e2e/tests/scenario.rs) asserts several codes as
+literal numbers, and CI runs [scripts/check_error_codes.py](../scripts/check_error_codes.py),
+which compares every `#[contracterror]` enum with the base branch and fails on a
+renumbering, a removal or a new variant that is not appended after the last
+one. Run it yourself before pushing:
+
+```bash
+python3 scripts/check_error_codes.py --base origin/main
+```
+
+### Every code has a test
+
+`cargo test` covers behaviour; a second check covers the list itself.
+[`scripts/check_error_coverage.py`](../scripts/check_error_coverage.py) (the
+**Error-code coverage** step in CI, or `python3
+scripts/check_error_coverage.py` locally) reads every `#[contracterror]` enum
+under `contracts/` and `examples/` and fails if some variant is named by no
+test file in its package. It prints a per-enum covered count and every
+uncovered `Type::Variant` with its number, so the failing output is the to-do
+list. It also fails on a duplicate error number in one enum, because the
+number is what the indexer decodes.
+
+A code that genuinely cannot be reached from a test is listed with its reason
+in `INTENTIONALLY_UNTESTED` at the top of that script. The check fails when a
+listed entry has gone stale (the variant is gone, or a test now covers it), so
+the list cannot be used to paper over a missing test. There are no such
+entries today: every code below is covered.
 
 ## Quick lookup
 
@@ -50,10 +79,10 @@ codes as literal numbers, so a renumbering fails CI.
 | ---: | --- | --- | --- |
 | 1 | [`ReporterNotFound`](#1-reporternotfound) | [`NotAStellarAsset`](#1-notastellarasset) | [`InvalidAmount`](#1-invalidamount) |
 | 2 | [`InvalidName`](#2-invalidname) | [`AlreadyListed`](#2-alreadylisted) | [`NotCovered`](#2-notcovered) |
-| 3 | | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
-| 4 | | [`NotSupplyPoster`](#4-notsupplyposter) | |
-| 5 | | [`NotReporter`](#5-notreporter) | |
-| 6 | | [`InvalidAmount`](#6-invalidamount) | |
+| 3 | `UpgradeNotProposed` | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
+| 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | [`InvalidDelay`](#4-invaliddelay) |
+| 5 | [`InvalidMetadata`](#5-invalidmetadata) | [`NotReporter`](#5-notreporter) | [`NoPendingWithdrawal`](#5-nopendingwithdrawal) |
+| 6 | | [`InvalidAmount`](#6-invalidamount) | [`WithdrawalDelayNotElapsed`](#6-withdrawaldelaynotelapsed) |
 | 7 | | [`FutureLedger`](#7-futureledger) | |
 | 8 | | [`StaleLedger`](#8-staleledger) | |
 | 9 | | [`FutureTimestamp`](#9-futuretimestamp) | |
@@ -61,11 +90,18 @@ codes as literal numbers, so a renumbering fails CI.
 | 11 | | [`InvalidUri`](#11-invaliduri) | |
 | 12 | | [`ImplausibleAmount`](#12-implausibleamount) | |
 | 13 | | [`TooManyReporters`](#13-toomanyreporters) | |
+| 14 | | [`UpgradeNotProposed`](#14-upgradenotproposed) | |
+| 15 | | [`UpgradeDelayNotElapsed`](#15-upgradedelaynotelapsed) | |
+| 16 | | [`SelfAlias`](#16-selfalias) | |
+| 17 | | [`Paused`](#17-paused) | |
+| 18 | | [`LedgerTooOld`](#18-ledgertooold) | |
+| 19 | | [`NoReportToRetract`](#19-noreporttoretract) | |
 
 ## RegistryError
 
-Raised by `reporter-registry`. Both functions that can fail are admin-only,
-so these errors reach maintainers rather than end users.
+Raised by `reporter-registry`. The role and upgrade errors are admin-only, so
+they reach maintainers rather than end users; `InvalidMetadata` is raised to a
+registered reporter updating their own entry.
 
 ### 1 `ReporterNotFound`
 
@@ -84,6 +120,29 @@ so these errors reach maintainers rather than end users.
   exceed it.
 - **Remedy:** Use a short, non-empty display name of 1 to 64 bytes.
 
+### 5 `InvalidMetadata`
+
+- **Raised by:** `update_reporter_metadata(reporter, name, website_uri,
+  contact_hash)`.
+- **Cause:** `Some(website_uri)` is empty or longer than 256 bytes, or
+  `Some(contact_hash)` is empty or longer than 64 bytes. A `None` field is not
+  an error; it clears that field.
+- **Remedy:** Shorten the URL or omit those fields. The `name` field is a
+  `Symbol` and is already limited to 32 bytes by the host.
+
+### 6 `InvalidStakeAmount`
+
+- **Raised by:** `top_up_stake(reporter, amount)`, `reduce_stake(reporter, amount)`.
+- **Cause:** `amount` is zero or negative, or adding `amount` to the existing
+  stake would overflow `i128`.
+- **Remedy:** Pass a strictly positive `amount` within `i128` bounds.
+
+### 7 `InsufficientStake`
+
+- **Raised by:** `reduce_stake(reporter, amount)`.
+- **Cause:** `amount` exceeds the reporter's currently tracked stake (`stake_of`).
+- **Remedy:** Query `stake_of(reporter)` and reduce by at most that amount.
+
 ## LedgerError
 
 Raised by `coverage-ledger`. Each write checks its errors in a fixed order, so
@@ -92,8 +151,11 @@ when several apply the caller sees the first:
 | Function | Order checked |
 | --- | --- |
 | `list_asset` | `NotAStellarAsset` (not a SAC), `AlreadyListed`, `NotAStellarAsset` (SAC name has no issuer) |
-| `post_supply` | auth, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` |
-| `post_reserve` | auth, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+| `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `LedgerTooOld`, `StaleLedger` |
+| `is_covered_at` | `FutureLedger`, `Paused` |
+| `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+| `retract_reserve` | auth, `AssetNotListed`, `NotReporter`, `NoReportToRetract` |
+| `enable_native_supply` | auth, `AssetNotListed` |
 
 ### 1 `NotAStellarAsset`
 
@@ -154,10 +216,12 @@ when several apply the caller sees the first:
 
 ### 7 `FutureLedger`
 
-- **Raised by:** `post_supply`.
-- **Cause:** `ledger` is greater than the ledger the transaction executes in.
-- **Remedy:** Post the sequence number of the ledger the supply was actually
-  computed at, which is in the past by the time the transaction lands.
+- **Raised by:** `post_supply`, `is_covered_at`.
+- **Cause:** A supplied sequence (`ledger` or `as_of_ledger`) is greater than
+  the ledger the transaction executes in.
+- **Remedy:** For `post_supply`, use the sequence number the supply was
+  computed at. For `is_covered_at`, query a ledger no later than the one the
+  transaction executes in.
 
 ### 8 `StaleLedger`
 
@@ -225,6 +289,56 @@ when several apply the caller sees the first:
   `reporter-registry.revoke`. Their slot is reclaimed by the next
   `post_reserve` at that tier.
 
+### 14 `UpgradeNotProposed`
+
+- **Raised by:** `execute_upgrade`, `cancel_upgrade`.
+- **Cause:** Nothing is awaiting execution. The proposal was never made, was
+  already executed, or was cancelled. A new proposal also replaces the old
+  one, so only the latest hash is ever pending.
+- **Remedy:** Read `pending_upgrade()`. If it is `None`, call
+  `propose_upgrade(wasm_hash)` and wait `UPGRADE_DELAY_LEDGERS` before
+  executing.
+
+### 15 `UpgradeDelayNotElapsed`
+
+- **Raised by:** `execute_upgrade`.
+- **Cause:** The pending proposal's `executable_at_ledger` has not been
+  reached yet. The delay is `UPGRADE_DELAY_LEDGERS` ledgers from the proposal.
+- **Remedy:** Wait until the current ledger sequence is at least
+  `pending_upgrade().executable_at_ledger`, then execute. Watching
+  `upgrade_proposed` is the intended signal to raise an alarm before that
+  ledger closes.
+
+### 17 `Paused`
+
+- **Raised by:** `post_supply`, `post_reserve`, `is_covered`.
+- **Cause:** An admin called `pause()` and has not called `unpause()` yet.
+  Pausing stops new figures from being recorded and stops `is_covered` from
+  answering, so a consumer never reads a pause as an under-backed asset.
+- **Remedy:** Nothing is wrong with the caller's request. Wait for the admin
+  to `unpause()`, or read `is_paused()` and `coverage_status(...)` first and
+  show the paused state in the UI. `coverage`, `get_supply`, `get_reports`
+  and `coverage_status` keep working while paused.
+
+### 18 `LedgerTooOld`
+
+- **Raised by:** `post_supply(poster, sac, amount, ledger, breakdown_hash)`.
+- **Cause:** `ledger` is more than 720 ledgers behind the current ledger
+  (approximately one hour at Stellar's usual five-second ledger cadence).
+  `post_supply` stores the submission time, so without this sequence bound an
+  old figure could be presented as a fresh snapshot.
+- **Remedy:** Recompute supply from a recent ledger and post its sequence.
+  Exactly 720 ledgers of lag is accepted.
+
+### 19 `NoReportToRetract`
+
+- **Raised by:** `retract_reserve(reporter, sac)`.
+- **Cause:** The authorised reporter has no stored report for the tier their
+  identity currently resolves to. This includes signing with a different
+  reporter address, even when another reporter has a report at that tier.
+- **Remedy:** Sign with the address that posted the report, and confirm the
+  report still exists at the reporter's current tier.
+
 ## VaultError
 
 Raised by `covered-vault`, the reference consumer. These are the errors end
@@ -232,7 +346,7 @@ users meet most.
 
 ### 1 `InvalidAmount`
 
-- **Raised by:** `deposit`, `withdraw`.
+- **Raised by:** `deposit`, `request_withdraw`.
 - **Cause:** `amount` is zero or negative. On `deposit` it is also raised if
   the new balance would overflow `i128`, which no real asset can reach.
 - **Remedy:** Send a positive amount in the asset's smallest unit.
@@ -248,8 +362,10 @@ users meet most.
   - The chosen report's `as_of` is more than `max_age` seconds ago.
   - Coverage is below `min_bps`.
 - **Remedy:** Users should wait. The asset will be accepted again once fresh
-  figures show it is covered, and withdrawals are never blocked. Front ends
-  should call `can_deposit()` before offering a deposit, and to explain the
+  figures show it is covered, and withdrawals are never blocked. A paused
+  ledger raises `Paused` from `deposit` instead of `NotCovered`, so check
+  `coverage-ledger.is_paused()` to tell the two apart. Front ends should call
+  `can_deposit()` before offering a deposit, and to explain the
   refusal, read `config()` and then
   `coverage-ledger.coverage(asset, min_tier)`:
   - `None` means a figure is missing.
@@ -259,21 +375,41 @@ users meet most.
 
 ### 3 `InsufficientBalance`
 
-- **Raised by:** `withdraw`.
+- **Raised by:** `request_withdraw`, `execute_withdraw`.
 - **Cause:** `amount` is more than the caller's balance in the vault.
 - **Remedy:** Read `balance(of)` and withdraw at most that.
+
+### 4 `InvalidDelay`
+
+- **Raised by:** `set_withdrawal_delay`, `request_withdraw`.
+- **Cause:** Adding the configured delay to the current ledger timestamp
+  overflows `u64`.
+- **Remedy:** Configure a delay that fits in the remaining timestamp range.
+
+### 5 `NoPendingWithdrawal`
+
+- **Raised by:** `execute_withdraw`.
+- **Cause:** The caller has no queued withdrawal.
+- **Remedy:** Call `request_withdraw` and execute it after its available time.
+
+### 6 `WithdrawalDelayNotElapsed`
+
+- **Raised by:** `execute_withdraw`.
+- **Cause:** The queued withdrawal's `available_at` is later than the current
+  ledger timestamp.
+- **Remedy:** Retry at or after `available_at`.
 
 ## Errors from the asset contract
 
 `covered-vault` moves tokens with the asset's SAC, so these SAC codes can
-surface from `deposit` and `withdraw`. They come from the Soroban host's
+surface from `deposit` and `execute_withdraw`. They come from the Soroban host's
 built-in token. The ones a vault user can hit:
 
 | N | SAC error | When | What to do |
 | ---: | --- | --- | --- |
 | 10 | `BalanceError` | `deposit` of more than the wallet holds | Deposit at most the wallet's token balance. |
 | 11 | `BalanceDeauthorizedError` | The issuer has not authorized, or has frozen, the account's trustline | Contact the issuer; the trustline must be authorized. |
-| 13 | `TrustlineMissingError` | The account has no trustline to the asset (`deposit` from, or `withdraw` to, it) | Add a trustline to the asset first. |
+| 13 | `TrustlineMissingError` | The account has no trustline to the asset (`deposit` from, or `execute_withdraw` to, it) | Add a trustline to the asset first. |
 
 The end-to-end test asserts that an oversized deposit fails with `#10` from
 the SAC.
