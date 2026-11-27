@@ -3328,6 +3328,74 @@ fn post_supply_stays_within_its_resource_budget() {
                 .post_supply(&f.poster, &f.sac, &UNIT, &990, &hash(&f.env, 1));
         },
     );
+    assert_eq!(f.ledger.get_report(&f.sac, &Tier::IssuerSigned), None);
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 0);
+    assert_eq!(f.ledger.coverage(&f.sac, &Tier::Transcribed), None);
+}
+
+#[test]
+fn a_replaced_delegates_figures_stop_counting_until_reappointed() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    let first = appoint(&f);
+    post(&f, &first, 100 * UNIT, T0 - 10);
+    let second = appoint(&f);
+    post(&f, &second, 90 * UNIT, T0 - 60);
+
+    // The first delegate's fresher figure no longer counts.
+    let r = f.ledger.get_report(&f.sac, &Tier::IssuerSigned).unwrap();
+    assert_eq!(r.reporter, second);
+    assert_eq!(
+        f.ledger
+            .coverage(&f.sac, &Tier::IssuerSigned)
+            .unwrap()
+            .reserves,
+        90 * UNIT
+    );
+
+    f.ledger.set_issuer_delegate(&f.sac, &Some(first.clone()));
+    let r = f.ledger.get_report(&f.sac, &Tier::IssuerSigned).unwrap();
+    assert_eq!(r.reporter, first);
+}
+
+#[test]
+fn the_issuers_own_figures_count_whatever_the_delegate() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.issuer, 100 * UNIT, T0 - 60);
+    appoint(&f);
+    f.ledger.set_issuer_delegate(&f.sac, &None);
+    let r = f.ledger.get_report(&f.sac, &Tier::IssuerSigned).unwrap();
+    assert_eq!(r.reporter, f.issuer);
+}
+
+#[test]
+fn a_former_delegates_slot_is_reclaimed_when_the_tier_is_full() {
+    let f = listed();
+    post(&f, &f.issuer, UNIT, T0 - 60);
+    for _ in 1..MAX_REPORTERS_PER_TIER {
+        let delegate = appoint(&f);
+        post(&f, &delegate, UNIT, T0 - 60);
+    }
+    // The tier is full: the issuer and three delegates, all now former.
+    let current = appoint(&f);
+    assert_eq!(post(&f, &current, UNIT, T0 - 30), Tier::IssuerSigned);
+    let reporters: std::vec::Vec<Address> = f
+        .ledger
+        .get_reports(&f.sac)
+        .iter()
+        .map(|r| r.reporter)
+        .collect();
+    assert_eq!(reporters, std::vec![f.issuer.clone(), current]);
+}
+
+// ---- version --------------------------------------------------------------
+
+#[test]
+fn version_is_the_constant() {
+    let f = setup();
+    assert_eq!(f.ledger.version(), VERSION);
+    assert_eq!(f.ledger.version(), 1);
 }
 
 #[test]

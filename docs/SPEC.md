@@ -302,6 +302,8 @@ Rules:
   configured minimum. `coverage-ledger.post_supply` checks it on every post,
   so a reporter that later falls below the requirement cannot submit a
   snapshot. This is a balance requirement, not a transfer or custody of XLM.
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
+`UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
 `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`,
