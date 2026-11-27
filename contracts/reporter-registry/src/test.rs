@@ -416,6 +416,174 @@ fn transfer_admin_without_new_admin_auth_fails() {
 }
 
 #[test]
+fn dispute_quorum_defaults_to_1_and_is_admin_settable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+
+    assert_eq!(client.dispute_quorum(), 1);
+    client.set_dispute_quorum(&3);
+    assert_eq!(client.dispute_quorum(), 3);
+}
+
+#[test]
+fn set_dispute_quorum_rejects_zero_and_requires_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+
+    let res = client.try_set_dispute_quorum(&0);
+    assert_eq!(res, Err(Ok(RegistryError::InvalidQuorum.into())));
+
+    env.mock_auths(&[]);
+    assert!(client.try_set_dispute_quorum(&2).is_err());
+}
+
+#[test]
+fn dispute_report_auto_rejects_at_default_quorum_1_and_fires_event() {
+    use soroban_sdk::{testutils::Events, xdr::ContractEventBody, Symbol, TryFromVal};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+
+    let watcher = Address::generate(&env);
+    let report_id = BytesN::from_array(&env, &[1u8; 32]);
+    let status = client.dispute_report(&watcher, &report_id);
+    assert_eq!(status, DisputeStatus::Rejected);
+
+    let rejected_events = env
+        .events()
+        .all()
+        .events()
+        .iter()
+        .filter(|e| {
+            let ContractEventBody::V0(body) = &e.body;
+            body.topics
+                .first()
+                .and_then(|t| Symbol::try_from_val(&env, t).ok())
+                .is_some_and(|s| s == Symbol::new(&env, "report_rejected"))
+        })
+        .count();
+    assert_eq!(rejected_events, 1);
+
+    let record = client.get_dispute(&report_id).unwrap();
+    assert_eq!(record.status, DisputeStatus::Rejected);
+    assert_eq!(record.watchers.len(), 1);
+}
+
+#[test]
+fn dispute_report_holds_until_quorum_met_by_distinct_watchers() {
+    use soroban_sdk::{testutils::Events, xdr::ContractEventBody, Symbol, TryFromVal};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+
+    client.set_dispute_quorum(&3);
+    let report_id = BytesN::from_array(&env, &[2u8; 32]);
+    let w1 = Address::generate(&env);
+    let w2 = Address::generate(&env);
+    let w3 = Address::generate(&env);
+
+    assert_eq!(client.dispute_report(&w1, &report_id), DisputeStatus::Held);
+    assert_eq!(client.dispute_report(&w2, &report_id), DisputeStatus::Held);
+    // Not rejected yet.
+    let rejected_before = env
+        .events()
+        .all()
+        .events()
+        .iter()
+        .filter(|e| {
+            let ContractEventBody::V0(body) = &e.body;
+            body.topics
+                .first()
+                .and_then(|t| Symbol::try_from_val(&env, t).ok())
+                .is_some_and(|s| s == Symbol::new(&env, "report_rejected"))
+        })
+        .count();
+    assert_eq!(rejected_before, 0);
+    assert_eq!(
+        client.get_dispute(&report_id).unwrap().status,
+        DisputeStatus::Held
+    );
+
+    // Third distinct watcher meets quorum -> auto-rejected + event.
+    assert_eq!(
+        client.dispute_report(&w3, &report_id),
+        DisputeStatus::Rejected
+    );
+    let rejected_after = env
+        .events()
+        .all()
+        .events()
+        .iter()
+        .filter(|e| {
+            let ContractEventBody::V0(body) = &e.body;
+            body.topics
+                .first()
+                .and_then(|t| Symbol::try_from_val(&env, t).ok())
+                .is_some_and(|s| s == Symbol::new(&env, "report_rejected"))
+        })
+        .count();
+    assert_eq!(rejected_after, 1);
+}
+
+#[test]
+fn duplicate_dispute_and_post_rejection_and_expired_holding_period_fail() {
+    use soroban_sdk::testutils::Ledger;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let id = env.register(ReporterRegistry, (admin,));
+    let client = ReporterRegistryClient::new(&env, &id);
+
+    client.set_dispute_quorum(&2);
+    let report_id = BytesN::from_array(&env, &[3u8; 32]);
+    let w1 = Address::generate(&env);
+    let w2 = Address::generate(&env);
+    let w3 = Address::generate(&env);
+
+    assert_eq!(client.dispute_report(&w1, &report_id), DisputeStatus::Held);
+    // Same watcher cannot dispute twice.
+    assert_eq!(
+        client.try_dispute_report(&w1, &report_id),
+        Err(Ok(RegistryError::DuplicateDispute.into()))
+    );
+
+    // Second distinct watcher triggers rejection.
+    assert_eq!(
+        client.dispute_report(&w2, &report_id),
+        DisputeStatus::Rejected
+    );
+    // Further disputes after rejection fail.
+    assert_eq!(
+        client.try_dispute_report(&w3, &report_id),
+        Err(Ok(RegistryError::DisputeAlreadyRejected.into()))
+    );
+
+    // Expired holding period fails for a new report.
+    let report_id_2 = BytesN::from_array(&env, &[4u8; 32]);
+    assert_eq!(
+        client.dispute_report(&w1, &report_id_2),
+        DisputeStatus::Held
+    );
+    env.ledger()
+        .with_mut(|li| li.timestamp += DISPUTE_HOLDING_PERIOD_SECS + 1);
+    assert_eq!(
+        client.try_dispute_report(&w2, &report_id_2),
+        Err(Ok(RegistryError::HoldingPeriodElapsed.into()))
+    );
+}
 fn register_and_confirm_reporter_activates_within_window() {
     let (env, admin, client) = setup();
     env.ledger().set_sequence_number(100);

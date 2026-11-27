@@ -14,6 +14,9 @@ use soroban_sdk::{
 const MAX_NAME_LEN: u32 = 64;
 const MAX_WEBSITE_URI_LEN: u32 = 256;
 const MAX_CONTACT_HASH_LEN: u32 = 64;
+/// Holding period (in seconds) within which distinct watcher disputes accrue
+/// toward `dispute_quorum` (24 hours).
+pub const DISPUTE_HOLDING_PERIOD_SECS: u64 = 86_400;
 /// Most category tags a reporter may self-assign at once.
 const MAX_TAGS: u32 = 5;
 
@@ -25,6 +28,25 @@ enum DataKey {
     Metadata(Address),
     Stake(Address),
     PendingUpgrade,
+    DisputeQuorum,
+    Dispute(BytesN<32>),
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum DisputeStatus {
+    Held = 1,
+    Rejected = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeRecord {
+    pub report_id: BytesN<32>,
+    pub watchers: Vec<Address>,
+    pub opened_at: u64,
+    pub status: DisputeStatus,
     PendingReporter(Address),
     /// A reporter's self-assigned category tags.
     Tags(Address),
@@ -50,6 +72,10 @@ pub enum RegistryError {
     UpgradeNotProposed = 3,
     UpgradeDelayNotElapsed = 4,
     InvalidMetadata = 5,
+    InvalidQuorum = 6,
+    DuplicateDispute = 7,
+    DisputeAlreadyRejected = 8,
+    HoldingPeriodElapsed = 9,
     InvalidConfirmWindow = 6,
     PendingRegistrationNotFound = 7,
     RegistrationExpired = 8,
@@ -171,6 +197,29 @@ pub struct UpgradeExecuted {
 pub struct UpgradeCancelled {
     #[topic]
     pub wasm_hash: BytesN<32>,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeQuorumSet {
+    pub quorum: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReportDisputed {
+    #[topic]
+    pub report_id: BytesN<32>,
+    pub watcher: Address,
+    pub dispute_count: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReportRejected {
+    #[topic]
+    pub report_id: BytesN<32>,
+    pub dispute_count: u32,
 }
 
 #[contract]
@@ -822,6 +871,69 @@ impl ReporterRegistry {
         proposed
     }
 
+    /// Set the number of distinct watchers that must dispute a report within the
+    /// holding period to automatically reject it. Must be at least 1.
+    pub fn set_dispute_quorum(env: Env, quorum: u32) {
+        admin(&env).require_auth();
+        if quorum == 0 {
+            panic_with_error!(&env, RegistryError::InvalidQuorum);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeQuorum, &quorum);
+        bump_instance(&env);
+        DisputeQuorumSet { quorum }.publish(&env);
+    }
+
+    /// Current dispute quorum (defaults to 1).
+    pub fn dispute_quorum(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeQuorum)
+            .unwrap_or(1)
+    }
+
+    /// Record a watcher's dispute against `report_id`. When `dispute_quorum`
+    /// distinct watchers have disputed the same report within the holding
+    /// period, the report is automatically rejected and `ReportRejected` is
+    /// emitted.
+    pub fn dispute_report(env: Env, watcher: Address, report_id: BytesN<32>) -> DisputeStatus {
+        watcher.require_auth();
+        let now = env.ledger().timestamp();
+        let key = DataKey::Dispute(report_id.clone());
+        let mut record = match env.storage().persistent().get::<_, DisputeRecord>(&key) {
+            Some(existing) => {
+                if existing.status == DisputeStatus::Rejected {
+                    panic_with_error!(&env, RegistryError::DisputeAlreadyRejected);
+                }
+                if now
+                    > existing
+                        .opened_at
+                        .saturating_add(DISPUTE_HOLDING_PERIOD_SECS)
+                {
+                    panic_with_error!(&env, RegistryError::HoldingPeriodElapsed);
+                }
+                if existing.watchers.contains(&watcher) {
+                    panic_with_error!(&env, RegistryError::DuplicateDispute);
+                }
+                existing
+            }
+            None => DisputeRecord {
+                report_id: report_id.clone(),
+                watchers: Vec::new(&env),
+                opened_at: now,
+                status: DisputeStatus::Held,
+            },
+        };
+
+        record.watchers.push_back(watcher.clone());
+        let dispute_count = record.watchers.len();
+        let quorum = Self::dispute_quorum(env.clone());
+        if dispute_count >= quorum {
+            record.status = DisputeStatus::Rejected;
+        }
+
+        env.storage().persistent().set(&key, &record);
     /// Name the coverage-ledger contract trusted to report post/retract
     /// outcomes via `record_report_outcome`. One ledger at a time; setting a
     /// new one replaces it. Admin-gated, since this grants that contract
@@ -866,6 +978,35 @@ impl ReporterRegistry {
             .persistent()
             .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
         bump_instance(&env);
+
+        ReportDisputed {
+            report_id: report_id.clone(),
+            watcher,
+            dispute_count,
+        }
+        .publish(&env);
+
+        if record.status == DisputeStatus::Rejected {
+            ReportRejected {
+                report_id,
+                dispute_count,
+            }
+            .publish(&env);
+        }
+
+        record.status
+    }
+
+    /// Return the dispute record for `report_id`, if any.
+    pub fn get_dispute(env: Env, report_id: BytesN<32>) -> Option<DisputeRecord> {
+        let key = DataKey::Dispute(report_id);
+        let record = env.storage().persistent().get::<_, DisputeRecord>(&key);
+        if record.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        }
+        record
         ReputationChanged {
             reporter,
             old_score,

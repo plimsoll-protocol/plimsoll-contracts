@@ -44,6 +44,16 @@ Testnet: PUSD was listed in
 with `code = "PUSD"` and
 `issuer = GBIE3ANCRVCBWETUZXWYKRMP27LQVJHX757XXAQUT3LYHVTNFPPPXEY4`.
 
+### `asset_delisted`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `asset_delisted` | `Symbol` |
+| topic 1 | `sac` | `Address` (contract) |
+
+No data map. Raised once per listed asset actually removed by `batch_delist`;
+unlisted addresses passed in the batch are skipped without emitting an event.
+
 ### `supply_posted`
 
 | | Name | Type |
@@ -305,6 +315,39 @@ reader that wants to mirror `coverage` should do the same as the contract and
 treat the reporter's reports as inactive from this event until a later
 `reporter_set` gives the role back. The indexer leaves the history in place. No
 testnet example: nothing has been revoked on the demo deployment.
+
+### `dispute_quorum_set`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `dispute_quorum_set` | `Symbol` |
+| data | `quorum` | `u32` |
+
+Raised by `set_dispute_quorum` when the admin updates the number of distinct
+watchers required to reject a disputed report.
+
+### `report_disputed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `report_disputed` | `Symbol` |
+| topic 1 | `report_id` | `BytesN<32>` |
+| data | `watcher` | `Address` |
+| data | `dispute_count` | `u32` |
+
+Raised by `dispute_report` whenever a watcher records a new dispute against
+`report_id`.
+
+### `report_rejected`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `report_rejected` | `Symbol` |
+| topic 1 | `report_id` | `BytesN<32>` |
+| data | `dispute_count` | `u32` |
+
+Raised by `dispute_report` immediately after `report_disputed` when
+`dispute_count` reaches `dispute_quorum`.
 
 ### `admin_transferred`
 

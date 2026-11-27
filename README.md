@@ -108,12 +108,15 @@ Listed demo assets: `PUSD` (demo issuer, SAC `CCHPT4…HIM7S`) and Circle's test
 
 ## Quick start
 
-Requirements: Rust at the exact version pinned in
-[rust-toolchain.toml](rust-toolchain.toml) (rustup installs it, with the
-`wasm32v1-none` target, the first time you run `cargo` here), and
-[Stellar CLI](https://developers.stellar.org/docs/tools/cli) 28 or later. To
-reproduce CI's wasm hashes exactly, use the CLI version CI pins (see
-[Bumping the Rust toolchain and the Stellar CLI](#bumping-the-rust-toolchain-and-the-stellar-cli)).
+Requirements:
+- **Minimum Supported Rust Version (MSRV):** `1.100.0`, pinned in
+  [rust-toolchain.toml](rust-toolchain.toml) (rustup installs it, with the
+  `wasm32v1-none` target, the first time you run `cargo` here). CI also runs
+  `cargo build` and `cargo test` against `stable` and `beta` (with `beta`
+  failures reported as non-blocking warnings) to catch regressions early.
+- [Stellar CLI](https://developers.stellar.org/docs/tools/cli) 28 or later. To
+  reproduce CI's wasm hashes exactly, use the CLI version CI pins (see
+  [Bumping the Rust toolchain and the Stellar CLI](#bumping-the-rust-toolchain-and-the-stellar-cli)).
 
 ```bash
 git clone https://github.com/plimsoll-protocol/plimsoll-contracts

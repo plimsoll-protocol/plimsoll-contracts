@@ -336,6 +336,10 @@ fn coverage_ledger_event_schema_matches_the_snapshot() {
     f.ledger.unpause();
     events.extend(take(&f.env, &f.ledger_id));
 
+    f.ledger
+        .batch_delist(&soroban_sdk::vec![&f.env, f.sac.clone()]);
+    events.extend(take(&f.env, &f.ledger_id));
+
     let next_admin = Address::generate(&f.env);
     f.ledger.transfer_admin(&next_admin);
     events.extend(take(&f.env, &f.ledger_id));
@@ -363,6 +367,7 @@ fn coverage_ledger_event_schema_matches_the_snapshot() {
     let names: std::vec::Vec<&str> = events.iter().map(|event| event.name.as_str()).collect();
     for expected in [
         "asset_listed",
+        "asset_delisted",
         "supply_posted",
         "reserve_posted",
         "native_supply_enabled",

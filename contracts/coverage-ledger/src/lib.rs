@@ -104,6 +104,13 @@ pub struct AssetListed {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetDelisted {
+    #[topic]
+    pub sac: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SupplyPosted {
     #[topic]
     pub sac: Address,
@@ -653,6 +660,63 @@ impl CoverageLedger {
         bump_instance(&env);
         AssetListed { sac, code, issuer }.publish(&env);
         record
+    }
+
+    /// Remove multiple listed assets in a single transaction.
+    /// Non-listed assets are silently skipped; an `AssetDelisted` event is
+    /// emitted for each asset actually removed.
+    pub fn batch_delist(env: Env, assets_to_remove: Vec<Address>) {
+        admin(&env).require_auth();
+        let mut removed_any = false;
+        for sac in assets_to_remove.iter() {
+            let asset_key = DataKey::Asset(sac.clone());
+            if !env.storage().persistent().has(&asset_key) {
+                continue;
+            }
+            removed_any = true;
+            env.storage().persistent().remove(&asset_key);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Supply(sac.clone()));
+            env.storage()
+                .persistent()
+                .remove(&DataKey::NativeSupply(sac.clone()));
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Alias(sac.clone()));
+            for tier in Tier::ALL_DESC {
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::Report(sac.clone(), tier));
+                let reporters_key = DataKey::Reporters(sac.clone(), tier);
+                if let Some(reporters) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, Vec<Address>>(&reporters_key)
+                {
+                    for reporter in reporters.iter() {
+                        env.storage().persistent().remove(&DataKey::ReportBy(
+                            sac.clone(),
+                            tier,
+                            reporter,
+                        ));
+                    }
+                    env.storage().persistent().remove(&reporters_key);
+                }
+            }
+            AssetDelisted { sac }.publish(&env);
+        }
+        if removed_any {
+            let current = assets(&env);
+            let mut remaining = Vec::new(&env);
+            for sac in current.iter() {
+                if env.storage().persistent().has(&DataKey::Asset(sac.clone())) {
+                    remaining.push_back(sac);
+                }
+            }
+            write_persistent(&env, &DataKey::Assets, &remaining);
+            bump_instance(&env);
+        }
     }
 
     /// Record the circulating supply of `sac` as computed at `ledger`.

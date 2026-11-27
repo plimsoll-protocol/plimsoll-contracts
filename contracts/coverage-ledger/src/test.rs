@@ -2928,6 +2928,58 @@ fn a_failing_native_query_without_a_snapshot_is_uncovered() {
 }
 
 #[test]
+fn batch_delist_removes_listed_assets_skips_unlisted_and_emits_events() {
+    let f = covered();
+    let issuer2 = f
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&f.env));
+    let sac2 = issuer2.address();
+    f.ledger.list_asset(&sac2);
+
+    let unlisted = Address::generate(&f.env);
+
+    // Passing listed (with duplicate), unlisted, and second listed asset.
+    let batch = soroban_sdk::vec![
+        &f.env,
+        f.sac.clone(),
+        unlisted.clone(),
+        f.sac.clone(),
+        sac2.clone(),
+    ];
+    f.ledger.batch_delist(&batch);
+
+    // Exactly two AssetDelisted events should have been emitted (one per removed asset).
+    // Capture events before subsequent contract calls clear the environment's event log.
+    let events = f.env.events().all().filter_by_contract(&f.ledger.address);
+    let delist_events = events
+        .events()
+        .iter()
+        .filter(|e| {
+            let ContractEventBody::V0(body) = &e.body;
+            body.topics
+                .first()
+                .and_then(|t| Symbol::try_from_val(&f.env, t).ok())
+                .is_some_and(|s| s == Symbol::new(&f.env, "asset_delisted"))
+        })
+        .count();
+    assert_eq!(delist_events, 2);
+
+    assert_eq!(f.ledger.get_asset(&f.sac), None);
+    assert_eq!(f.ledger.get_asset(&sac2), None);
+    assert_eq!(f.ledger.get_supply(&f.sac), None);
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 0);
+    assert_eq!(f.ledger.asset_reporter_pairs(&None, &50).len(), 0);
+}
+
+#[test]
+fn batch_delist_requires_admin_auth() {
+    let f = listed();
+    f.env.mock_auths(&[]);
+    let res = f
+        .ledger
+        .try_batch_delist(&soroban_sdk::vec![&f.env, f.sac.clone()]);
+    assert!(res.is_err());
+    assert!(f.ledger.get_asset(&f.sac).is_some());
 fn pending_reporter_cannot_post_reserve_until_confirmed() {
     let f = listed();
     let candidate = Address::generate(&f.env);
