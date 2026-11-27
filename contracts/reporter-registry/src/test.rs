@@ -917,6 +917,7 @@ fn setting_display_name_for_unknown_reporter_fails() {
 
 #[test]
 fn setting_display_name_requires_reporter_auth() {
+#[test]
 fn dispute_quorum_defaults_to_1_and_is_admin_settable() {
     let env = Env::default();
     env.mock_all_auths();
