@@ -8,7 +8,7 @@ use plimsoll_types::{
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
-    Bytes, BytesN, ContractExecutable, Env, String, Symbol,
+    Bytes, BytesN, ContractExecutable, Env, String, Symbol, Vec,
 };
 
 const MAX_NAME_LEN: u32 = 64;
@@ -132,6 +132,31 @@ fn require_registered(env: &Env, reporter: &Address) {
     }
 }
 
+/// Remove a reporter's registration, metadata and stake, emitting the same
+/// events `revoke` does. Caller is responsible for the admin auth check.
+fn deregister_one(env: &Env, reporter: Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Reporter(reporter.clone()));
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Metadata(reporter.clone()));
+    let stake_key = DataKey::Stake(reporter.clone());
+    if let Some(old_stake) = env.storage().persistent().get::<_, i128>(&stake_key) {
+        env.storage().persistent().remove(&stake_key);
+        if old_stake > 0 {
+            StakeChanged {
+                reporter: reporter.clone(),
+                old_stake,
+                new_stake: 0,
+            }
+            .publish(env);
+        }
+    }
+    bump_instance(env);
+    ReporterRevoked { reporter }.publish(env);
+}
+
 fn read_stake(env: &Env, reporter: &Address) -> i128 {
     let key = DataKey::Stake(reporter.clone());
     let stake = env.storage().persistent().get::<_, i128>(&key);
@@ -207,26 +232,23 @@ impl ReporterRegistry {
     pub fn revoke(env: Env, reporter: Address) {
         admin(&env).require_auth();
         require_registered(&env, &reporter);
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Reporter(reporter.clone()));
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Metadata(reporter.clone()));
-        let stake_key = DataKey::Stake(reporter.clone());
-        if let Some(old_stake) = env.storage().persistent().get::<_, i128>(&stake_key) {
-            env.storage().persistent().remove(&stake_key);
-            if old_stake > 0 {
-                StakeChanged {
-                    reporter: reporter.clone(),
-                    old_stake,
-                    new_stake: 0,
-                }
-                .publish(&env);
+        deregister_one(&env, reporter);
+    }
+
+    /// Revoke every reporter in `addresses` that is currently registered.
+    /// Addresses that are not registered are skipped rather than erroring,
+    /// so a batch can be retried after a partial run without failing.
+    pub fn batch_deregister(env: Env, addresses: Vec<Address>) {
+        admin(&env).require_auth();
+        for reporter in addresses.iter() {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::Reporter(reporter.clone()))
+            {
+                deregister_one(&env, reporter);
             }
         }
-        bump_instance(&env);
-        ReporterRevoked { reporter }.publish(&env);
     }
 
     /// Top up a registered reporter's tracked stake by `amount`.
