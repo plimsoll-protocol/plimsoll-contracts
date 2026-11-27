@@ -83,9 +83,11 @@ still call `require_auth` so the host records the auth entry.
 
 | Function | State change | Expected auth | Has `require_auth` | Verdict |
 | --- | --- | --- | --- | --- |
-| `__constructor(ledger, asset, min_bps, max_age, min_tier)` | Yes (instance Config) | — | N/A | ✅ Correct |
+| `__constructor(admin, ledger, asset, min_bps, max_age, min_tier)` | Yes (instance Config, Admin, WithdrawalDelay) | admin supplied by deployer | N/A | ✅ Correct |
 | `deposit(from, amount)` | Yes (persistent Balance + SAC transfer) | from | `from.require_auth()` before coverage check and transfer | ✅ Correct |
-| `withdraw(to, amount)` | Yes (persistent Balance + SAC transfer) | to | `to.require_auth()` before balance read and transfer | ✅ Correct |
+| `request_withdraw(to, amount)` | Yes (persistent PendingWithdrawal) | to | `to.require_auth()` before balance read and queue write | ✅ Correct |
+| `execute_withdraw(to)` | Yes (persistent Balance + SAC transfer) | to | `to.require_auth()` before queue read and transfer | ✅ Correct |
+| `set_withdrawal_delay(delay_seconds)` | Yes (instance WithdrawalDelay) | vault admin | `admin.require_auth()` before delay update | ✅ Correct |
 | `balance(of)` | No | — | — | ✅ View only |
 | `config()` | No | — | — | ✅ View only |
 | `can_deposit()` | No | — | — | ✅ View only |

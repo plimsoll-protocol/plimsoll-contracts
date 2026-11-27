@@ -19,10 +19,10 @@ call returns — is in [auth-model.md](auth-model.md).
 ## What the call gives you
 
 ```rust
-is_covered(sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool
+is_covered(sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> CoverageStatus
 ```
 
-`is_covered` answers `true` when all of these hold:
+`is_covered` returns `CoverageStatus::Covered` when all of these hold:
 
 - the asset has a supply snapshot and a reserve report at `min_tier` or
   stronger;
@@ -70,7 +70,7 @@ pub enum Tier {
 
 #[contractclient(name = "CoverageLedgerClient")]
 pub trait CoverageLedgerInterface {
-    fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool;
+    fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> CoverageStatus;
 }
 ```
 
@@ -108,7 +108,8 @@ covered, and `is_open` lets a front end ask in advance:
 //! also fails if the guide's copy of this file drifts from it.
 #![no_std]
 
-use plimsoll_types::{CoverageLedgerClient, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD};
+use plimsoll_types::{is_covered, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD};
+use plimsoll_types::{CoverageLedgerClient, CoverageStatus, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env,
 };
@@ -154,16 +155,16 @@ fn policy(env: &Env) -> Policy {
         .expect("policy is set in the constructor")
 }
 
-/// One cross-contract call. `is_covered` never fails: every reason the asset
-/// might not qualify (no figures, stale figures, too weak a signer, not
-/// enough reserves) comes back as `false`.
+/// One cross-contract call. Returns true only when `is_covered` returns
+/// `Covered`; `Stale` and `Uncovered` both block acceptance.
 fn covered(env: &Env, p: &Policy) -> bool {
+    is_covered(env, &p.ledger, &p.asset, p.min_bps, p.max_age, p.min_tier)
     CoverageLedgerClient::new(env, &p.ledger).is_covered(
         &p.asset,
         &p.min_bps,
         &p.max_age,
         &p.min_tier,
-    )
+    ) == CoverageStatus::Covered
 }
 
 #[contractimpl]
@@ -228,9 +229,9 @@ contract code.
 Two habits from `covered-vault` worth keeping:
 
 - **Gate the way in, not the way out.** Refuse new deposits, loans against or
-  listings of an uncovered asset, but never block users from withdrawing
-  what they already hold. A reserve report going stale is not a reason to
-  trap funds.
+  listings of an uncovered asset, but keep withdrawals available regardless
+  of coverage. An independent large-withdrawal approval policy may still
+  protect users from unauthorized or mistaken transfers.
 - **Ask at the moment you need the answer.** Do not store the result. It
   changes when a report ages past `max_age`, which can happen without any
   transaction touching the ledger.

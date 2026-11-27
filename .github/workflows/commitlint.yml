@@ -1,0 +1,23 @@
+name: Commit lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  commitlint:
+    name: conventional commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Only the commits being merged are linted: existing history on main
+          # is not re-checked, and GitHub merge-commit metadata falls outside
+          # the diffed range. fetch-depth 0 gives commitlint the full history.
+          fetch-depth: 0
+      - name: Validate commit messages and pull request title
+        uses: wagoid/commitlint-github-action@v2
+        with:
+          configPath: ./.commitlintrc.json
+          fail_on_pr_title: true
