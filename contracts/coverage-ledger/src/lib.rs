@@ -30,6 +30,10 @@ use soroban_sdk::{
     RegistryClient, ReserveReport, Role, StaleInfo, SupplySnapshot, SupplyTokenClient, Tier,
     INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD, MAX_PLAUSIBLE_BPS, MIN_PLAUSIBLE_BPS,
     PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD, SECONDS_PER_LEDGER, UPGRADE_DELAY_LEDGERS,};
+    coverage_bps, AssetRecord, Coverage, CoverageStatus, PendingUpgrade, RegistryClient,
+    ReserveReport, Role, SupplySnapshot, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
+    MAX_PLAUSIBLE_BPS, MIN_PLAUSIBLE_BPS, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
+    UPGRADE_DELAY_LEDGERS,
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
@@ -356,6 +360,8 @@ pub struct AssetAliased {
     pub old: Address,
     #[topic]
     pub new: Address,
+pub struct TtlGraceUpdated {
+    pub grace_ledgers: u32,
 }
 
 #[contract]
@@ -2145,6 +2151,52 @@ impl CoverageLedger {
             ledger_sequence,
             ledger_timestamp,
         )
+        };
+        if coverage.bps < min_bps {
+            return CoverageStatus::Uncovered;
+        }
+        let now = env.ledger().timestamp();
+        let supply_age = now.saturating_sub(coverage.supply_timestamp);
+        let report_age = now.saturating_sub(coverage.report_as_of);
+        let age = supply_age.max(report_age);
+        if age <= max_age {
+            return CoverageStatus::Covered;
+        }
+        let grace_ledgers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TtlGrace)
+            .unwrap_or(0);
+        let grace_secs = (grace_ledgers as u64).saturating_mul(5);
+        if age <= max_age.saturating_add(grace_secs) {
+            return CoverageStatus::Stale;
+        }
+        CoverageStatus::Uncovered
+    }
+
+    /// Set the TTL grace window in ledgers (1 ledger ≈ 5 seconds). Callers
+    /// receive `Stale` during this window instead of `Uncovered`. Zero disables
+    /// the grace window.
+    pub fn set_ttl_grace(env: Env, grace_ledgers: u32) {
+        admin(&env).require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::TtlGrace, &grace_ledgers);
+        bump_instance(&env);
+        TtlGraceUpdated { grace_ledgers }.publish(&env);
+    }
+
+    /// The current TTL grace window in ledgers. Zero means no grace period.
+    pub fn ttl_grace(env: Env) -> u32 {
+        let grace = env
+            .storage()
+            .instance()
+            .get(&DataKey::TtlGrace)
+            .unwrap_or(0u32);
+        if grace > 0 {
+            bump_instance(&env);
+        }
+        grace
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) {

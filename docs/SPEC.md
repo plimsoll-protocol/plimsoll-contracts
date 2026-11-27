@@ -554,6 +554,10 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `native_supply_token(sac)` | — | `Option<Address>` | — | — |
 | `alias_asset(old: Address, new: Address)` | admin | `()` | `AssetNotListed` (either SAC unlisted), `SelfAlias` | `asset_aliased {old, new}` |
 | `get_alias(asset: Address)` | — | `Option<Address>` | — | — || `registry()` / `admin()` | — | `Address` | — | — |
+| `is_covered(sac, min_bps: u32, max_age: u64, min_tier: Tier)` | — | `CoverageStatus` | — | — |
+| `set_ttl_grace(admin: Address, grace_ledgers: u32)` | admin | `()` | — | `ttl_grace_updated grace_ledgers` |
+| `ttl_grace()` | — | `u32` | — | — |
+| `registry()` / `admin()` | — | `Address` | — | — |
 | `transfer_admin(new_admin)` | admin and new_admin | `()` | — | `admin_transferred` |
 | `propose_upgrade(wasm_hash: BytesN<32>)` | admin | `()` | — | `upgrade_proposed {wasm_hash} executable_at_ledger` |
 | `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
@@ -897,6 +901,16 @@ A deposit vault for one asset that refuses deposits while the asset is not
 covered. Withdrawals are not coverage-gated, but withdrawals above the
 configured threshold also require an approver.
 
+**Storage**
+
+| Key | Storage | Value |
+| --- | --- | --- |
+| `Admin` | instance | `Address` |
+| `Config` | instance | `VaultConfig` |
+| `Balance(Address)` | persistent | `i128` |
+
+**Functions**
+
 | Function | Auth | Returns | Errors | Event |
 | --- | --- | --- | --- | --- |
 | `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier, approver: Address, large_withdrawal_threshold: i128)` | — | — | `InvalidThreshold` | — |
@@ -922,6 +936,7 @@ must be requested before they can be executed.
 | --- | --- | --- | --- | --- |
 | `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier, admin: Address)` | — | — | — | — |
 | `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount`, `coverage_dropped {asset}` |
+| `__constructor(ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier, admin: Address)` | — | — | — | — |
 | `deposit(from: Address, amount: i128)` | from | `i128` new balance | `InvalidAmount`, `NotCovered` | `deposited {from} amount` |
 | `withdraw(to: Address, amount: i128)` | to | `i128` new balance | `InvalidAmount`, `InsufficientBalance` | `withdrawn {to} amount` |
 | `__constructor(admin: Address, ledger: Address, asset: Address, min_bps: u32, max_age: u64, min_tier: Tier)` | — | — | — | — |
@@ -961,13 +976,18 @@ uses the two calls. The deployer supplies the vault admin as the `admin` constru
 `InvalidDelay` if adding the delay to the current timestamp overflows `u64`;
 changing the delay affects newly queued withdrawals and does not change an
 existing request's `available_at`.
+| `admin()` | — | `Address` | — | — |
+| `can_deposit()` | — | `bool` | — | — |
+| `update_thresholds(min_bps: u32, max_age: u64, min_tier: Tier)` | admin | `()` | — | `thresholds_updated old_min_bps, old_max_age, old_min_tier, new_min_bps, new_max_age, new_min_tier` |
 
-`can_deposit()` makes the same `is_covered(asset, min_bps, max_age,
-min_tier)` call `deposit` makes, with the stored config, and returns its
-answer. It is true exactly when a positive deposit would pass the coverage
-gate, so a front end can show whether the vault is open without simulating a
-deposit and reading a `NotCovered` failure. It says nothing about the
-depositor's balance or authorisation.
+`can_deposit()` returns true exactly when a positive deposit would pass the
+coverage gate (`is_covered` returns `Covered`). A front end can call it to
+show whether the vault is open without simulating a deposit and reading a
+`NotCovered` failure.
+
+`update_thresholds` replaces the stored `min_bps`, `max_age`, and `min_tier` in
+one atomic call. The admin's auth is required. Existing deposits are unaffected;
+only future deposit attempts see the new thresholds.
 
 `simulate_coverage(proposed_reserve)` is a pure view function (no vault state
 writes) that reads the current on-chain supply and qualifying reserves from the

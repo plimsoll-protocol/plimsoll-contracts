@@ -394,6 +394,7 @@ pub trait CoverageLedgerInterface {
         max_age: u64,
         min_tier: Tier,
     ) -> CoverageStatus;}
+}
 
 #[cfg(test)]
 mod test {

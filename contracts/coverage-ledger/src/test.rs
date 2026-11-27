@@ -5,6 +5,7 @@ use plimsoll_types::DAY_IN_LEDGERS;
 use plimsoll_types::ReporterEntry;
 use plimsoll_types::CoverageStatus;
 use plimsoll_types::ReporterEntry;
+use plimsoll_types::CoverageStatus;
 use reporter_registry::{ReporterRegistry, ReporterRegistryClient};
 use soroban_sdk::{
     testutils::{Address as _, AuthorizedFunction, Events, Ledger as _, MockAuth, MockAuthInvoke},
