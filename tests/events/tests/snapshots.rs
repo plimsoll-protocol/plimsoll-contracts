@@ -407,9 +407,11 @@ fn covered_vault_event_schema_matches_the_snapshot() {
         &soroban_sdk::String::from_str(&f.env, "https://issuer.example/reserves.pdf"),
     );
 
+    let vault_admin = Address::generate(&f.env);
     let vault_id = f.env.register(
         CoveredVault,
         (
+            vault_admin,
             Address::generate(&f.env),
             f.ledger_id.clone(),
             f.sac.clone(),

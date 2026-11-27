@@ -544,6 +544,11 @@ impl CoverageLedger {
         registry(&env)
     }
 
+    /// The total number of listed assets.
+    pub fn asset_count(env: Env) -> u32 {
+        assets(&env).len()
+    }
+
     /// List a Stellar-issued asset by its Stellar Asset Contract address.
     /// Permissionless: the code and issuer are read from the SAC itself.
     pub fn list_asset(env: Env, sac: Address) -> AssetRecord {
