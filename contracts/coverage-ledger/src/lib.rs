@@ -553,6 +553,46 @@ fn reclaim_slots(
     kept
 }
 
+fn validate_post_reserve(
+    env: &Env,
+    reporter: &Address,
+    sac: &Address,
+    amount: i128,
+    as_of: u64,
+    doc_uri: &String,
+) -> Result<Tier, LedgerError> {
+    if paused_flag(env) {
+        return Err(LedgerError::Paused);
+    }
+    let asset = match read_persistent::<AssetRecord>(env, &DataKey::Asset(sac.clone())) {
+        Some(asset) => asset,
+        None => return Err(LedgerError::AssetNotListed),
+    };
+    let tier = if reporter == &asset.issuer {
+        Tier::IssuerSigned
+    } else {
+        match RegistryClient::new(env, &registry(env)).role_of(reporter) {
+            Some(Role::Auditor) => Tier::AuditorSigned,
+            Some(Role::Transcriber) => Tier::Transcribed,
+            _ => return Err(LedgerError::NotReporter),
+        }
+    };
+    if amount < 0 {
+        return Err(LedgerError::InvalidAmount);
+    }
+    if doc_uri.is_empty() || doc_uri.len() > MAX_URI_LEN {
+        return Err(LedgerError::InvalidUri);
+    }
+    if as_of > env.ledger().timestamp() {
+        return Err(LedgerError::FutureTimestamp);
+    }
+    if amount != 0 {
+        if let Some(supply) = read_persistent::<SupplySnapshot>(env, &DataKey::Supply(sac.clone()))
+        {
+            if supply.amount > 0 {
+                let bps = coverage_bps(amount, supply.amount);
+                if !(MIN_PLAUSIBLE_BPS..=MAX_PLAUSIBLE_BPS).contains(&bps) {
+                    return Err(LedgerError::ImplausibleAmount);
 /// One page of the (asset, reporter) pairs in bootstrap order: assets in
 /// listing order, tiers strongest first within an asset, first-post order
 /// within a tier, each reporter once per asset. `start` is the index of the
@@ -582,6 +622,49 @@ fn pair_page(env: &Env, start: u32, page: u32) -> Vec<(Address, Address)> {
             }
         }
     }
+
+    let legacy = read_persistent::<ReserveReport>(env, &DataKey::Report(sac.clone(), tier));
+    let report_key = DataKey::ReportBy(sac.clone(), tier, reporter.clone());
+    if let Some(previous) = read_persistent::<ReserveReport>(env, &report_key) {
+        if as_of <= previous.as_of {
+            return Err(LedgerError::StaleReport);
+        }
+    } else if let Some(previous) = legacy.as_ref() {
+        if &previous.reporter == reporter && as_of <= previous.as_of {
+            return Err(LedgerError::StaleReport);
+        }
+    }
+
+    let mut index = reporters(env, sac, tier);
+    if let Some(previous) = legacy.as_ref() {
+        index = Vec::from_array(env, [previous.reporter.clone()]);
+    }
+    if !index.contains(reporter) && index.len() >= MAX_REPORTERS_PER_TIER {
+        let registry = RegistryClient::new(env, &registry(env));
+        let mut active_reporters = 0u32;
+        for indexed_reporter in index.iter() {
+            let report = match legacy.as_ref() {
+                Some(previous) if previous.reporter == indexed_reporter => Some(previous.clone()),
+                _ => read_persistent::<ReserveReport>(
+                    env,
+                    &DataKey::ReportBy(sac.clone(), tier, indexed_reporter.clone()),
+                ),
+            };
+            if report
+                .as_ref()
+                .is_some_and(|report| counts(&registry, report))
+            {
+                active_reporters = match active_reporters.checked_add(1) {
+                    Some(count) => count,
+                    None => return Err(LedgerError::TooManyReporters),
+                };
+            }
+        }
+        if active_reporters >= MAX_REPORTERS_PER_TIER {
+            return Err(LedgerError::TooManyReporters);
+        }
+    }
+    Ok(tier)
     out
 }
 
@@ -778,6 +861,20 @@ impl CoverageLedger {
         .publish(&env);
     }
 
+    /// Check whether the reporter's complete reserve post would pass validation.
+    pub fn can_post_report(
+        env: Env,
+        reporter: Address,
+        sac: Address,
+        amount: i128,
+        as_of: u64,
+        doc_hash: BytesN<32>,
+        doc_uri: String,
+    ) -> Result<(), LedgerError> {
+        let _ = doc_hash;
+        validate_post_reserve(&env, &reporter, &sac, amount, as_of, &doc_uri).map(|_| ())
+    }
+
     /// Record a reserve figure for `sac`. The reporter's identity sets the
     /// tier: the asset's issuer account, a registered auditor, or a
     /// registered transcriber.
@@ -791,56 +888,14 @@ impl CoverageLedger {
         doc_uri: String,
     ) -> Tier {
         reporter.require_auth();
-        require_not_paused(&env);
-        let asset = require_listed(&env, &sac);
-        let tier = if reporter == asset.issuer {
-            Tier::IssuerSigned
-        } else {
-            match RegistryClient::new(&env, &registry(&env)).role_of(&reporter) {
-                Some(Role::Auditor) => Tier::AuditorSigned,
-                Some(Role::Transcriber) => Tier::Transcribed,
-                _ => panic_with_error!(&env, LedgerError::NotReporter),
-            }
+        let tier = match validate_post_reserve(&env, &reporter, &sac, amount, as_of, &doc_uri) {
+            Ok(tier) => tier,
+            Err(error) => panic_with_error!(&env, error),
         };
-        if amount < 0 {
-            panic_with_error!(&env, LedgerError::InvalidAmount);
-        }
-        if doc_uri.is_empty() || doc_uri.len() > MAX_URI_LEN {
-            panic_with_error!(&env, LedgerError::InvalidUri);
-        }
         let now = env.ledger().timestamp();
-        if as_of > now {
-            panic_with_error!(&env, LedgerError::FutureTimestamp);
-        }
-        // A figure typed in whole units instead of the asset's smallest unit is
-        // 10,000,000 times too small, and the asset then reads as uncovered --
-        // the same reading as backing that has genuinely gone. Refuse rather
-        // than publish an ambiguity like that. Zero is exempt: no reserves at
-        // all is a real statement and cannot come from a unit slip.
-        if amount != 0 {
-            if let Some(supply) =
-                read_persistent::<SupplySnapshot>(&env, &DataKey::Supply(sac.clone()))
-            {
-                // With no supply there is nothing to judge the figure against,
-                // and coverage_bps reports u32::MAX for it.
-                if supply.amount > 0 {
-                    let bps = coverage_bps(amount, supply.amount);
-                    if !(MIN_PLAUSIBLE_BPS..=MAX_PLAUSIBLE_BPS).contains(&bps) {
-                        panic_with_error!(&env, LedgerError::ImplausibleAmount);
-                    }
-                }
-            }
-        }
 
         migrate_legacy(&env, &sac, tier);
-        // Staleness is per reporter: another reporter's figure at this tier,
-        // however recent, does not stop this one being recorded.
         let key = DataKey::ReportBy(sac.clone(), tier, reporter.clone());
-        if let Some(previous) = read_persistent::<ReserveReport>(&env, &key) {
-            if as_of <= previous.as_of {
-                panic_with_error!(&env, LedgerError::StaleReport);
-            }
-        }
         let mut index = reporters(&env, &sac, tier);
         if !index.contains(&reporter) {
             if index.len() >= MAX_REPORTERS_PER_TIER {

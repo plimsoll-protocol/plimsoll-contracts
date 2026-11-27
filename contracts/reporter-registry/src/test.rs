@@ -416,12 +416,68 @@ fn transfer_admin_without_new_admin_auth_fails() {
 }
 
 #[test]
+fn reporter_can_set_and_read_display_name() {
+    let (env, _admin, client) = setup();
+    let reporter = Address::generate(&env);
+    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "audit"));
+    let name = soroban_sdk::Symbol::new(&env, "Tobi");
+
+    client.set_reporter_name(&reporter, &name);
+
+    assert_eq!(client.get_reporter_name(&reporter), Some(name));
+}
+
+#[test]
+fn reporter_display_name_is_optional_for_existing_entries() {
+    let (env, _admin, client) = setup();
+    let reporter = Address::generate(&env);
+    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "audit"));
+
+    assert_eq!(client.get_reporter_name(&reporter), None);
+    assert_eq!(client.get_reporter(&reporter).unwrap().role, Role::Auditor);
+}
+
+#[test]
+fn reporter_display_name_accepts_thirty_two_characters() {
+    let (env, _admin, client) = setup();
+    let reporter = Address::generate(&env);
+    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "audit"));
+    let name = soroban_sdk::Symbol::new(&env, &"x".repeat(32));
+
+    client.set_reporter_name(&reporter, &name);
+
+    assert_eq!(client.get_reporter_name(&reporter), Some(name));
+}
+
+#[test]
+fn setting_display_name_for_unknown_reporter_fails() {
+    let (env, _admin, client) = setup();
+    let reporter = Address::generate(&env);
+    let name = soroban_sdk::Symbol::new(&env, "Tobi");
+
+    assert_eq!(
+        client.try_set_reporter_name(&reporter, &name),
+        Err(Ok(RegistryError::ReporterNotFound.into()))
+    );
+}
+
+#[test]
+fn setting_display_name_requires_reporter_auth() {
 fn dispute_quorum_defaults_to_1_and_is_admin_settable() {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
     let id = env.register(ReporterRegistry, (admin,));
     let client = ReporterRegistryClient::new(&env, &id);
+    let reporter = Address::generate(&env);
+    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "audit"));
+    env.mock_auths(&[]);
+    let name = soroban_sdk::Symbol::new(&env, "Tobi");
+
+    let res = client.try_set_reporter_name(&reporter, &name);
+
+    assert!(res.is_err());
+    assert_eq!(client.get_reporter_name(&reporter), None);
 
     assert_eq!(client.dispute_quorum(), 1);
     client.set_dispute_quorum(&3);

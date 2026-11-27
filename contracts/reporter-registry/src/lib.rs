@@ -25,6 +25,8 @@ const MAX_TAGS: u32 = 5;
 enum DataKey {
     Admin,
     Reporter(Address),
+    ReporterDisplayName(Address),
+
     Metadata(Address),
     Stake(Address),
     PendingUpgrade,
@@ -531,6 +533,9 @@ impl ReporterRegistry {
             .remove(&DataKey::Reporter(reporter.clone()));
         env.storage()
             .persistent()
+            .remove(&DataKey::ReporterDisplayName(reporter.clone()));
+        env.storage()
+            .persistent()
             .remove(&DataKey::Metadata(reporter.clone()));
         env.storage()
             .persistent()
@@ -794,6 +799,39 @@ impl ReporterRegistry {
                 .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
         }
         info
+    }
+
+    /// Set the caller reporter's optional human-readable display name.
+    pub fn set_reporter_name(env: Env, reporter: Address, name: Symbol) {
+        reporter.require_auth();
+        let reporter_key = DataKey::Reporter(reporter.clone());
+        if !env.storage().persistent().has(&reporter_key) {
+            panic_with_error!(&env, RegistryError::ReporterNotFound);
+        }
+        // Soroban symbols are limited to 32 bytes, which bounds this name at
+        // 32 single-byte characters before the contract receives it.
+        env.storage().persistent().extend_ttl(
+            &reporter_key,
+            PERSISTENT_THRESHOLD,
+            PERSISTENT_EXTEND_TO,
+        );
+        let key = DataKey::ReporterDisplayName(reporter.clone());
+        env.storage().persistent().set(&key, &name);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        bump_instance(&env);
+    }
+
+    pub fn get_reporter_name(env: Env, reporter: Address) -> Option<Symbol> {
+        let key = DataKey::ReporterDisplayName(reporter);
+        let name = env.storage().persistent().get::<_, Symbol>(&key);
+        if name.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        }
+        name
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) {

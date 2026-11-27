@@ -132,6 +132,19 @@ fn listed() -> Fixture {
     f
 }
 
+fn preflight_report(
+    f: &Fixture,
+    reporter: &Address,
+    sac: &Address,
+    amount: i128,
+    as_of: u64,
+    doc_uri: &String,
+) -> Result<(), LedgerError> {
+    f.ledger
+        .can_post_report(reporter, sac, &amount, &as_of, &hash(&f.env, 42), doc_uri);
+    Ok(())
+}
+
 // ---- list_asset -----------------------------------------------------------
 
 #[test]
@@ -410,6 +423,128 @@ fn revoked_poster_cannot_post() {
 }
 
 // ---- post_reserve ---------------------------------------------------------
+
+#[test]
+fn report_preflight_accepts_valid_input_without_posting() {
+    let f = listed();
+
+    assert_eq!(
+        preflight_report(&f, &f.auditor, &f.sac, UNIT, T0, &uri(&f.env)),
+        Ok(())
+    );
+    assert!(f.ledger.get_report(&f.sac, &Tier::AuditorSigned).is_none());
+}
+
+#[test]
+fn report_preflight_rejects_paused_ledger() {
+    let f = listed();
+    f.ledger.pause();
+
+    assert_eq!(
+        preflight_report(&f, &f.auditor, &f.sac, UNIT, T0, &uri(&f.env)),
+        Err(LedgerError::Paused)
+    );
+}
+
+#[test]
+fn report_preflight_rejects_unlisted_asset() {
+    let f = setup();
+
+    assert_eq!(
+        preflight_report(&f, &f.auditor, &f.sac, UNIT, T0, &uri(&f.env)),
+        Err(LedgerError::AssetNotListed)
+    );
+}
+
+#[test]
+fn report_preflight_rejects_non_reporter() {
+    let f = listed();
+    let stranger = Address::generate(&f.env);
+
+    assert_eq!(
+        preflight_report(&f, &stranger, &f.sac, UNIT, T0, &uri(&f.env)),
+        Err(LedgerError::NotReporter)
+    );
+}
+
+#[test]
+fn report_preflight_rejects_negative_amount() {
+    let f = listed();
+
+    assert_eq!(
+        preflight_report(&f, &f.auditor, &f.sac, -1, T0, &uri(&f.env)),
+        Err(LedgerError::InvalidAmount)
+    );
+}
+
+#[test]
+fn report_preflight_rejects_invalid_uri() {
+    let f = listed();
+    let empty = String::from_str(&f.env, "");
+
+    assert_eq!(
+        preflight_report(&f, &f.auditor, &f.sac, UNIT, T0, &empty),
+        Err(LedgerError::InvalidUri)
+    );
+}
+
+#[test]
+fn report_preflight_rejects_future_timestamp() {
+    let f = listed();
+
+    assert_eq!(
+        preflight_report(&f, &f.auditor, &f.sac, UNIT, T0 + 1, &uri(&f.env)),
+        Err(LedgerError::FutureTimestamp)
+    );
+}
+
+#[test]
+fn report_preflight_rejects_implausible_amount() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(1_000 * UNIT), &990, &hash(&f.env, 1));
+
+    assert_eq!(
+        preflight_report(&f, &f.auditor, &f.sac, 1, T0, &uri(&f.env)),
+        Err(LedgerError::ImplausibleAmount)
+    );
+}
+
+#[test]
+fn report_preflight_rejects_stale_report() {
+    let f = listed();
+    f.ledger.post_reserve(
+        &f.auditor,
+        &f.sac,
+        &UNIT,
+        &T0,
+        &hash(&f.env, 1),
+        &uri(&f.env),
+    );
+
+    assert_eq!(
+        preflight_report(&f, &f.auditor, &f.sac, UNIT, T0, &uri(&f.env)),
+        Err(LedgerError::StaleReport)
+    );
+}
+
+#[test]
+fn report_preflight_rejects_full_reporter_tier() {
+    let f = listed();
+    let mut auditors = std::vec![f.auditor.clone()];
+    for _ in 1..MAX_REPORTERS_PER_TIER {
+        auditors.push(add_reporter(&f, Role::Auditor));
+    }
+    for (i, auditor) in auditors.iter().enumerate() {
+        post(&f, auditor, UNIT, T0 - 100 + i as u64);
+    }
+    let extra = add_reporter(&f, Role::Auditor);
+
+    assert_eq!(
+        preflight_report(&f, &extra, &f.sac, UNIT, T0, &uri(&f.env)),
+        Err(LedgerError::TooManyReporters)
+    );
+}
 
 #[test]
 fn issuer_report_is_issuer_signed() {

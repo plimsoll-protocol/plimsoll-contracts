@@ -133,6 +133,8 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 | `PendingReporter(Address)` (persistent) | `register_reporter` (write), `get_pending_reporter` (read), `confirm_registration` / `cleanup_expired_registration` / `revoke` (remove) |
 | `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `revoke`, `top_up_stake`, `reduce_stake` |
 | `Reporter(Address)` (persistent) | `set_reporter` (write), `get_reporter` / `role_of` (read) |
+| `ReporterDisplayName(Address)` (persistent) | optional `Symbol`; `set_reporter_name` (write), `get_reporter_name` (read) |
+
 | `Metadata(Address)` (persistent) | `update_reporter_metadata` (write), `get_reporter_metadata` (read) |
 | `DisplayName(Address)` (persistent) | `set_reporter_name` (write), `get_reporter_name` (read) |
 | `Stake(Address)` (persistent) | `top_up_stake`, `reduce_stake` (write), `stake_of` (read) |
@@ -205,6 +207,8 @@ Decides who may speak. Holds no money.
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 | `DisputeQuorum` | instance | `u32` (absent means `1`) |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
+| `ReporterDisplayName(Address)` | persistent, TTL extended on write and read | `Symbol` (optional, at most 32 characters) |
+
 | `PendingReporter(Address)` | persistent, TTL extended on write and read | `PendingReporter` |
 | `Metadata(Address)` | persistent, TTL extended on write and read | `ReporterMetadata` |
 | `Dispute(BytesN<32>)` | persistent, TTL extended on write and read | `DisputeRecord` |
@@ -234,6 +238,8 @@ Decides who may speak. Holds no money.
 | `get_reporter_name(reporter: Address)` | — | `Option<Symbol>` | — | — |
 | `role_of(reporter: Address)` | — | `Option<Role>` | — | — |
 | `get_reporter(reporter: Address)` | — | `Option<ReporterInfo>` | — | — |
+| `set_reporter_name(reporter: Address, name: Symbol)` | reporter | `()` | `ReporterNotFound` | — |
+| `get_reporter_name(reporter: Address)` | — | `Option<Symbol>` | — | — |
 | `set_dispute_quorum(quorum: u32)` | admin | `()` | `InvalidQuorum` (`quorum == 0`) | `dispute_quorum_set quorum` |
 | `dispute_quorum()` | — | `u32` | — | — |
 | `dispute_report(watcher: Address, report_id: BytesN<32>)` | watcher | `DisputeStatus` | `DuplicateDispute`, `DisputeAlreadyRejected`, `HoldingPeriodElapsed` | `report_disputed {report_id} watcher, dispute_count`, plus `report_rejected {report_id} dispute_count` when quorum is met |
@@ -243,6 +249,10 @@ Decides who may speak. Holds no money.
 | `execute_upgrade()` | admin | `()` | `UpgradeNotProposed`, `UpgradeDelayNotElapsed` | `upgrade_executed {wasm_hash}` |
 | `cancel_upgrade()` | admin | `()` | `UpgradeNotProposed` | `upgrade_cancelled {wasm_hash}` |
 | `pending_upgrade()` | — | `Option<PendingUpgrade>` | — | — |
+
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`.
+The display name is stored separately from `ReporterInfo` so existing reporter
+records remain decodable. Soroban `Symbol` values are limited to 32 characters.
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
 `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`, `InvalidMetadata = 5`,
@@ -347,6 +357,7 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `batch_delist(assets: Vec<Address>)` | admin | `()` | — | `asset_delisted {sac}` for each listed asset removed |
 | `post_supply(poster: Address, sac: Address, amount: i128, ledger: u32, breakdown_hash: BytesN<32>)` | poster | `()` | `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger`, `LedgerTooOld` | `supply_posted {sac} amount, ledger, breakdown_hash, poster` |
 | `post_reserve(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | reporter | `Tier` | `NotReporter`, `AssetNotListed`, `InvalidAmount`, `FutureTimestamp`, `StaleReport`, `InvalidUri`, `ImplausibleAmount`, `TooManyReporters` | `reserve_posted {sac, tier} amount, as_of, reporter, doc_hash, doc_uri` |
+| `can_post_report(reporter: Address, sac: Address, amount: i128, as_of: u64, doc_hash: BytesN<32>, doc_uri: String)` | — | `Result<(), LedgerError>` | `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` | — |
 | `retract_reserve(reporter: Address, sac: Address)` | reporter | `()` | `AssetNotListed`, `NotReporter`, `NoReportToRetract` | `reserve_retracted {sac, tier} reporter, as_of` |
 | `get_asset(sac)` | — | `Option<AssetRecord>` | — | — |
 | `get_supply(sac)` | — | `Option<SupplySnapshot>` | — | — |
@@ -434,6 +445,13 @@ Rules:
   `amount == 0` is always allowed: no reserves at all is a statement the
   protocol exists to be able to carry, and unlike a small non-zero figure it
   cannot be the result of a unit slip.
+
+- `can_post_report` applies the same reporter, asset, amount, URI, timestamp,
+  plausibility, freshness and reporter-cap checks as `post_reserve`, but does
+  not change report, index or contract configuration values. It returns the
+  first applicable `LedgerError`, or `Ok(())`. The reporter-registry role
+  lookup still follows the registry's persistent TTL policy. Because the check
+  and the later post are separate calls, state can change between them.
 - `coverage(sac, min_tier)` picks, among the stored reports at tiers
   `>= min_tier` that count, the one with the latest `as_of`. Ties go to the
   higher tier, then to the reporter who first posted at that tier. It returns
