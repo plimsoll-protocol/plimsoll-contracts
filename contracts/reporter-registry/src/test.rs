@@ -13,6 +13,8 @@ use soroban_sdk::{
     Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
+const T0: u64 = 1_700_000_000;
+
 #[allow(dead_code)]
 fn upgrade_fixture_wasm() -> std::vec::Vec<u8> {
     const VENDORED: &[u8] =
@@ -32,7 +34,7 @@ fn upload_upgrade_fixture(env: &Env) -> BytesN<32> {
 fn setup() -> (Env, Address, ReporterRegistryClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_700_000_000);
+    env.ledger().set_timestamp(T0);
     let admin = Address::generate(&env);
     let id = env.register(ReporterRegistry, (admin.clone(),));
     let client = ReporterRegistryClient::new(&env, &id);
@@ -498,6 +500,83 @@ fn transfer_admin_without_new_admin_auth_fails() {
     assert_eq!(client.admin(), admin);
 }
 
+// ---- is_reporter_active / set_expiry (issue #92) ---------------------------
+
+#[test]
+fn unknown_reporter_is_not_active() {
+    let (env, _admin, client) = setup();
+    assert!(!client.is_reporter_active(&Address::generate(&env)));
+}
+
+#[test]
+fn reporter_with_no_expiry_is_active() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "a"));
+    assert!(client.is_reporter_active(&who));
+}
+
+#[test]
+fn reporter_becomes_inactive_at_expiry_timestamp() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "a"));
+
+    let expires_at = T0 + 1_000;
+    client.set_expiry(&who, &expires_at);
+
+    // Before expiry.
+    assert!(client.is_reporter_active(&who));
+
+    // At the exact expiry second the reporter is no longer active.
+    env.ledger().set_timestamp(expires_at);
+    assert!(!client.is_reporter_active(&who));
+
+    // After expiry.
+    env.ledger().set_timestamp(expires_at + 1);
+    assert!(!client.is_reporter_active(&who));
+}
+
+#[test]
+fn expiry_one_ledger_in_the_past_makes_reporter_inactive() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Transcriber, &String::from_str(&env, "t"));
+
+    // Set expiry to one ledger-worth of seconds (5 s) before the current timestamp.
+    let past_expiry = T0 - 5;
+    client.set_expiry(&who, &past_expiry);
+
+    // The reporter's expiry is in the past: they must be inactive.
+    assert!(!client.is_reporter_active(&who));
+}
+
+#[test]
+fn set_expiry_on_unknown_reporter_fails() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    let res = client.try_set_expiry(&who, &(T0 + 1_000));
+    assert_eq!(res, Err(Ok(RegistryError::ReporterNotFound.into())));
+}
+
+#[test]
+fn set_expiry_emits_event() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "a"));
+    let event_count_before = env.events().all().events().len();
+    client.set_expiry(&who, &(T0 + 500));
+    assert_eq!(env.events().all().events().len(), event_count_before + 1);
+}
+
+#[test]
+fn revoked_reporter_is_not_active_even_with_future_expiry() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "a"));
+    client.set_expiry(&who, &(T0 + 9_999));
+    client.revoke(&who);
+    assert!(!client.is_reporter_active(&who));
 // ---- access tier / RBAC (#84) ---------------------------------------------
 
 #[test]

@@ -66,6 +66,8 @@ pub enum Role {
     Auditor = 1,
     Transcriber = 2,
     SupplyPoster = 3,
+    /// A registered watcher may dispute reserve reports.
+    Watcher = 4,
 }
 
 /// Access tier in the reporter registry's role-based access control model.
