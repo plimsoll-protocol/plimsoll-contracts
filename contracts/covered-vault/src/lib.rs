@@ -8,6 +8,7 @@ use plimsoll_types::{
     CoverageLedgerClient, Tier, WithdrawalRequest, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
     CoverageLedgerClient, CoverageStatus, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
     CoverageLedgerClient, Tier, WithdrawalRequest, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
+    CoverageLedgerClient, CoverageStatus, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
     PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
 };
 use soroban_sdk::{
@@ -132,6 +133,17 @@ pub struct VaultAdminTransferred {
 }
 
     pub new_admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThresholdsUpdated {
+    pub old_min_bps: u32,
+    pub old_max_age: u64,
+    pub old_min_tier: Tier,
+    pub new_min_bps: u32,
+    pub new_max_age: u64,
+    pub new_min_tier: Tier,
 }
 
 #[contractevent]
@@ -300,6 +312,9 @@ impl CoveredVault {
         env.storage()
             .instance()
             .set(&DataKey::WithdrawalDelay, &0u64);
+        admin: Address,
+    ) {
+        env.storage().instance().set(&DataKey::Admin, &admin);
         let cfg = VaultConfig {
             admin,
             ledger,
@@ -365,6 +380,44 @@ impl CoveredVault {
     ///
     /// # Events
     /// * [`Deposited`] on success
+    pub fn admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin is set in the constructor")
+    }
+
+    /// Replace `min_bps`, `max_age`, and `min_tier` atomically. Only the
+    /// stored admin may call this.
+    pub fn update_thresholds(env: Env, min_bps: u32, max_age: u64, min_tier: Tier) {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("admin is set in the constructor");
+        stored_admin.require_auth();
+        let mut cfg = config(&env);
+        let old_min_bps = cfg.min_bps;
+        let old_max_age = cfg.max_age;
+        let old_min_tier = cfg.min_tier.clone();
+        cfg.min_bps = min_bps;
+        cfg.max_age = max_age;
+        cfg.min_tier = min_tier.clone();
+        env.storage().instance().set(&DataKey::Config, &cfg);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_EXTEND_TO);
+        ThresholdsUpdated {
+            old_min_bps,
+            old_max_age,
+            old_min_tier,
+            new_min_bps: min_bps,
+            new_max_age: max_age,
+            new_min_tier: min_tier,
+        }
+        .publish(&env);
+    }
+
     pub fn deposit(env: Env, from: Address, amount: i128) -> i128 {
         from.require_auth();
         if amount <= 0 {

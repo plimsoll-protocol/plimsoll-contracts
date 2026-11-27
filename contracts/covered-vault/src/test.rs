@@ -70,6 +70,10 @@ fn setup() -> Fixture {
         CoveredVault,
         (
             admin.clone(),
+    let vault_admin = Address::generate(&env);
+    let vault_id = env.register(
+        CoveredVault,
+        (
             ledger_id,
             sac.clone(),
             10_000u32,
@@ -80,6 +84,7 @@ fn setup() -> Fixture {
             admin.clone(),
             vault_admin.clone(),
             admin.clone(),
+            vault_admin.clone(),
         ),
     );
     let vault = CoveredVaultClient::new(&env, &vault_id);
