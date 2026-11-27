@@ -623,6 +623,12 @@ fn posted_supply_at_ledger(env: &Env, sac: &Address, as_of_ledger: u32) -> Optio
 fn counts_for_tier(registry: &RegistryClient, tier: Tier, reporter: &Address) -> bool {
     let needed = match tier {
         Tier::IssuerSigned => return true,
+        Tier::AuditorSigned => Role::Auditor,
+        Tier::Transcribed => Role::Transcriber,
+    };
+    registry.role_of(reporter) == Some(needed)
+}
+
 /// Whether a stored report still counts: its reporter must still be entitled
 /// to its tier. An issuer-signed report counts while its reporter is the
 /// issuer, which the asset record fixes, or the current delegate. A revoked
