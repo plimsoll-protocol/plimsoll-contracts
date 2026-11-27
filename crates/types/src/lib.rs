@@ -2,7 +2,11 @@
 //! cross-contract calls between them.
 #![no_std]
 
-use soroban_sdk::{contractclient, contracttype, Address, Bytes, BytesN, Env, String, Symbol};
+use soroban_sdk::{contractclient, contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+
+pub mod attestation;
+mod ledger_client;
+pub use ledger_client::is_covered;
 
 /// One day of ledgers at a 5-second close time.
 pub const DAY_IN_LEDGERS: u32 = 17_280;
@@ -40,6 +44,20 @@ pub const MIN_PLAUSIBLE_BPS: u32 = 1;
 /// says more about the reporter than the reserves.
 pub const MAX_PLAUSIBLE_BPS: u32 = 1_000_000;
 
+/// How many reporters one asset may hold unless the registry admin changes
+/// it. The registry stores the setting; the coverage ledger applies it when a
+/// reporter posts a figure for an asset for the first time.
+pub const DEFAULT_MAX_REPORTERS_PER_ASSET: u32 = 20;
+/// Whether an asset is covered, stale, or uncovered. Ordered: higher is better.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum CoverageStatus {
+    Uncovered = 0,
+    Stale = 1,
+    Covered = 2,
+}
+
 /// What a registered address is allowed to say.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,6 +68,28 @@ pub enum Role {
     SupplyPoster = 3,
     /// A registered watcher may dispute reserve reports.
     Watcher = 4,
+}
+
+/// Access tier in the reporter registry's role-based access control model.
+///
+/// Three tiers exist in ascending order of privilege:
+/// - `Observer`: may read reporter metadata (including fields not publicly
+///   exposed) but may not post reports or modify registry state.
+/// - `Reporter`: may post supply snapshots or reserve reports to the coverage
+///   ledger according to their `Role`; subsumes Observer.
+/// - `Admin`: may assign and revoke roles; subsumes Reporter.
+///
+/// Every address assigned a role in the registry holds exactly one tier.
+/// Existing entries that were created with `set_reporter` are treated as
+/// `Reporter` tier when queried through `access_tier` — no data migration is
+/// required.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RegistryRole {
+    Observer = 1,
+    Reporter = 2,
+    Admin = 3,
 }
 
 /// How much weight a reserve report carries. Ordered: higher is stronger.
@@ -78,6 +118,16 @@ pub struct ReporterInfo {
     pub added_at: u64,
 }
 
+/// A pending reporter registration awaiting confirmation by the reporter
+/// before `expires_at_ledger`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingReporter {
+    pub role: Role,
+    pub name: String,
+    pub expires_at_ledger: u32,
+}
+
 /// Optional public details a reporter publishes about themselves.
 ///
 /// Kept in its own storage key rather than added to `ReporterInfo`: changing
@@ -95,6 +145,16 @@ pub struct ReporterMetadata {
     pub contact_hash: Option<Bytes>,
 }
 
+/// One reporter in a reporter-registry `batch_register` call: the arguments
+/// `set_reporter` takes, so a batch is a list of those calls.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReporterEntry {
+    pub reporter: Address,
+    pub role: Role,
+    pub name: String,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssetRecord {
@@ -102,6 +162,25 @@ pub struct AssetRecord {
     pub code: String,
     pub issuer: Address,
     pub listed_at: u64,
+    /// Optional display name set by the admin when listing the asset.
+    pub display_name: Option<Symbol>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalRequest {
+    pub requester: Address,
+    pub amount: i128,
+    pub unlock_ledger: u32,
+}
+
+/// Optional display name set by the admin when listing the asset.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetMeta {
+    pub issuer: Address,
+    pub code: Symbol,
+    pub display_name: Option<Symbol>,
 }
 
 #[contracttype]
@@ -138,6 +217,19 @@ pub struct Coverage {
     pub report_as_of: u64,
 }
 
+/// A point-in-time record of an asset's on-chain coverage, appended to the
+/// ring buffer on every supply snapshot or reserve report post.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoverageSnapshot {
+    pub bps: u32,
+    pub supply: i128,
+    pub reserves: i128,
+    pub tier: Tier,
+    pub ledger: u32,
+    pub timestamp: u64,
+}
+
 /// The ratio a `CoverageStatus::Covered` answer carries.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -166,8 +258,7 @@ pub enum CoverageStatus {
     /// No figure exists yet, or fresh figures are below the requested minimum.
     Uncovered,
     /// The ledger's incident switch is on.
-    Paused,
-}
+    Paused,}
 
 /// A proposed contract upgrade and the first ledger at which it may execute.
 #[contracttype]
@@ -236,6 +327,11 @@ pub fn coverage_bps(reserves: i128, supply: i128) -> u32 {
 #[contractclient(name = "RegistryClient")]
 pub trait RegistryInterface {
     fn role_of(env: Env, reporter: Address) -> Option<Role>;
+    fn has_minimum_stake(env: Env, reporter: Address) -> bool;
+
+    /// The registry-level cap on how many reporters one asset may hold.
+    fn max_reporters(env: Env) -> u32;
+    fn record_report_outcome(env: Env, ledger: Address, reporter: Address, accepted: bool);
 }
 
 /// The subset of a SEP-41 token that coverage-ledger calls when an asset opts
@@ -248,16 +344,26 @@ pub trait SupplyTokenInterface {
 /// The subset of coverage-ledger that consumers call.
 #[contractclient(name = "CoverageLedgerClient")]
 pub trait CoverageLedgerInterface {
+    fn get_supply(env: Env, sac: Address) -> Option<SupplySnapshot>;
     fn coverage(env: Env, sac: Address, min_tier: Tier) -> Option<Coverage>;
+    fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> CoverageStatus;
     fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool;
+    fn get_coverage_history(env: Env, sac: Address, limit: u32) -> Vec<CoverageSnapshot>;
+    fn is_covered_at(
+        env: Env,
+        sac: Address,
+        min_bps: u32,
+        max_age: u64,
+        min_tier: Tier,
+        as_of_ledger: u32,
+    ) -> bool;
     fn coverage_status(
         env: Env,
         sac: Address,
         min_bps: u32,
         max_age: u64,
         min_tier: Tier,
-    ) -> CoverageStatus;
-}
+    ) -> CoverageStatus;}
 
 #[cfg(test)]
 mod test {

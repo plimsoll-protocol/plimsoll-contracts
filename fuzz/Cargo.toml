@@ -1,0 +1,24 @@
+[package]
+name = "coverage-ledger-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+coverage-ledger = { path = "../contracts/coverage-ledger" }
+libfuzzer-sys = "0.4"
+plimsoll-types = { path = "../crates/types" }
+reporter-registry = { path = "../contracts/reporter-registry" }
+soroban-sdk = { version = "29.0.1", features = ["testutils"] }
+
+[[bin]]
+name = "is_covered"
+path = "fuzz_targets/is_covered.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
