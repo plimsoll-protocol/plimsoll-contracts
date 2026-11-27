@@ -502,6 +502,26 @@ new admin address.
 
 No data map. Raised by `accept_admin` when the proposed admin accepts the role.
 
+### `vault_admin_proposed`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `vault_admin_proposed` | `Symbol` |
+| topic 1 | `new_admin` | `Address` |
+
+No data map. Raised by `propose_admin` when the current vault admin proposes a
+new admin address.
+
+### `vault_admin_transferred`
+
+| | Name | Type |
+| --- | --- | --- |
+| topic 0 | `vault_admin_transferred` | `Symbol` |
+| topic 1 | `old_admin` | `Address` |
+| topic 2 | `new_admin` | `Address` |
+
+No data map. Raised by `accept_admin` when the proposed admin accepts the role.
+
 ## Reading these events
 
 Soroban RPC serves roughly the last seven days of events, so an indexer cannot

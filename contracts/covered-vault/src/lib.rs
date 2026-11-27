@@ -60,6 +60,8 @@ enum DataKey {
 struct PendingWithdrawal {
     amount: i128,
     available_at: u64,
+    Admin,
+    PendingAdmin,
 }
 
 #[contracterror]
@@ -74,6 +76,7 @@ pub enum VaultError {
     InvalidDelay = 4,
     NoPendingWithdrawal = 5,
     WithdrawalDelayNotElapsed = 6,
+    NoPendingAdmin = 4,
 }
 
 #[contractevent]
@@ -286,6 +289,7 @@ impl CoveredVault {
         min_tier: Tier,
         approver: Address,
         large_withdrawal_threshold: i128,
+        admin: Address,
     ) {
         if large_withdrawal_threshold < 0 {
             panic_with_error!(&env, VaultError::InvalidThreshold);

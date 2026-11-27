@@ -4107,6 +4107,7 @@ fn batch_delist_requires_admin_auth() {
         .try_batch_delist(&soroban_sdk::vec![&f.env, f.sac.clone()]);
     assert!(res.is_err());
     assert!(f.ledger.get_asset(&f.sac).is_some());
+#[test]
 fn pending_reporter_cannot_post_reserve_until_confirmed() {
     let f = listed();
     let candidate = Address::generate(&f.env);

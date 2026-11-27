@@ -79,6 +79,7 @@ fn setup() -> Fixture {
             50 * UNIT,
             admin.clone(),
             vault_admin.clone(),
+            admin.clone(),
         ),
     );
     let vault = CoveredVaultClient::new(&env, &vault_id);
@@ -784,4 +785,54 @@ fn accept_vault_admin_without_a_pending_proposal_fails() {
         f.vault.try_accept_vault_admin(),
         Err(Ok(VaultError::NoPendingAdmin.into()))
     );
+}
+
+#[test]
+fn propose_and_accept_admin_transfers_role_and_emits_events() {
+    let f = setup();
+    assert_eq!(f.vault.admin(), f.admin);
+    assert_eq!(f.vault.pending_admin(), None);
+
+    let next_admin = Address::generate(&f.env);
+    f.vault.propose_admin(&next_admin);
+    assert_eq!(f.env.auths()[0].0, f.admin);
+
+    let events = f.env.events().all().filter_by_contract(&f.vault.address);
+    let (topics, data) = decode_event(&f.env, events.events().last().unwrap());
+    let expected_topics: Vec<Val> = (
+        Symbol::new(&f.env, "vault_admin_proposed"),
+        next_admin.clone(),
+    )
+        .into_val(&f.env);
+    assert_eq!(topics, expected_topics);
+    assert!(Map::<Symbol, Val>::try_from_val(&f.env, &data)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.vault.pending_admin(), Some(next_admin.clone()));
+    assert_eq!(f.vault.admin(), f.admin);
+
+    f.vault.accept_admin();
+    assert_eq!(f.env.auths()[0].0, next_admin);
+
+    let events = f.env.events().all().filter_by_contract(&f.vault.address);
+    let (topics, data) = decode_event(&f.env, events.events().last().unwrap());
+    let expected_topics: Vec<Val> = (
+        Symbol::new(&f.env, "vault_admin_transferred"),
+        f.admin.clone(),
+        next_admin.clone(),
+    )
+        .into_val(&f.env);
+    assert_eq!(topics, expected_topics);
+    assert!(Map::<Symbol, Val>::try_from_val(&f.env, &data)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.vault.admin(), next_admin);
+    assert_eq!(f.vault.pending_admin(), None);
+}
+
+#[test]
+fn accept_admin_without_proposal_fails() {
+    let f = setup();
+    let res = f.vault.try_accept_admin();
+    assert_eq!(res, Err(Ok(VaultError::NoPendingAdmin.into())));
 }

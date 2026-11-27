@@ -1095,6 +1095,7 @@ fn duplicate_dispute_and_post_rejection_and_expired_holding_period_fail() {
         Err(Ok(RegistryError::HoldingPeriodElapsed.into()))
     );
 }
+#[test]
 fn register_and_confirm_reporter_activates_within_window() {
     let (env, admin, client) = setup();
     env.ledger().set_sequence_number(100);

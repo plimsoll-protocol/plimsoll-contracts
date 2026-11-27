@@ -139,6 +139,9 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 | `Reporter(Address)` (persistent) | `set_reporter` (write), `get_reporter` / `role_of` (read) |
 | `ReporterDisplayName(Address)` (persistent) | optional `Symbol`; `set_reporter_name` (write), `get_reporter_name` (read) |
 
+| `Admin` (instance) | `__constructor`, `transfer_admin`, `upgrade`, `set_reporter`, `register_reporter`, `confirm_registration`, `cleanup_expired_registration`, `revoke` |
+| `Reporter(Address)` (persistent) | `set_reporter` / `confirm_registration` (write), `get_reporter` / `role_of` (read) |
+| `PendingReporter(Address)` (persistent) | `register_reporter` (write), `get_pending_reporter` (read), `confirm_registration` / `cleanup_expired_registration` / `revoke` (remove) |
 | `Metadata(Address)` (persistent) | `update_reporter_metadata` (write), `get_reporter_metadata` (read) |
 | `DisplayName(Address)` (persistent) | `set_reporter_name` (write), `get_reporter_name` (read) |
 | `Stake(Address)` (persistent) | `top_up_stake`, `reduce_stake` (write), `stake_of` (read) |
@@ -224,6 +227,7 @@ Decides who may speak. Holds no money.
 | `PendingReporter(Address)` | persistent, TTL extended on write and read | `PendingReporter` |
 | `ReporterDisplayName(Address)` | persistent, TTL extended on write and read | `Symbol` (optional, at most 32 characters) |
 
+| `PendingReporter(Address)` | persistent, TTL extended on write and read | `PendingReporter` |
 | `Metadata(Address)` | persistent, TTL extended on write and read | `ReporterMetadata` |
 | `Dispute(BytesN<32>)` | persistent, TTL extended on write and read | `DisputeRecord` |
 | `DisplayName(Address)` | persistent, TTL extended on write and read | `Symbol` |
@@ -356,6 +360,7 @@ Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
 `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`, `InvalidMetadata = 5`,
 `InvalidQuorum = 6`, `DuplicateDispute = 7`, `DisputeAlreadyRejected = 8`,
 `HoldingPeriodElapsed = 9`.
+`UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`, `InvalidMetadata = 5`,
 `InvalidConfirmWindow = 6`, `PendingRegistrationNotFound = 7`,
 `RegistrationExpired = 8`.
 
