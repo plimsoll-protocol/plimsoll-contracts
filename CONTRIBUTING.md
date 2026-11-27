@@ -39,6 +39,9 @@ advisory has a comment explaining why it cannot be fixed yet.
       `UPDATE_SNAPSHOTS=1 cargo test -p plimsoll-event-snapshots` and the diff
       is reviewed alongside [docs/EVENTS.md](docs/EVENTS.md).
 - [ ] New public functions have tests for the success path **and** every error they can return.
+- [ ] Every `#[contracterror]` variant is asserted by a test:
+      `python3 scripts/check_error_coverage.py` passes. A variant that cannot be
+      reached is listed in that script with a reason.
 - [ ] If behaviour changed, [docs/SPEC.md](docs/SPEC.md) is updated in the same pull request.
 - [ ] Commit messages use [Conventional Commits](https://www.conventionalcommits.org/): `feat(ledger): …`, `fix(registry): …`, `test(vault): …`.
 

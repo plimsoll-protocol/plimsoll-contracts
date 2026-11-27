@@ -248,6 +248,14 @@ pub trait SupplyTokenInterface {
 pub trait CoverageLedgerInterface {
     fn coverage(env: Env, sac: Address, min_tier: Tier) -> Option<Coverage>;
     fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool;
+    fn is_covered_at(
+        env: Env,
+        sac: Address,
+        min_bps: u32,
+        max_age: u64,
+        min_tier: Tier,
+        as_of_ledger: u32,
+    ) -> bool;
     fn coverage_status(
         env: Env,
         sac: Address,

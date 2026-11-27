@@ -8,7 +8,19 @@
         "<account>"
       ],
       "data": {
-        "amount": 400000000
+        "amount": 400000000,
+        "balance_after": 400000000
+      }
+    },
+    {
+      "name": "withdrawal_queued",
+      "topics": [
+        "withdrawal_queued",
+        "<account>"
+      ],
+      "data": {
+        "amount": 100000000,
+        "available_at": 1700000000
       }
     },
     {
@@ -18,7 +30,8 @@
         "<account>"
       ],
       "data": {
-        "amount": 100000000
+        "amount": 100000000,
+        "balance_after": 300000000
       }
     }
   ]

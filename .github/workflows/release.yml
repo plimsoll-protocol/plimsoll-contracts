@@ -14,8 +14,61 @@ permissions:
   contents: write
 
 jobs:
+  verify-reproducible:
+    name: verify reproducible wasm hashes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Stellar CLI (checksum verified)
+        uses: ./.github/actions/install-stellar-cli
+      - name: Rebuild wasm from source
+        run: stellar contract build --locked
+      - name: Verify wasm SHA-256 hashes match deployments/testnet.json
+        run: |
+          python3 - << 'EOF'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          dep = json.loads(pathlib.Path("deployments/testnet.json").read_text())
+          live = dep.get("liveWasm", {})
+          wasm_map = {
+              "reporterRegistry": "target/wasm32v1-none/release/reporter_registry.wasm",
+              "coverageLedger": "target/wasm32v1-none/release/coverage_ledger.wasm",
+              "coveredVault": "target/wasm32v1-none/release/covered_vault.wasm",
+          }
+
+          mismatches = 0
+          checked = 0
+          for key, expected in live.items():
+              if key.startswith("_"):
+                  continue
+              wasm_path = wasm_map.get(key)
+              if wasm_path is None:
+                  print(f"ERROR: unknown liveWasm key '{key}' in deployments/testnet.json", file=sys.stderr)
+                  sys.exit(1)
+              data = pathlib.Path(wasm_path).read_bytes()
+              actual = hashlib.sha256(data).hexdigest()
+              checked += 1
+              if actual == expected:
+                  print(f"OK   {key}: {actual}")
+              else:
+                  print(f"FAIL {key}: expected {expected}, got {actual}", file=sys.stderr)
+                  mismatches += 1
+
+          if checked == 0:
+              print("ERROR: no liveWasm entries found in deployments/testnet.json", file=sys.stderr)
+              sys.exit(1)
+          if mismatches:
+              sys.exit(1)
+          EOF
+
   release:
     name: publish wasm and specs
+    needs: verify-reproducible
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

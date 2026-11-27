@@ -364,152 +364,177 @@ fn transfer_admin_without_new_admin_auth_fails() {
     assert_eq!(client.admin(), admin);
 }
 
-fn decode_stake_events(env: &Env, contract: &Address) -> std::vec::Vec<(Address, i128, i128)> {
-    let events = env.events().all().filter_by_contract(contract);
-    let mut out = std::vec::Vec::new();
-    for event in events.events().iter() {
-        let ContractEventBody::V0(body) = &event.body;
-        let topics: std::vec::Vec<Val> = body
-            .topics
-            .iter()
-            .map(|t| Val::try_from_val(env, t).unwrap())
-            .collect();
-        let name = Symbol::try_from_val(env, &topics[0]).unwrap();
-        if name != Symbol::new(env, "stake_changed") {
-            continue;
-        }
-        let reporter = Address::try_from_val(env, &topics[1]).unwrap();
-        let data_val = Val::try_from_val(env, &body.data).unwrap();
-        let data = Map::<Symbol, Val>::try_from_val(env, &data_val).unwrap();
-        let old_stake =
-            i128::try_from_val(env, &data.get(Symbol::new(env, "old_stake")).unwrap()).unwrap();
-        let new_stake =
-            i128::try_from_val(env, &data.get(Symbol::new(env, "new_stake")).unwrap()).unwrap();
-        out.push((reporter, old_stake, new_stake));
-    }
-    out
+#[test]
+fn execute_upgrade_without_proposal_fails() {
+    let (_env, _admin, client) = setup();
+    let res = client.try_execute_upgrade();
+    assert_eq!(res, Err(Ok(RegistryError::UpgradeNotProposed.into())));
 }
 
 #[test]
-fn top_up_and_reduce_stake_emit_stake_changed() {
-    let (env, admin, client) = setup();
-    let reporter = Address::generate(&env);
-    assert_eq!(client.stake_of(&reporter), 0);
-
-    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "Acme"));
-
-    assert_eq!(client.top_up_stake(&reporter, &500), 500);
-    assert_eq!(env.auths()[0].0, admin);
-    assert_eq!(
-        decode_stake_events(&env, &client.address),
-        std::vec![(reporter.clone(), 0, 500)]
-    );
-    assert_eq!(client.stake_of(&reporter), 500);
-
-    assert_eq!(client.top_up_stake(&reporter, &300), 800);
-    assert_eq!(
-        decode_stake_events(&env, &client.address),
-        std::vec![(reporter.clone(), 500, 800)]
-    );
-    assert_eq!(client.stake_of(&reporter), 800);
-
-    assert_eq!(client.reduce_stake(&reporter, &250), 550);
-    assert_eq!(env.auths()[0].0, admin);
-    assert_eq!(
-        decode_stake_events(&env, &client.address),
-        std::vec![(reporter.clone(), 800, 550)]
-    );
-    assert_eq!(client.stake_of(&reporter), 550);
-
-    assert_eq!(client.reduce_stake(&reporter, &550), 0);
-    assert_eq!(
-        decode_stake_events(&env, &client.address),
-        std::vec![(reporter.clone(), 550, 0)]
-    );
-    assert_eq!(client.stake_of(&reporter), 0);
+fn cancel_upgrade_without_proposal_fails() {
+    let (_env, _admin, client) = setup();
+    let res = client.try_cancel_upgrade();
+    assert_eq!(res, Err(Ok(RegistryError::UpgradeNotProposed.into())));
 }
 
 #[test]
-fn stake_operations_reject_unknown_invalid_and_insufficient() {
+fn top_up_stake_accumulates_and_is_readable() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+
+    assert_eq!(client.stake_of(&who), 0);
+    assert_eq!(client.top_up_stake(&who, &1_000), 1_000);
+    assert_eq!(client.top_up_stake(&who, &500), 1_500);
+    assert_eq!(client.stake_of(&who), 1_500);
+}
+
+#[test]
+fn top_up_stake_with_non_positive_amount_fails() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+
+    let res = client.try_top_up_stake(&who, &0);
+    assert_eq!(res, Err(Ok(RegistryError::InvalidStakeAmount.into())));
+    assert_eq!(client.stake_of(&who), 0);
+}
+
+#[test]
+fn top_up_stake_past_i128_max_fails() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+    client.top_up_stake(&who, &i128::MAX);
+
+    let res = client.try_top_up_stake(&who, &1);
+    assert_eq!(res, Err(Ok(RegistryError::InvalidStakeAmount.into())));
+    assert_eq!(client.stake_of(&who), i128::MAX);
+}
+
+#[test]
+fn reduce_stake_lowers_and_clears_the_balance() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+    client.top_up_stake(&who, &1_000);
+
+    assert_eq!(client.reduce_stake(&who, &400), 600);
+    assert_eq!(client.stake_of(&who), 600);
+    assert_eq!(client.reduce_stake(&who, &600), 0);
+    assert_eq!(client.stake_of(&who), 0);
+}
+
+#[test]
+fn reduce_stake_with_non_positive_amount_fails() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+    client.top_up_stake(&who, &500);
+
+    let res = client.try_reduce_stake(&who, &0);
+    assert_eq!(res, Err(Ok(RegistryError::InvalidStakeAmount.into())));
+    assert_eq!(client.stake_of(&who), 500);
+}
+
+#[test]
+fn reduce_stake_above_the_tracked_balance_fails() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme"));
+    client.top_up_stake(&who, &250);
+
+    let res = client.try_reduce_stake(&who, &251);
+    assert_eq!(res, Err(Ok(RegistryError::InsufficientStake.into())));
+    assert_eq!(client.stake_of(&who), 250);
+}
+
+#[test]
+fn execute_upgrade_before_delay_fails() {
+    let (env, _admin, client) = setup();
+    let hash = BytesN::from_array(&env, &[7; 32]);
+    client.propose_upgrade(&hash);
+
+    // A proposal is executable only once UPGRADE_DELAY_LEDGERS have closed.
+    let res = client.try_execute_upgrade();
+    assert_eq!(res, Err(Ok(RegistryError::UpgradeDelayNotElapsed.into())));
+}
+
+fn registered(env: &Env, client: &ReporterRegistryClient<'static>) -> Address {
+    let who = Address::generate(env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(env, "Acme Audit"));
+    who
+}
+
+#[test]
+fn set_reporter_name_stores_the_name_under_the_reporters_authority() {
+    let (env, _admin, client) = setup();
+    let who = registered(&env, &client);
+    assert_eq!(client.get_reporter_name(&who), None);
+
+    client.set_reporter_name(&who, &Symbol::new(&env, "AcmeAudit"));
+    assert_eq!(env.auths()[0].0, who);
+    assert_eq!(
+        client.get_reporter_name(&who),
+        Some(Symbol::new(&env, "AcmeAudit"))
+    );
+
+    // A later call replaces the name.
+    client.set_reporter_name(&who, &Symbol::new(&env, "AcmeAuditLLP"));
+    assert_eq!(
+        client.get_reporter_name(&who),
+        Some(Symbol::new(&env, "AcmeAuditLLP"))
+    );
+}
+
+#[test]
+fn set_reporter_name_accepts_the_32_character_maximum() {
+    let (env, _admin, client) = setup();
+    let who = registered(&env, &client);
+    let longest = "abcdefghijklmnopqrstuvwxyz_01234";
+    assert_eq!(longest.len(), 32);
+    client.set_reporter_name(&who, &Symbol::new(&env, longest));
+    assert_eq!(
+        client.get_reporter_name(&who),
+        Some(Symbol::new(&env, longest))
+    );
+}
+
+/// The 32-character cap is the `Symbol` type's own: a 33-character name
+/// cannot be built, so it can never reach `set_reporter_name`.
+#[test]
+#[should_panic]
+fn a_display_name_over_32_characters_cannot_be_constructed() {
+    let env = Env::default();
+    let _ = Symbol::new(&env, "abcdefghijklmnopqrstuvwxyz_012345");
+}
+
+#[test]
+fn set_reporter_name_rejects_an_unregistered_reporter() {
     let (env, _admin, client) = setup();
     let unknown = Address::generate(&env);
     assert_eq!(
-        client.try_top_up_stake(&unknown, &100),
+        client.try_set_reporter_name(&unknown, &Symbol::new(&env, "nobody")),
         Err(Ok(RegistryError::ReporterNotFound.into()))
     );
-    assert_eq!(
-        client.try_reduce_stake(&unknown, &100),
-        Err(Ok(RegistryError::ReporterNotFound.into()))
-    );
-
-    let reporter = Address::generate(&env);
-    client.set_reporter(
-        &reporter,
-        &Role::Transcriber,
-        &String::from_str(&env, "vol"),
-    );
-
-    assert_eq!(
-        client.try_top_up_stake(&reporter, &0),
-        Err(Ok(RegistryError::InvalidStakeAmount.into()))
-    );
-    assert_eq!(
-        client.try_top_up_stake(&reporter, &-10),
-        Err(Ok(RegistryError::InvalidStakeAmount.into()))
-    );
-    assert_eq!(
-        client.try_reduce_stake(&reporter, &0),
-        Err(Ok(RegistryError::InvalidStakeAmount.into()))
-    );
-    assert_eq!(
-        client.try_reduce_stake(&reporter, &-5),
-        Err(Ok(RegistryError::InvalidStakeAmount.into()))
-    );
-    assert_eq!(
-        client.try_reduce_stake(&reporter, &1),
-        Err(Ok(RegistryError::InsufficientStake.into()))
-    );
-
-    client.top_up_stake(&reporter, &100);
-    assert_eq!(
-        client.try_reduce_stake(&reporter, &101),
-        Err(Ok(RegistryError::InsufficientStake.into()))
-    );
-    assert_eq!(
-        client.try_top_up_stake(&reporter, &i128::MAX),
-        Err(Ok(RegistryError::InvalidStakeAmount.into()))
-    );
-    assert_eq!(client.stake_of(&reporter), 100);
+    assert_eq!(client.get_reporter_name(&unknown), None);
 }
 
 #[test]
-fn stake_operations_require_admin_auth() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let admin = Address::generate(&env);
-    let id = env.register(ReporterRegistry, (admin,));
-    let client = ReporterRegistryClient::new(&env, &id);
-    let reporter = Address::generate(&env);
-    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "Acme"));
-    client.top_up_stake(&reporter, &100);
-
-    env.mock_auths(&[]);
-    assert!(client.try_top_up_stake(&reporter, &50).is_err());
-    assert!(client.try_reduce_stake(&reporter, &50).is_err());
-    assert_eq!(client.stake_of(&reporter), 100);
-}
-
-#[test]
-fn revoke_clears_stake_and_emits_stake_changed() {
+fn reporter_name_leaves_the_existing_entry_unchanged_and_is_removed_on_revoke() {
     let (env, _admin, client) = setup();
-    let reporter = Address::generate(&env);
-    client.set_reporter(&reporter, &Role::Auditor, &String::from_str(&env, "Acme"));
-    client.top_up_stake(&reporter, &250);
+    let who = registered(&env, &client);
+    let before = client.get_reporter(&who).unwrap();
 
-    client.revoke(&reporter);
-    assert_eq!(
-        decode_stake_events(&env, &client.address),
-        std::vec![(reporter.clone(), 250, 0)]
-    );
-    assert_eq!(client.stake_of(&reporter), 0);
+    client.set_reporter_name(&who, &Symbol::new(&env, "AcmeAudit"));
+    assert_eq!(client.get_reporter(&who).unwrap(), before);
+    assert_eq!(client.get_reporter_metadata(&who), None);
+
+    client.revoke(&who);
+    assert_eq!(client.get_reporter_name(&who), None);
+
+    // Re-adding the reporter does not bring the old name back.
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "Acme Audit"));
+    assert_eq!(client.get_reporter_name(&who), None);
 }

@@ -33,6 +33,10 @@ jobs:
         run: shellcheck scripts/*.sh
       - name: Test
         run: cargo test
+      # Every #[contracterror] variant needs a test that asserts it, so a dead
+      # or untested code cannot ship. See docs/ERRORS.md.
+      - name: Error-code coverage
+        run: python3 scripts/check_error_coverage.py
       # tests/e2e loads the wasm built above with contractimport!, so it is not
       # a default workspace member and runs only once that wasm exists.
       - name: Clippy (e2e)

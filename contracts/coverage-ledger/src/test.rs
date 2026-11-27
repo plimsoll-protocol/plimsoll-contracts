@@ -835,6 +835,82 @@ fn is_covered_checks_ratio_age_and_tier() {
 /// An asset whose coverage ratio equals min_bps exactly must return true,
 /// and one bps below must return false. See SPEC.md "is_covered" rules.
 #[test]
+fn is_covered_at_filters_figures_by_posting_ledger() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.env.ledger().set_sequence_number(1_010);
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+
+    assert!(!f
+        .ledger
+        .is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_000,));
+    assert!(f
+        .ledger
+        .is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_010,));
+}
+
+#[test]
+fn is_covered_at_cannot_reconstruct_replaced_reports() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    assert!(f
+        .ledger
+        .is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_000,));
+
+    f.env.ledger().set_sequence_number(1_010);
+    f.env.ledger().set_timestamp(T0 + 50);
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &(T0 + 50),
+        &hash(&f.env, 3),
+        &uri(&f.env),
+    );
+    assert!(!f
+        .ledger
+        .is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_005,));
+}
+
+#[test]
+fn is_covered_at_rejects_a_future_ledger() {
+    let f = listed();
+    assert_eq!(
+        f.ledger
+            .try_is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_001,),
+        Err(Ok(LedgerError::FutureLedger.into()))
+    );
+}
+
+#[test]
+fn is_covered_at_propagates_pause() {
+    let f = listed();
+    f.ledger.pause();
+    assert_eq!(
+        f.ledger
+            .try_is_covered_at(&f.sac, &10_000, &86_400, &Tier::Transcribed, &1_000,),
+        Err(Ok(LedgerError::Paused.into()))
+    );
+}
+
+#[test]
 fn is_covered_exact_bps_boundary_is_inclusive() {
     let f = listed();
     // 100 reserves against 100 supply → exactly 10_000 bps (100 %).
@@ -2261,6 +2337,75 @@ fn pause_sets_the_flag_and_emits_the_admin() {
     );
 }
 
+// ---- resource budget ceilings (#103) --------------------------------------
+// Mirrors resource-budgets.json, which carries the prose for why each number
+// exists. A failure here names the call that grew; raise the ceiling in the
+// commit that needs the room, never to make a red run green.
+
+const IS_COVERED_MAX_CPU_INSTRUCTIONS: u64 = 300_000;
+const IS_COVERED_MAX_MEMORY_BYTES: u64 = 134_000;
+const POST_SUPPLY_MAX_CPU_INSTRUCTIONS: u64 = 230_000;
+const POST_SUPPLY_MAX_MEMORY_BYTES: u64 = 116_000;
+const POST_RESERVE_MAX_CPU_INSTRUCTIONS: u64 = 372_000;
+const POST_RESERVE_MAX_MEMORY_BYTES: u64 = 179_000;
+
+/// Run `call` and fail when it costs more than the ceiling documented for it.
+fn assert_within_budget(
+    f: &Fixture,
+    label: &str,
+    max_cpu: u64,
+    max_memory: u64,
+    call: impl FnOnce(),
+) {
+    let cpu_before = f.env.cost_estimate().budget().cpu_instruction_cost();
+    let memory_before = f.env.cost_estimate().budget().memory_bytes_cost();
+    call();
+    let cpu = f
+        .env
+        .cost_estimate()
+        .budget()
+        .cpu_instruction_cost()
+        .saturating_sub(cpu_before);
+    let memory = f
+        .env
+        .cost_estimate()
+        .budget()
+        .memory_bytes_cost()
+        .saturating_sub(memory_before);
+    std::println!("budget {label}: {cpu} CPU / {memory} bytes");
+    assert!(cpu <= max_cpu, "{label} used {cpu} CPU, ceiling {max_cpu}");
+    assert!(
+        memory <= max_memory,
+        "{label} used {memory} bytes, ceiling {max_memory}"
+    );
+}
+
+#[test]
+fn is_covered_stays_within_its_resource_budget() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    assert_within_budget(
+        &f,
+        "is_covered",
+        IS_COVERED_MAX_CPU_INSTRUCTIONS,
+        IS_COVERED_MAX_MEMORY_BYTES,
+        || {
+            assert!(f
+                .ledger
+                .is_covered(&f.sac, &10_000, &86_400, &Tier::Transcribed));
+        },
+    );
+}
+
 #[test]
 fn unpause_clears_the_flag_and_emits_the_admin() {
     let f = listed();
@@ -2277,6 +2422,21 @@ fn unpause_clears_the_flag_and_emits_the_admin() {
     assert_eq!(
         Address::try_from_val(&f.env, &data.get(Symbol::new(&f.env, "by")).unwrap()).unwrap(),
         f.admin
+    );
+}
+
+#[test]
+fn post_supply_stays_within_its_resource_budget() {
+    let f = listed();
+    assert_within_budget(
+        &f,
+        "post_supply",
+        POST_SUPPLY_MAX_CPU_INSTRUCTIONS,
+        POST_SUPPLY_MAX_MEMORY_BYTES,
+        || {
+            f.ledger
+                .post_supply(&f.poster, &f.sac, &UNIT, &990, &hash(&f.env, 1));
+        },
     );
 }
 
@@ -2565,6 +2725,29 @@ fn enable_native_supply_requires_a_listed_asset() {
 }
 
 #[test]
+fn post_report_stays_within_its_resource_budget() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    assert_within_budget(
+        &f,
+        "post_reserve",
+        POST_RESERVE_MAX_CPU_INSTRUCTIONS,
+        POST_RESERVE_MAX_MEMORY_BYTES,
+        || {
+            f.ledger.post_reserve(
+                &f.auditor,
+                &f.sac,
+                &(100 * UNIT),
+                &T0,
+                &hash(&f.env, 2),
+                &uri(&f.env),
+            );
+        },
+    );
+}
+
+#[test]
 fn enable_native_supply_requires_the_admin() {
     let f = listed();
     let stranger = Address::generate(&f.env);
@@ -2648,6 +2831,121 @@ fn a_failing_native_query_without_a_snapshot_is_uncovered() {
     );
 }
 
+fn try_post_now(f: &Fixture, who: &Address) -> Result<(), LedgerError> {
+    match f
+        .ledger
+        .try_post_reserve(who, &f.sac, &UNIT, &T0, &hash(&f.env, 6), &uri(&f.env))
+    {
+        Ok(_) => Ok(()),
+        Err(Ok(error)) => Err(LedgerError::try_from(error).expect("a ledger error")),
+        Err(Err(error)) => panic!("post_reserve failed outside the contract: {error:?}"),
+    }
+}
+
+fn can_post(f: &Fixture, who: &Address) -> Result<(), LedgerError> {
+    match f.ledger.try_can_post_report(who, &f.sac) {
+        Ok(Ok(())) => Ok(()),
+        Err(Ok(error)) => Err(error),
+        other => panic!("can_post_report failed outside the contract: {other:?}"),
+    }
+}
+
+#[test]
+fn can_post_report_allows_every_reporting_identity() {
+    let f = listed();
+    for who in [&f.issuer, &f.auditor, &f.transcriber] {
+        assert_eq!(can_post(&f, who), Ok(()));
+        f.ledger.can_post_report(who, &f.sac);
+        // And post_reserve agrees.
+        assert_eq!(try_post_now(&f, who), Ok(()));
+    }
+}
+
+#[test]
+fn can_post_report_rejects_an_unlisted_asset() {
+    let f = setup();
+    assert_eq!(can_post(&f, &f.auditor), Err(LedgerError::AssetNotListed));
+    assert_eq!(
+        try_post_now(&f, &f.auditor),
+        Err(LedgerError::AssetNotListed)
+    );
+}
+
+#[test]
+fn can_post_report_rejects_a_non_reporter() {
+    let f = listed();
+    let stranger = Address::generate(&f.env);
+    for who in [&f.poster, &stranger] {
+        assert_eq!(can_post(&f, who), Err(LedgerError::NotReporter));
+        assert_eq!(try_post_now(&f, who), Err(LedgerError::NotReporter));
+    }
+}
+
+#[test]
+fn can_post_report_reports_the_pause_first() {
+    let f = setup();
+    f.ledger.pause();
+    // Paused wins over the unlisted asset, as it does in post_reserve.
+    assert_eq!(can_post(&f, &f.auditor), Err(LedgerError::Paused));
+    assert_eq!(try_post_now(&f, &f.auditor), Err(LedgerError::Paused));
+}
+
+#[test]
+fn can_post_report_rejects_a_full_tier_unless_a_slot_can_be_reclaimed() {
+    let f = listed();
+    let mut auditors = std::vec![f.auditor.clone()];
+    for _ in 1..MAX_REPORTERS_PER_TIER {
+        auditors.push(add_reporter(&f, Role::Auditor));
+    }
+    for (i, a) in auditors.iter().enumerate() {
+        post(&f, a, UNIT, T0 - 100 + i as u64);
+    }
+    let one_too_many = add_reporter(&f, Role::Auditor);
+    assert_eq!(
+        can_post(&f, &one_too_many),
+        Err(LedgerError::TooManyReporters)
+    );
+    assert_eq!(
+        try_post_now(&f, &one_too_many),
+        Err(LedgerError::TooManyReporters)
+    );
+    // A reporter already holding a slot is not blocked by the cap.
+    assert_eq!(can_post(&f, &auditors[0]), Ok(()));
+
+    // Revoking a holder frees a slot post_reserve would reclaim.
+    f.registry.revoke(&auditors[1]);
+    assert_eq!(can_post(&f, &one_too_many), Ok(()));
+    assert_eq!(try_post_now(&f, &one_too_many), Ok(()));
+}
+
+#[test]
+fn can_post_report_writes_no_storage() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let f = listed();
+    let key = DataKey::Asset(f.sac.clone());
+    let ttl = |f: &Fixture| {
+        f.env.as_contract(&f.ledger.address, || {
+            f.env.storage().persistent().get_ttl(&key)
+        })
+    };
+    // Move close enough to expiry that any read that extends TTL would.
+    let remaining = ttl(&f);
+    f.env
+        .ledger()
+        .set_sequence_number(f.env.ledger().sequence() + remaining - 10);
+    let before = ttl(&f);
+    assert!(before < PERSISTENT_THRESHOLD);
+
+    assert_eq!(can_post(&f, &f.auditor), Ok(()));
+    assert_eq!(ttl(&f), before, "can_post_report must not extend TTLs");
+    assert!(f.ledger.get_reports(&f.sac).is_empty());
+
+    // get_asset, by contrast, extends it.
+    f.ledger.get_asset(&f.sac);
+    assert!(ttl(&f) > before);
+}
+
 // ---- last_updated (#123) --------------------------------------------------
 
 #[test]
@@ -2665,6 +2963,7 @@ fn last_updated_is_none_for_an_asset_that_is_not_listed() {
 fn last_updated_is_none_while_only_a_supply_figure_exists() {
     let f = listed();
     supply(&f, 100 * UNIT);
+    // Never reported on is a different answer from reported long ago.
     assert_eq!(f.ledger.last_updated(&f.sac), None);
 }
 
@@ -2798,10 +3097,22 @@ fn get_all_latest_reports_pages_with_a_cursor() {
     supply(&f, 100 * UNIT);
     post(&f, &f.auditor, 100 * UNIT, T0 - 300);
     post(&f, &f.issuer, 100 * UNIT, T0 - 200);
-    f.ledger
-        .post_reserve(&f.transcriber, &other, &UNIT, &(T0 - 100), &hash(&f.env, 4), &uri(&f.env));
-    f.ledger
-        .post_reserve(&f.auditor, &other, &UNIT, &(T0 - 50), &hash(&f.env, 4), &uri(&f.env));
+    f.ledger.post_reserve(
+        &f.transcriber,
+        &other,
+        &UNIT,
+        &(T0 - 100),
+        &hash(&f.env, 4),
+        &uri(&f.env),
+    );
+    f.ledger.post_reserve(
+        &f.auditor,
+        &other,
+        &UNIT,
+        &(T0 - 50),
+        &hash(&f.env, 4),
+        &uri(&f.env),
+    );
 
     let all = f.ledger.get_all_latest_reports(&None, &10);
     assert_eq!(all.len(), 4);
@@ -2889,58 +3200,55 @@ fn get_all_latest_reports_caps_a_page_at_fifty() {
 
 // ---- historical_coverage_bps (#164) ---------------------------------------
 
-/// The ratio the ring buffer reports for `f.sac` at `as_of_ledger`.
+/// The ratio the ledger reports for `f.sac` at `as_of_ledger`.
 fn hist(f: &Fixture, max_age: u32, as_of_ledger: u32) -> Option<u128> {
-    f.ledger.historical_coverage_bps(&f.sac, &max_age, &as_of_ledger)
-}
-
-/// Post a supply figure at `ledger`, so the ring buffer holds it at a known
-/// point.
-fn post_supply_at(f: &Fixture, ledger: u32, amount: i128) {
-    f.env.ledger().set_sequence_number(ledger);
-    f.ledger.post_supply(&f.poster, &f.sac, &amount, &ledger, &hash(&f.env, 1));
-}
-
-/// One supply figure and one auditor figure at `ledger`: one point per side.
-fn point_at(f: &Fixture, ledger: u32, supply: i128, reserve: i128, as_of: u64) {
-    post_supply_at(f, ledger, supply);
-    post(f, &f.auditor, reserve, as_of);
+    f.ledger
+        .historical_coverage_bps(&f.sac, &max_age, &as_of_ledger)
 }
 
 #[test]
 fn historical_coverage_bps_is_none_until_both_sides_are_posted() {
     let f = listed();
-    assert_eq!(hist(&f, 10, 1_000), None);
+    assert_eq!(hist(&f, u32::MAX, 1_000), None);
     supply(&f, 100 * UNIT);
     // A supply figure on its own is not coverage.
-    assert_eq!(hist(&f, 10, 1_000), None);
+    assert_eq!(hist(&f, u32::MAX, 1_000), None);
     post(&f, &f.auditor, 100 * UNIT, T0 - 100);
-    assert_eq!(hist(&f, 10, 1_000), Some(10_000));
+    assert_eq!(hist(&f, u32::MAX, 1_000), Some(10_000));
 }
 
 #[test]
 fn historical_coverage_bps_answers_a_past_ledger() {
     let f = listed();
-    point_at(&f, 1_000, 100 * UNIT, 100 * UNIT, T0 - 300);
-    point_at(&f, 1_050, 400 * UNIT, 100 * UNIT, T0 - 200);
+    supply(&f, 400 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 300);
+    assert_eq!(hist(&f, u32::MAX, 1_000), Some(2_500));
 
-    assert_eq!(hist(&f, 100, 1_000), Some(10_000));
-    // Still the older pair one ledger before the newer one lands.
-    assert_eq!(hist(&f, 100, 1_049), Some(10_000));
-    assert_eq!(hist(&f, 100, 1_050), Some(2_500));
+    f.env.ledger().set_sequence_number(1_050);
+    f.env.ledger().set_timestamp(T0 + 50);
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &1_040, &hash(&f.env, 1));
 
-    // The replay agrees with the live answer at the newest figures.
-    let live = f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap();
-    assert_eq!(live.bps, 2_500);
+    // The 400 * UNIT snapshot was replaced, and the ledger keeps only the
+    // latest, so a ledger between the two posts has no supply figure to read.
+    assert_eq!(hist(&f, u32::MAX, 1_049), None);
+    assert_eq!(hist(&f, u32::MAX, 1_050), Some(10_000));
+    // At the newest figures the replay agrees with the live answer.
+    assert_eq!(
+        f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap().bps,
+        10_000
+    );
 }
 
 #[test]
-fn historical_coverage_bps_judges_age_from_the_ledger_asked_about() {
+fn historical_coverage_bps_counts_age_in_ledgers_inclusively() {
     let f = listed();
-    point_at(&f, 1_000, 100 * UNIT, 100 * UNIT, T0 - 300);
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 100);
+    f.env.ledger().set_sequence_number(1_010);
 
-    // Ten ledgers on the figures are ten ledgers old: accepted at 10 and
-    // refused at 9, so the comparison is inclusive as in `is_covered`.
+    // Both figures were posted at 1_000: ten ledgers old at 1_010 is accepted,
+    // nine is not, so the comparison is inclusive as in `is_covered`.
     assert_eq!(hist(&f, 10, 1_010), Some(10_000));
     assert_eq!(hist(&f, 9, 1_010), None);
     assert_eq!(hist(&f, 0, 1_000), Some(10_000));
@@ -2948,49 +3256,43 @@ fn historical_coverage_bps_judges_age_from_the_ledger_asked_about() {
 }
 
 #[test]
-fn historical_coverage_bps_is_none_outside_the_ring_buffer_window() {
+fn historical_coverage_bps_is_none_for_a_future_ledger() {
     let f = listed();
-    point_at(&f, 1_000, 100 * UNIT, 100 * UNIT, T0 - 300);
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 100);
 
-    // Fill the rest of the window with supply points. The two points at ledger
-    // 1_000 are the oldest, so they are the first to go.
-    for i in 1..MAX_HISTORY_POINTS {
-        post_supply_at(&f, 1_000 + i, 100 * UNIT);
-    }
-
-    // Nothing is retained at or before 999.
-    assert_eq!(hist(&f, u32::MAX, 999), None);
-    // Both figures are still inside: the reserve point is 15 ledgers old.
-    assert_eq!(hist(&f, 15, 1_015), Some(10_000));
-
-    // One more point evicts both, leaving supply with no reserve in the window.
-    post_supply_at(&f, 1_016, 100 * UNIT);
-    assert_eq!(hist(&f, u32::MAX, 1_016), None);
+    // Answering about a ledger that has not happened would be a guess.
+    assert_eq!(hist(&f, u32::MAX, 1_001), None);
 }
 
 #[test]
-fn historical_coverage_bps_takes_the_freshest_reserve_in_the_window() {
+fn historical_coverage_bps_cannot_reconstruct_a_replaced_report() {
     let f = listed();
-    point_at(&f, 1_000, 100 * UNIT, 100 * UNIT, T0 - 300);
-    f.env.ledger().set_sequence_number(1_001);
-    post(&f, &f.transcriber, 50 * UNIT, T0 - 200);
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 100);
+    assert_eq!(hist(&f, u32::MAX, 1_000), Some(10_000));
 
-    // The transcriber's later figure wins over the auditor's earlier one, even
-    // though the auditor's tier is stronger.
-    assert_eq!(hist(&f, 1, 1_001), Some(5_000));
-    // Before that figure was posted, the auditor's still decides.
-    assert_eq!(hist(&f, 1, 1_000), Some(10_000));
+    f.env.ledger().set_sequence_number(1_010);
+    f.env.ledger().set_timestamp(T0 + 50);
+    post(&f, &f.auditor, 90 * UNIT, T0 + 50);
+
+    // The figure posted at 1_000 was replaced, so a query at 1_005 has no
+    // report posted by then; the events carry the ratio it gave.
+    assert_eq!(hist(&f, u32::MAX, 1_005), None);
+    assert_eq!(hist(&f, u32::MAX, 1_010), Some(9_000));
 }
 
 #[test]
 fn historical_coverage_bps_is_per_asset() {
     let f = listed();
     let other = another_asset(&f);
-    f.ledger.list_asset(&other);
-    point_at(&f, 1_000, 100 * UNIT, 100 * UNIT, T0 - 300);
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 100);
 
     assert_eq!(hist(&f, u32::MAX, 1_000), Some(10_000));
-    let unlisted = f.ledger.historical_coverage_bps(&other, &u32::MAX, &1_000);
-    assert_eq!(unlisted, None);
+    // `other` is not listed, so it has no figures to replay.
+    assert_eq!(
+        f.ledger.historical_coverage_bps(&other, &u32::MAX, &1_000),
+        None
+    );
 }
-

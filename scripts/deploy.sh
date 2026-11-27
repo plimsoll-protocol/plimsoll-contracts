@@ -115,7 +115,7 @@ if [ -n "$ASSET_SAC" ]; then
   echo "==> deploy covered-vault ($ASSET_SAC, $MIN_BPS bps, $MAX_AGE s, tier $MIN_TIER)"
   VAULT=$(stellar contract deploy --wasm "$WASM_DIR/covered_vault.wasm" \
     --source "$ADMIN_IDENTITY" "${NETWORK_ARGS[@]}" -- \
-    --ledger "$LEDGER" --asset "$ASSET_SAC" --min_bps "$MIN_BPS" \
+    --admin "$ADMIN" --ledger "$LEDGER" --asset "$ASSET_SAC" --min_bps "$MIN_BPS" \
     --max_age "$MAX_AGE" --min_tier "$MIN_TIER")
   echo "vault    $VAULT"
 fi

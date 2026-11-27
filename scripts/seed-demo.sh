@@ -186,7 +186,7 @@ if [ -z "$VAULT" ]; then
   }
   VAULT=$(stellar contract deploy --wasm "$WASM_DIR/covered_vault.wasm" \
     --source "$ADMIN_IDENTITY" --network "$NETWORK" -- \
-    --ledger "$LEDGER" --asset "$PUSD_SAC" --min_bps 10000 --max_age 604800 --min_tier 2)
+    --admin "$ADMIN" --ledger "$LEDGER" --asset "$PUSD_SAC" --min_bps 10000 --max_age 604800 --min_tier 2)
   VAULT=$(printf '%s\n' "$VAULT" | tail -1 | tr -d '\r')
 else
   echo "(reusing $VAULT from $DEP)"

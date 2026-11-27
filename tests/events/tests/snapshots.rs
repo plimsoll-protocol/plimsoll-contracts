@@ -410,6 +410,7 @@ fn covered_vault_event_schema_matches_the_snapshot() {
     let vault_id = f.env.register(
         CoveredVault,
         (
+            Address::generate(&f.env),
             f.ledger_id.clone(),
             f.sac.clone(),
             10_000u32,
@@ -426,11 +427,13 @@ fn covered_vault_event_schema_matches_the_snapshot() {
     vault.deposit(&user, &(40 * UNIT));
     events.extend(take(&f.env, &vault_id));
 
-    vault.withdraw(&user, &(10 * UNIT));
+    vault.request_withdraw(&user, &(10 * UNIT));
+    events.extend(take(&f.env, &vault_id));
+    vault.execute_withdraw(&user);
     events.extend(take(&f.env, &vault_id));
 
     let names: std::vec::Vec<&str> = events.iter().map(|event| event.name.as_str()).collect();
-    for expected in ["deposited", "withdrawn"] {
+    for expected in ["deposited", "withdrawal_queued", "withdrawn"] {
         assert!(
             names.contains(&expected),
             "the harness did not emit {expected}; events: {names:?}"

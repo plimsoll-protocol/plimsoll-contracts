@@ -20,7 +20,7 @@ that raised it.** The three contracts number their errors independently, so
 When a contract calls another and the callee fails, the callee's error is the
 one that comes back. In practice:
 
-- `covered-vault.deposit` and `withdraw` move tokens through the asset's
+- `covered-vault.deposit` and `execute_withdraw` move tokens through the asset's
   Stellar Asset Contract (SAC). If the transfer fails, the caller sees the
   **SAC's** error code, not a vault code. See
   [Errors from the asset contract](#errors-from-the-asset-contract).
@@ -55,6 +55,24 @@ one. Run it yourself before pushing:
 python3 scripts/check_error_codes.py --base origin/main
 ```
 
+### Every code has a test
+
+`cargo test` covers behaviour; a second check covers the list itself.
+[`scripts/check_error_coverage.py`](../scripts/check_error_coverage.py) (the
+**Error-code coverage** step in CI, or `python3
+scripts/check_error_coverage.py` locally) reads every `#[contracterror]` enum
+under `contracts/` and `examples/` and fails if some variant is named by no
+test file in its package. It prints a per-enum covered count and every
+uncovered `Type::Variant` with its number, so the failing output is the to-do
+list. It also fails on a duplicate error number in one enum, because the
+number is what the indexer decodes.
+
+A code that genuinely cannot be reached from a test is listed with its reason
+in `INTENTIONALLY_UNTESTED` at the top of that script. The check fails when a
+listed entry has gone stale (the variant is gone, or a test now covers it), so
+the list cannot be used to paper over a missing test. There are no such
+entries today: every code below is covered.
+
 ## Quick lookup
 
 | N | reporter-registry | coverage-ledger | covered-vault |
@@ -62,10 +80,10 @@ python3 scripts/check_error_codes.py --base origin/main
 | 1 | [`ReporterNotFound`](#1-reporternotfound) | [`NotAStellarAsset`](#1-notastellarasset) | [`InvalidAmount`](#1-invalidamount) |
 | 2 | [`InvalidName`](#2-invalidname) | [`AlreadyListed`](#2-alreadylisted) | [`NotCovered`](#2-notcovered) |
 | 3 | `UpgradeNotProposed` | [`AssetNotListed`](#3-assetnotlisted) | [`InsufficientBalance`](#3-insufficientbalance) |
-| 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | |
-| 5 | [`InvalidMetadata`](#5-invalidmetadata) | [`NotReporter`](#5-notreporter) | |
-| 6 | [`InvalidStakeAmount`](#6-invalidstakeamount) | [`InvalidAmount`](#6-invalidamount) | |
-| 7 | [`InsufficientStake`](#7-insufficientstake) | [`FutureLedger`](#7-futureledger) | |
+| 4 | `UpgradeDelayNotElapsed` | [`NotSupplyPoster`](#4-notsupplyposter) | [`InvalidDelay`](#4-invaliddelay) |
+| 5 | [`InvalidMetadata`](#5-invalidmetadata) | [`NotReporter`](#5-notreporter) | [`NoPendingWithdrawal`](#5-nopendingwithdrawal) |
+| 6 | | [`InvalidAmount`](#6-invalidamount) | [`WithdrawalDelayNotElapsed`](#6-withdrawaldelaynotelapsed) |
+| 7 | | [`FutureLedger`](#7-futureledger) | |
 | 8 | | [`StaleLedger`](#8-staleledger) | |
 | 9 | | [`FutureTimestamp`](#9-futuretimestamp) | |
 | 10 | | [`StaleReport`](#10-stalereport) | |
@@ -134,6 +152,7 @@ when several apply the caller sees the first:
 | --- | --- |
 | `list_asset` | `NotAStellarAsset` (not a SAC), `AlreadyListed`, `NotAStellarAsset` (SAC name has no issuer) |
 | `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `LedgerTooOld`, `StaleLedger` |
+| `is_covered_at` | `FutureLedger`, `Paused` |
 | `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
 | `retract_reserve` | auth, `AssetNotListed`, `NotReporter`, `NoReportToRetract` |
 | `enable_native_supply` | auth, `AssetNotListed` |
@@ -197,10 +216,12 @@ when several apply the caller sees the first:
 
 ### 7 `FutureLedger`
 
-- **Raised by:** `post_supply`.
-- **Cause:** `ledger` is greater than the ledger the transaction executes in.
-- **Remedy:** Post the sequence number of the ledger the supply was actually
-  computed at, which is in the past by the time the transaction lands.
+- **Raised by:** `post_supply`, `is_covered_at`.
+- **Cause:** A supplied sequence (`ledger` or `as_of_ledger`) is greater than
+  the ledger the transaction executes in.
+- **Remedy:** For `post_supply`, use the sequence number the supply was
+  computed at. For `is_covered_at`, query a ledger no later than the one the
+  transaction executes in.
 
 ### 8 `StaleLedger`
 
@@ -325,7 +346,7 @@ users meet most.
 
 ### 1 `InvalidAmount`
 
-- **Raised by:** `deposit`, `withdraw`.
+- **Raised by:** `deposit`, `request_withdraw`.
 - **Cause:** `amount` is zero or negative. On `deposit` it is also raised if
   the new balance would overflow `i128`, which no real asset can reach.
 - **Remedy:** Send a positive amount in the asset's smallest unit.
@@ -354,21 +375,41 @@ users meet most.
 
 ### 3 `InsufficientBalance`
 
-- **Raised by:** `withdraw`.
+- **Raised by:** `request_withdraw`, `execute_withdraw`.
 - **Cause:** `amount` is more than the caller's balance in the vault.
 - **Remedy:** Read `balance(of)` and withdraw at most that.
+
+### 4 `InvalidDelay`
+
+- **Raised by:** `set_withdrawal_delay`, `request_withdraw`.
+- **Cause:** Adding the configured delay to the current ledger timestamp
+  overflows `u64`.
+- **Remedy:** Configure a delay that fits in the remaining timestamp range.
+
+### 5 `NoPendingWithdrawal`
+
+- **Raised by:** `execute_withdraw`.
+- **Cause:** The caller has no queued withdrawal.
+- **Remedy:** Call `request_withdraw` and execute it after its available time.
+
+### 6 `WithdrawalDelayNotElapsed`
+
+- **Raised by:** `execute_withdraw`.
+- **Cause:** The queued withdrawal's `available_at` is later than the current
+  ledger timestamp.
+- **Remedy:** Retry at or after `available_at`.
 
 ## Errors from the asset contract
 
 `covered-vault` moves tokens with the asset's SAC, so these SAC codes can
-surface from `deposit` and `withdraw`. They come from the Soroban host's
+surface from `deposit` and `execute_withdraw`. They come from the Soroban host's
 built-in token. The ones a vault user can hit:
 
 | N | SAC error | When | What to do |
 | ---: | --- | --- | --- |
 | 10 | `BalanceError` | `deposit` of more than the wallet holds | Deposit at most the wallet's token balance. |
 | 11 | `BalanceDeauthorizedError` | The issuer has not authorized, or has frozen, the account's trustline | Contact the issuer; the trustline must be authorized. |
-| 13 | `TrustlineMissingError` | The account has no trustline to the asset (`deposit` from, or `withdraw` to, it) | Add a trustline to the asset first. |
+| 13 | `TrustlineMissingError` | The account has no trustline to the asset (`deposit` from, or `execute_withdraw` to, it) | Add a trustline to the asset first. |
 
 The end-to-end test asserts that an oversized deposit fails with `#10` from
 the SAC.
