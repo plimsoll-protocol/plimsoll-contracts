@@ -37,6 +37,10 @@ use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contractmeta, contracttype,
     panic_with_error, token, Address, BytesN, ContractExecutable, Env, Executable, String, Vec,
 };
+use soroban_sdk::{
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
+    Address, Bytes, BytesN, ContractExecutable, Env, Executable, String, Vec,
+};
 
 const MAX_URI_LEN: u32 = 256;
 /// Longest SAC name: 12-char code + ':' + 56-char G-address.
