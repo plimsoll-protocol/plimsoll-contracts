@@ -36,6 +36,8 @@ contractmeta!(
     token::TokenClient, Address, Bytes, BytesN, ContractExecutable, Env, String, Symbol,
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
     Bytes, BytesN, ContractExecutable, Env, String, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    token::TokenClient, Address, Bytes, BytesN, ContractExecutable, Env, String, Symbol,
 };
 
 const MAX_NAME_LEN: u32 = 64;
@@ -544,6 +546,66 @@ impl ReporterRegistry {
     /// Returns the current administrator address.
     pub fn admin(env: Env) -> Address {
         admin(&env)
+    }
+
+    pub fn set_stake_requirement(env: Env, stake_asset: Address, min_stake_stroops: i128) {
+        admin(&env).require_auth();
+        if min_stake_stroops < 0 {
+            panic_with_error!(&env, RegistryError::InvalidStakeAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::StakeAsset, &stake_asset);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinStakeStroops, &min_stake_stroops);
+        bump_instance(&env);
+        StakeRequirementSet {
+            stake_asset,
+            min_stake_stroops,
+        }
+        .publish(&env);
+    }
+
+    pub fn min_stake_stroops(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinStakeStroops)
+            .unwrap_or(0)
+    }
+
+    pub fn has_minimum_stake(env: Env, reporter: Address) -> bool {
+        meets_minimum_stake(&env, &reporter)
+    }
+
+    pub fn register_reporter(env: Env, reporter: Address, name: String) {
+        reporter.require_auth();
+        if name.is_empty() || name.len() > MAX_NAME_LEN {
+            panic_with_error!(&env, RegistryError::InvalidName);
+        }
+        let key = DataKey::Reporter(reporter.clone());
+        if env.storage().persistent().has(&key) {
+            panic_with_error!(&env, RegistryError::ReporterAlreadyRegistered);
+        }
+        if !meets_minimum_stake(&env, &reporter) {
+            panic_with_error!(&env, RegistryError::InsufficientStake);
+        }
+        let info = ReporterInfo {
+            role: Role::SupplyPoster,
+            name: name.clone(),
+            added_at: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&key, &info);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        bump_instance(&env);
+        ReporterSet {
+            reporter,
+            role: Role::SupplyPoster,
+            name,
+        }
+        .publish(&env);
     }
 
     /// Add a reporter, or change an existing reporter's role and name.

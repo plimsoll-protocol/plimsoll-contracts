@@ -290,6 +290,24 @@ Rules:
 
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`, `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
 
+Rules:
+
+- `set_stake_requirement` configures the native XLM Stellar Asset Contract and
+  a non-negative minimum balance in stroops. The admin supplies the network's
+  native XLM SAC address.
+- `register_reporter` lets an address register itself only as a `SupplyPoster`.
+  It requires the reporter's auth, rejects an address already in the registry,
+  and checks that its current XLM balance meets `MinStakeStroops`.
+- `has_minimum_stake` compares the reporter's current XLM balance with the
+  configured minimum. `coverage-ledger.post_supply` checks it on every post,
+  so a reporter that later falls below the requirement cannot submit a
+  snapshot. This is a balance requirement, not a transfer or custody of XLM.
+
+Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
+`UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`,
+`InsufficientStake = 5`, `InvalidStakeAmount = 6`,
+`ReporterAlreadyRegistered = 7`.
+
 Errors (`RegistryError`): `ReporterNotFound = 1`, `InvalidName = 2`,
 `UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`.
 
