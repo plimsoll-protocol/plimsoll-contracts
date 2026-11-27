@@ -5,7 +5,8 @@
 //! also fails if the guide's copy of this file drifts from it.
 #![no_std]
 
-use plimsoll_types::{CoverageLedgerClient, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD};
+use plimsoll_types::{is_covered, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD};
+use plimsoll_types::{CoverageLedgerClient, CoverageStatus, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env,
 };
@@ -51,16 +52,16 @@ fn policy(env: &Env) -> Policy {
         .expect("policy is set in the constructor")
 }
 
-/// One cross-contract call. `is_covered` never fails: every reason the asset
-/// might not qualify (no figures, stale figures, too weak a signer, not
-/// enough reserves) comes back as `false`.
+/// One cross-contract call. Returns true only when `is_covered` returns
+/// `Covered`; `Stale` and `Uncovered` both block acceptance.
 fn covered(env: &Env, p: &Policy) -> bool {
+    is_covered(env, &p.ledger, &p.asset, p.min_bps, p.max_age, p.min_tier)
     CoverageLedgerClient::new(env, &p.ledger).is_covered(
         &p.asset,
         &p.min_bps,
         &p.max_age,
         &p.min_tier,
-    )
+    ) == CoverageStatus::Covered
 }
 
 #[contractimpl]

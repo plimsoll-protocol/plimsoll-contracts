@@ -99,6 +99,14 @@
       }
     },
     {
+      "name": "asset_delisted",
+      "topics": [
+        "asset_delisted",
+        "<contract>"
+      ],
+      "data": {}
+    },
+    {
       "name": "admin_transferred",
       "topics": [
         "admin_transferred",

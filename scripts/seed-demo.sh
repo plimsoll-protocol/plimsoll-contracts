@@ -23,6 +23,8 @@ ADMIN_IDENTITY=${ADMIN_IDENTITY:-plimsoll-admin}
 WASM_DIR=${WASM_DIR:-target/wasm32v1-none/release}
 DEMO_CODE=PUSD
 DEMO_SUPPLY=10000000000000 # 1,000,000 PUSD in stroops
+LARGE_WITHDRAWAL_THRESHOLD=500000000 # 50 PUSD in stroops
+MIN_STAKE_STROOPS=1000000000 # 100 XLM in stroops
 # Circle's testnet USDC issuer.
 TESTNET_USDC_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
 MAINNET_PASSPHRASE="Public Global Stellar Network ; September 2015"
@@ -125,10 +127,17 @@ POSTER=$(key plimsoll-poster)
 AUDITOR=$(key plimsoll-auditor)
 ISSUER=$(key plimsoll-issuer)
 HOLDER=$(key plimsoll-holder)
+APPROVER=$(key plimsoll-approver)
 echo "poster  $POSTER"
 echo "auditor $AUDITOR"
 echo "issuer  $ISSUER"
 echo "holder  $HOLDER"
+echo "approver $APPROVER"
+
+echo "==> configure native XLM stake requirement"
+NATIVE_XLM_SAC=$(stellar contract id asset --asset native --network "$NETWORK" | tail -1 | tr -d '\r')
+stellar contract invoke --id "$REGISTRY" --source "$ADMIN_IDENTITY" --network "$NETWORK" -- \
+  set_stake_requirement --stake_asset "$NATIVE_XLM_SAC" --min_stake_stroops "$MIN_STAKE_STROOPS" >/dev/null
 
 echo "==> register reporters"
 stellar contract invoke --id "$REGISTRY" --source "$ADMIN_IDENTITY" --network "$NETWORK" -- \
@@ -186,7 +195,9 @@ if [ -z "$VAULT" ]; then
   }
   VAULT=$(stellar contract deploy --wasm "$WASM_DIR/covered_vault.wasm" \
     --source "$ADMIN_IDENTITY" --network "$NETWORK" -- \
-    --ledger "$LEDGER" --asset "$PUSD_SAC" --min_bps 10000 --max_age 604800 --min_tier 2)
+    --ledger "$LEDGER" --asset "$PUSD_SAC" --min_bps 10000 --max_age 604800 --min_tier 2 \
+    --approver "$APPROVER" --large_withdrawal_threshold "$LARGE_WITHDRAWAL_THRESHOLD")
+    --admin "$ADMIN" --ledger "$LEDGER" --asset "$PUSD_SAC" --min_bps 10000 --max_age 604800 --min_tier 2)
   VAULT=$(printf '%s\n' "$VAULT" | tail -1 | tr -d '\r')
 else
   echo "(reusing $VAULT from $DEP)"
@@ -194,10 +205,10 @@ fi
 echo "vault $VAULT"
 
 "$PY" - "$DEP" "$PUSD_SAC" "$ISSUER" "$HOLDER" "$POSTER" "$AUDITOR" \
-  "$VAULT" "$USDC_ISSUER" "$USDC_SAC" <<'PY'
+  "$APPROVER" "$VAULT" "$USDC_ISSUER" "$USDC_SAC" <<'PY'
 import json, sys
 
-path, pusd_sac, issuer, holder, poster, auditor, vault, usdc_issuer, usdc_sac = sys.argv[1:]
+path, pusd_sac, issuer, holder, poster, auditor, approver, vault, usdc_issuer, usdc_sac = sys.argv[1:]
 with open(path, encoding="utf-8") as f:
     d = json.load(f)
 
@@ -209,6 +220,7 @@ d.setdefault("accounts", {}).update(
     {
         "supplyPoster": poster,
         "demoAuditor": auditor,
+        "vaultApprover": approver,
         "demoIssuer": issuer,
         "demoHolder": holder,
     }

@@ -29,13 +29,13 @@ so.
 
 | Actor | Can call | Worst false statement they can make the ledger carry |
 | --- | --- | --- |
-| Registry admin | `set_reporter`, `revoke`, `transfer_admin`, `propose_upgrade`, `execute_upgrade`, `cancel_upgrade` on reporter-registry | Any supply and any auditor or transcriber figure, through reporters it appoints; after the upgrade delay, any registry behaviour at all |
+| Registry admin | `set_reporter`, `batch_register`, `revoke`, `set_max_reporters`, `transfer_admin`, `propose_upgrade`, `execute_upgrade`, `cancel_upgrade` on reporter-registry | Any supply and any auditor or transcriber figure, through reporters it appoints; who may report at all, when the per-asset cap is lowered; after the upgrade delay, any registry behaviour at all |
 | Ledger admin | `transfer_admin`, `propose_upgrade`, `execute_upgrade`, `cancel_upgrade` on coverage-ledger | Nothing directly; after the upgrade delay, any ledger behaviour, including any `is_covered` answer |
 | Supply poster | `post_supply` | Any circulating supply for any listed asset, including `0`, which makes the asset read as covered |
 | Auditor | `post_reserve` (tier 3) | Any reserve figure within the plausibility band, for any listed asset, dated "now" |
 | Transcriber | `post_reserve` (tier 1) | The same at tier 1, which outranks older auditor figures when `min_tier` is 1 |
 | Issuer | `post_reserve` (tier 2) for its own assets | Any reserve figure within the band for its own asset; the registry cannot revoke it |
-| Arbitrary caller | `list_asset`, every view, `deposit` / `withdraw` on a vault for themselves | Nothing about coverage. They can list a look-alike asset under their own issuer |
+| Arbitrary caller | `list_asset`, every view, `deposit` / `request_withdraw` / `execute_withdraw` on a vault for themselves | Nothing about coverage. They can list a look-alike asset under their own issuer |
 
 ## How the answer is assembled
 
@@ -64,7 +64,9 @@ The address stored as `Admin` in reporter-registry. It decides who may speak.
 | Function | What it does |
 | --- | --- |
 | `reporter-registry.set_reporter(reporter, role, name)` | Gives any address the `Auditor`, `Transcriber` or `SupplyPoster` role, or changes an existing reporter's role or name. |
+| `reporter-registry.batch_register(reporters)` | The same grant or change for a list of entries, in one transaction. |
 | `reporter-registry.revoke(reporter)` | Removes a role. The reporter's figures stop counting in the same transaction. |
+| `reporter-registry.set_max_reporters(max)` | Sets the registry-level cap on how many reporters one asset may hold (20 by default), which the coverage ledger applies when a reporter posts for an asset for the first time. |
 | `reporter-registry.transfer_admin(new_admin)` | Hands the role to another address. Needs both the old and the new admin's signatures. |
 | `reporter-registry.propose_upgrade(wasm_hash)` | Schedules new registry code to become executable after `UPGRADE_DELAY_LEDGERS` (17 280 ledgers, about a day). |
 | `reporter-registry.execute_upgrade()` | Installs the proposed code once the delay has passed. |
@@ -109,7 +111,7 @@ The address stored as `Admin` in reporter-registry. It decides who may speak.
   from events: [#29](https://github.com/plimsoll-protocol/plimsoll-contracts/issues/29).
 - The admin is a single address. Nothing in the contract requires a multisig;
   that is operational practice ([RUNBOOK.md](RUNBOOK.md#7-move-admin-to-a-multisig)).
-- Admin transfer happens in one step, with no propose-and-accept: [#3](https://github.com/plimsoll-protocol/plimsoll-contracts/issues/3).
+- Admin transfer happens in one step, with no propose-and-accept: [#3](https://github.com/plimsoll-protocol/plimsoll-contracts/issues/3). The flow as implemented, and what to do when a transfer should not go ahead, is in [admin-transfer.md](admin-transfer.md).
 
 **What an integrator should do:**
 
@@ -255,9 +257,12 @@ Any address with the `Auditor` role. Its reports are `AuditorSigned`
   stores and does not check. An empty URI is rejected, but anything else is
   accepted: [#22](https://github.com/plimsoll-protocol/plimsoll-contracts/issues/22),
   [#23](https://github.com/plimsoll-protocol/plimsoll-contracts/issues/23).
-- **Slots.** Each tier holds at most four reporters per asset. Auditors
-  appointed by the registry admin can fill a tier so that a further honest
-  auditor gets `TooManyReporters` until one of them is revoked.
+- **Slots.** Each tier holds at most four reporters per asset, and the
+  admin's `max_reporters` cap bounds the asset as a whole. Auditors appointed
+  by the registry admin can fill a tier, or the asset, so that a further
+  honest auditor gets `TooManyReporters` or `TooManyReportersPerAsset` until
+  one of them is revoked. The default cap of 20 is above the twelve entries
+  the tier caps allow, so it only bites once an admin lowers it.
 
 **What limits it today:**
 
@@ -373,9 +378,12 @@ Anyone, with no role.
 | Function | What it does |
 | --- | --- |
 | `coverage-ledger.list_asset(sac)` | Lists any genuine Stellar Asset Contract that is not native XLM. Permissionless. |
-| Every view (`coverage`, `is_covered`, `get_*`, `role_of`, `pending_upgrade`, `admin`, ...) | Reads, and extends the TTL of the entries read. |
+| Every view (`coverage`, `is_covered`, `get_*`, `role_of`, `max_reporters`, `pending_upgrade`, `admin`, ...) | Reads, and extends the TTL of the entries read. |
 | `covered-vault.deposit(from, amount)` / `withdraw(to, amount)` | Moves their own funds. Each needs its own address's signature. |
 | `__constructor` on a fresh deployment | Only at deploy time, by whoever deploys. A deployer sets the admins, the registry address and a vault's thresholds, and none of these can be changed afterwards except by upgrade. |
+| Every view (`coverage`, `is_covered`, `get_*`, `role_of`, `pending_upgrade`, `admin`, ...) | Reads, and extends the TTL of the entries read. |
+| `covered-vault.deposit(from, amount)` / `request_withdraw(to, amount)` / `execute_withdraw(to)` | Moves or queues their own funds. Each needs its own address's signature. |
+| `__constructor` on a fresh deployment | Only at deploy time, by whoever deploys. A deployer sets the admins, registry address and vault thresholds; the vault admin can later update its withdrawal delay. |
 
 **What they can falsify:**
 
