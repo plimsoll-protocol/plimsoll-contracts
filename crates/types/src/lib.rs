@@ -2,7 +2,7 @@
 //! cross-contract calls between them.
 #![no_std]
 
-use soroban_sdk::{contractclient, contracttype, Address, Bytes, BytesN, Env, String, Symbol};
+use soroban_sdk::{contractclient, contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 pub mod attestation;
 mod ledger_client;
@@ -66,6 +66,28 @@ pub enum Role {
     Auditor = 1,
     Transcriber = 2,
     SupplyPoster = 3,
+}
+
+/// Access tier in the reporter registry's role-based access control model.
+///
+/// Three tiers exist in ascending order of privilege:
+/// - `Observer`: may read reporter metadata (including fields not publicly
+///   exposed) but may not post reports or modify registry state.
+/// - `Reporter`: may post supply snapshots or reserve reports to the coverage
+///   ledger according to their `Role`; subsumes Observer.
+/// - `Admin`: may assign and revoke roles; subsumes Reporter.
+///
+/// Every address assigned a role in the registry holds exactly one tier.
+/// Existing entries that were created with `set_reporter` are treated as
+/// `Reporter` tier when queried through `access_tier` — no data migration is
+/// required.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RegistryRole {
+    Observer = 1,
+    Reporter = 2,
+    Admin = 3,
 }
 
 /// How much weight a reserve report carries. Ordered: higher is stronger.
@@ -193,6 +215,19 @@ pub struct Coverage {
     pub report_as_of: u64,
 }
 
+/// A point-in-time record of an asset's on-chain coverage, appended to the
+/// ring buffer on every supply snapshot or reserve report post.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoverageSnapshot {
+    pub bps: u32,
+    pub supply: i128,
+    pub reserves: i128,
+    pub tier: Tier,
+    pub ledger: u32,
+    pub timestamp: u64,
+}
+
 /// The ratio a `CoverageStatus::Covered` answer carries.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -221,8 +256,7 @@ pub enum CoverageStatus {
     /// No figure exists yet, or fresh figures are below the requested minimum.
     Uncovered,
     /// The ledger's incident switch is on.
-    Paused,
-}
+    Paused,}
 
 /// A proposed contract upgrade and the first ledger at which it may execute.
 #[contracttype]
@@ -312,6 +346,7 @@ pub trait CoverageLedgerInterface {
     fn coverage(env: Env, sac: Address, min_tier: Tier) -> Option<Coverage>;
     fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> CoverageStatus;
     fn is_covered(env: Env, sac: Address, min_bps: u32, max_age: u64, min_tier: Tier) -> bool;
+    fn get_coverage_history(env: Env, sac: Address, limit: u32) -> Vec<CoverageSnapshot>;
     fn is_covered_at(
         env: Env,
         sac: Address,
@@ -326,8 +361,7 @@ pub trait CoverageLedgerInterface {
         min_bps: u32,
         max_age: u64,
         min_tier: Tier,
-    ) -> CoverageStatus;
-}
+    ) -> CoverageStatus;}
 
 #[cfg(test)]
 mod test {

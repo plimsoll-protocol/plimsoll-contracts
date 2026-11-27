@@ -2025,6 +2025,142 @@ fn a_revoked_auditor_cannot_post_again() {
     assert_eq!(res, Err(Ok(LedgerError::NotReporter.into())));
 }
 
+// ---- coverage history ring buffer (#82) ------------------------------------
+
+#[test]
+fn history_empty_before_first_post() {
+    let f = listed();
+    assert_eq!(f.ledger.get_coverage_history(&f.sac, &10).len(), 0);
+}
+
+#[test]
+fn history_not_pushed_without_reserve() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    assert_eq!(f.ledger.get_coverage_history(&f.sac, &10).len(), 0);
+}
+
+#[test]
+fn history_not_pushed_without_supply() {
+    let f = listed();
+    f.ledger
+        .post_reserve(&f.auditor, &f.sac, &UNIT, &T0, &hash(&f.env, 1), &uri(&f.env));
+    assert_eq!(f.ledger.get_coverage_history(&f.sac, &10).len(), 0);
+}
+
+#[test]
+fn reserve_post_after_supply_pushes_snapshot() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    let history = f.ledger.get_coverage_history(&f.sac, &10);
+    assert_eq!(history.len(), 1);
+    let snap = history.get(0).unwrap();
+    assert_eq!(snap.bps, 10_000);
+    assert_eq!(snap.supply, 100 * UNIT);
+    assert_eq!(snap.reserves, 100 * UNIT);
+    assert_eq!(snap.tier, Tier::IssuerSigned);
+    assert_eq!(snap.timestamp, T0);
+}
+
+#[test]
+fn supply_post_after_reserve_pushes_snapshot() {
+    let f = listed();
+    f.ledger
+        .post_reserve(&f.auditor, &f.sac, &UNIT, &T0, &hash(&f.env, 1), &uri(&f.env));
+    assert_eq!(f.ledger.get_coverage_history(&f.sac, &10).len(), 0);
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &UNIT, &990, &hash(&f.env, 2));
+    let history = f.ledger.get_coverage_history(&f.sac, &10);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get(0).unwrap().bps, 10_000);
+}
+
+#[test]
+fn history_returns_newest_first() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    // First reserve post: 80% coverage
+    f.ledger.post_reserve(
+        &f.auditor,
+        &f.sac,
+        &(80 * UNIT),
+        &(T0 - 200),
+        &hash(&f.env, 2),
+        &uri(&f.env),
+    );
+    // Second reserve post at a later timestamp: 100% coverage
+    f.env.ledger().set_timestamp(T0 + 1);
+    f.ledger.post_reserve(
+        &f.issuer,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &hash(&f.env, 3),
+        &uri(&f.env),
+    );
+    let history = f.ledger.get_coverage_history(&f.sac, &10);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history.get(0).unwrap().timestamp, T0 + 1);
+    assert_eq!(history.get(1).unwrap().timestamp, T0);
+}
+
+#[test]
+fn history_limit_is_respected() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    for i in 0..3u8 {
+        f.env.ledger().set_timestamp(T0 + i as u64);
+        f.ledger.post_reserve(
+            &f.issuer,
+            &f.sac,
+            &((100 + i as i128) * UNIT),
+            &(T0 + i as u64),
+            &hash(&f.env, 10 + i),
+            &uri(&f.env),
+        );
+    }
+    assert_eq!(f.ledger.get_coverage_history(&f.sac, &2).len(), 2);
+    assert_eq!(f.ledger.get_coverage_history(&f.sac, &3).len(), 3);
+    assert_eq!(f.ledger.get_coverage_history(&f.sac, &0).len(), 0);
+}
+
+#[test]
+fn history_ring_wraps_at_capacity() {
+    let f = listed();
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &990, &hash(&f.env, 1));
+    // Post 12 reserves to overflow the capacity-10 ring buffer.
+    for i in 0..12u8 {
+        f.env.ledger().set_timestamp(T0 + i as u64);
+        f.ledger.post_reserve(
+            &f.issuer,
+            &f.sac,
+            &((100 + i as i128) * UNIT),
+            &(T0 + i as u64),
+            &hash(&f.env, 20 + i),
+            &uri(&f.env),
+        );
+    }
+    let history = f.ledger.get_coverage_history(&f.sac, &20);
+    assert_eq!(history.len(), 10);
+    // Newest entry is post i=11 (timestamp T0+11).
+    assert_eq!(history.get(0).unwrap().timestamp, T0 + 11);
+    // Oldest retained entry is post i=2 (timestamp T0+2).
+    assert_eq!(history.get(9).unwrap().timestamp, T0 + 2);
+}
+
 // ---- admin ----------------------------------------------------------------
 
 #[test]

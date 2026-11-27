@@ -2,6 +2,7 @@ extern crate std;
 
 use super::*;
 #[allow(unused_imports)]
+use plimsoll_types::RegistryRole;
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::StellarAssetClient,
@@ -497,6 +498,69 @@ fn transfer_admin_without_new_admin_auth_fails() {
     assert_eq!(client.admin(), admin);
 }
 
+// ---- access tier / RBAC (#84) ---------------------------------------------
+
+#[test]
+fn access_tier_none_for_unknown_address() {
+    let (env, _admin, client) = setup();
+    assert_eq!(client.access_tier(&Address::generate(&env)), None);
+}
+
+#[test]
+fn access_tier_reporter_for_set_reporter_address() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "acme"));
+    assert_eq!(client.access_tier(&who), Some(RegistryRole::Reporter));
+}
+
+#[test]
+fn assign_role_sets_tier() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.assign_role(&who, &RegistryRole::Observer);
+    assert_eq!(client.access_tier(&who), Some(RegistryRole::Observer));
+}
+
+#[test]
+fn assign_role_overrides_reporter_fallback() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "acme"));
+    assert_eq!(client.access_tier(&who), Some(RegistryRole::Reporter));
+    client.assign_role(&who, &RegistryRole::Admin);
+    assert_eq!(client.access_tier(&who), Some(RegistryRole::Admin));
+}
+
+#[test]
+fn revoke_role_clears_assigned_tier() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.assign_role(&who, &RegistryRole::Observer);
+    client.revoke_role(&who);
+    assert_eq!(client.access_tier(&who), None);
+}
+
+#[test]
+fn revoke_role_falls_back_to_reporter_tier_when_registered() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "acme"));
+    client.assign_role(&who, &RegistryRole::Admin);
+    client.revoke_role(&who);
+    assert_eq!(client.access_tier(&who), Some(RegistryRole::Reporter));
+}
+
+#[test]
+fn revoke_role_on_unset_address_is_a_noop() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.revoke_role(&who);
+    assert_eq!(client.access_tier(&who), None);
+}
+
+#[test]
+fn assign_role_requires_admin_auth() {
 // ---- the per-asset reporter cap (#109) -----------------------------------
 
 #[test]
@@ -638,6 +702,37 @@ fn batch_register_requires_admin_auth() {
     let id = env.register(ReporterRegistry, (admin,));
     let client = ReporterRegistryClient::new(&env, &id);
     let who = Address::generate(&env);
+    let res = client.try_assign_role(&who, &RegistryRole::Observer);
+    assert!(res.is_err());
+}
+
+#[test]
+fn assign_role_emits_event() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.assign_role(&who, &RegistryRole::Admin);
+    assert_eq!(env.events().all().events().len(), 1);
+}
+
+#[test]
+fn revoke_role_emits_event() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.assign_role(&who, &RegistryRole::Observer);
+    client.revoke_role(&who);
+    assert_eq!(env.events().all().events().len(), 1);
+}
+
+#[test]
+fn access_tier_independent_of_reporter_revocation() {
+    let (env, _admin, client) = setup();
+    let who = Address::generate(&env);
+    client.set_reporter(&who, &Role::Auditor, &String::from_str(&env, "acme"));
+    client.assign_role(&who, &RegistryRole::Admin);
+    client.revoke(&who);
+    // Reporter removed but explicit tier remains.
+    assert_eq!(client.access_tier(&who), Some(RegistryRole::Admin));
+    assert_eq!(client.role_of(&who), None);
 
     let res = client.try_batch_register(&Vec::from_array(
         &env,
