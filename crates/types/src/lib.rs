@@ -95,6 +95,28 @@ pub enum RegistryRole {
     Admin = 3,
 }
 
+/// Access tier in the reporter registry's role-based access control model.
+///
+/// Three tiers exist in ascending order of privilege:
+/// - `Observer`: may read reporter metadata (including fields not publicly
+///   exposed) but may not post reports or modify registry state.
+/// - `Reporter`: may post supply snapshots or reserve reports to the coverage
+///   ledger according to their `Role`; subsumes Observer.
+/// - `Admin`: may assign and revoke roles; subsumes Reporter.
+///
+/// Every address assigned a role in the registry holds exactly one tier.
+/// Existing entries that were created with `set_reporter` are treated as
+/// `Reporter` tier when queried through `access_tier` — no data migration is
+/// required.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RegistryRole {
+    Observer = 1,
+    Reporter = 2,
+    Admin = 3,
+}
+
 /// How much weight a reserve report carries. Ordered: higher is stronger.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
