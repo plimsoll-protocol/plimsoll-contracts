@@ -911,9 +911,13 @@ impl CoverageLedger {
     /// `None` means the asset has never had a report, not that its reports are
     /// old. `None` as well when `asset` is not listed.
     pub fn last_updated(env: Env, asset: Address) -> Option<u64> {
-        if read_persistent::<AssetRecord>(&env, &DataKey::Asset(asset.clone())).is_none() {
+        let listed = DataKey::Asset(asset.clone());
+        if !env.storage().persistent().has(&listed) {
             return None;
         }
+        env.storage()
+            .persistent()
+            .extend_ttl(&listed, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
         let mut last: Option<u64> = None;
         for tier in Tier::ALL_DESC {
             for report in reports_at(&env, &asset, tier).iter() {
