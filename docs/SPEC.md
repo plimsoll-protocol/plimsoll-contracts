@@ -214,6 +214,8 @@ Decides who may speak. Holds no money.
 | `PendingUpgrade` | instance | `PendingUpgrade` |
 | `DisputeQuorum` | instance | `u32` (absent means `1`) |
 | `MaxReporters` | instance | `u32` (default `20`) |
+| `PendingUpgrade` | instance | `PendingUpgrade` |
+| `DisputeQuorum` | instance | `u32` (absent means `1`) |
 | `Reporter(Address)` | persistent, TTL extended on write and read | `ReporterInfo` |
 | `ReporterIndex` | persistent, TTL extended on write and read | `Vec<Address>`: every registered reporter, in the order they were first indexed |
 
@@ -368,6 +370,9 @@ for `post_reserve` or `post_supply`. Expired pending entries are cleaned up by
 `InvalidMetadata = 5`, `InvalidStakeAmount = 6`, `InsufficientStake = 7`.
 `InvalidMetadata = 5`, `InvalidStakeAmount = 6`, `InsufficientStake = 7`,
 `InvalidMaxReporters = 8`, `EmptyBatch = 9`.
+`UpgradeNotProposed = 3`, `UpgradeDelayNotElapsed = 4`, `InvalidMetadata = 5`,
+`InvalidQuorum = 6`, `DuplicateDispute = 7`, `DisputeAlreadyRejected = 8`,
+`HoldingPeriodElapsed = 9`.
 
 Reporter metadata is optional and lives under its own `Metadata(Address)` key,
 not in `ReporterInfo`. A reporter registered before metadata existed therefore
