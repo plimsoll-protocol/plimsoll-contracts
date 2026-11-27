@@ -22,6 +22,7 @@ use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
     Address, Bytes, BytesN, ContractExecutable, Env, Executable, String, Vec,
     coverage_bps, AssetRecord, Coverage, CoverageStatus, PendingUpgrade, RegistryClient,
+    coverage_bps, AssetRecord, Coverage, CoverageSnapshot, PendingUpgrade, RegistryClient,
     ReserveReport, Role, SupplySnapshot, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
     MAX_PLAUSIBLE_BPS, MIN_PLAUSIBLE_BPS, PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
     UPGRADE_DELAY_LEDGERS,
@@ -128,6 +129,9 @@ contractmeta!(
     key = "repository",
     val = "https://github.com/plimsoll-protocol/plimsoll-contracts"
 );
+
+/// Maximum coverage snapshots kept per asset in the history ring buffer.
+pub const HISTORY_CAPACITY: u32 = 10;
 
 #[contracttype]
 #[derive(Clone)]

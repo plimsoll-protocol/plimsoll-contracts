@@ -702,6 +702,20 @@ impl ReporterRegistry {
     /// * [`ReporterRevoked`] on success
     pub fn revoke(env: Env, reporter: Address) {
     /// Add a reporter, or change an existing reporter's role and name.
+    ///
+    /// If `reporter` already exists, `added_at` is preserved; otherwise it is
+    /// set to the current ledger timestamp.
+    ///
+    /// # Arguments
+    /// * `reporter` - the address being registered or updated
+    /// * `role` - `Auditor`, `Transcriber`, or `SupplyPoster`
+    /// * `name` - display name, 1–64 bytes
+    ///
+    /// # Errors
+    /// * [`RegistryError::InvalidName`] when `name` is empty or longer than 64 bytes
+    ///
+    /// # Events
+    /// * [`ReporterSet`] on success
     pub fn set_reporter(env: Env, reporter: Address, role: Role, name: String) {
         admin(&env).require_auth();
         require_valid_name(&env, &name);
@@ -821,6 +835,21 @@ impl ReporterRegistry {
         };
         if env.ledger().sequence() <= pending.expires_at_ledger {
             return false;
+    /// Remove a reporter from the registry.
+    ///
+    /// # Arguments
+    /// * `reporter` - the address to revoke
+    ///
+    /// # Errors
+    /// * [`RegistryError::ReporterNotFound`] when `reporter` is not registered
+    ///
+    /// # Events
+    /// * [`ReporterRevoked`] on success
+    pub fn revoke(env: Env, reporter: Address) {
+        admin(&env).require_auth();
+        let key = DataKey::Reporter(reporter.clone());
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(&env, RegistryError::ReporterNotFound);
         }
         env.storage().persistent().remove(&key);
         index_remove(&env, &reporter);
