@@ -15,7 +15,7 @@ use plimsoll_types::{
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
-    Address, BytesN, ContractExecutable, Env, Executable, String, Vec,
+    Address, BytesN, ContractExecutable, Env, Executable, String, Symbol, Vec,
 };
 
 const MAX_URI_LEN: u32 = 256;
@@ -212,14 +212,14 @@ fn admin(env: &Env) -> Address {
     env.storage()
         .instance()
         .get(&DataKey::Admin)
-        .expect("admin is set in the constructor")
+        .unwrap_or_else(|| unreachable!("admin is set in the constructor"))
 }
 
 fn registry(env: &Env) -> Address {
     env.storage()
         .instance()
         .get(&DataKey::Registry)
-        .expect("registry is set in the constructor")
+        .unwrap_or_else(|| unreachable!("registry is set in the constructor"))
 }
 
 fn bump_instance(env: &Env) {
@@ -473,11 +473,11 @@ fn pick_counting(env: &Env, candidates: Vec<ReserveReport>) -> Option<ReserveRep
             if skip & (1u32 << i) != 0 {
                 continue;
             }
-            let r = candidates.get(i).unwrap();
+            let r = candidates.get(i).unwrap_or_else(|| unreachable!());
             best_i = Some(match best_i {
                 None => i,
                 Some(bi) => {
-                    let b = candidates.get(bi).unwrap();
+                    let b = candidates.get(bi).unwrap_or_else(|| unreachable!());
                     if r.as_of > b.as_of || (r.as_of == b.as_of && r.tier > b.tier) {
                         i
                     } else {
@@ -488,7 +488,7 @@ fn pick_counting(env: &Env, candidates: Vec<ReserveReport>) -> Option<ReserveRep
         }
         // Phase 2: check only the winner.
         let i = best_i?;
-        let report = candidates.get(i).unwrap();
+        let report = candidates.get(i).unwrap_or_else(|| unreachable!());
         if counts(&registry, &report) {
             return Some(report);
         }
@@ -634,7 +634,9 @@ impl CoverageLedger {
 
     /// List a Stellar-issued asset by its Stellar Asset Contract address.
     /// Permissionless: the code and issuer are read from the SAC itself.
-    pub fn list_asset(env: Env, sac: Address) -> AssetRecord {
+    /// The optional display_name is set by the admin and returned by
+    /// `asset_metadata`.
+    pub fn list_asset(env: Env, sac: Address, display_name: Option<Symbol>) -> AssetRecord {
         if sac.executable() != Some(Executable::StellarAsset) {
             panic_with_error!(&env, LedgerError::NotAStellarAsset);
         }
@@ -652,6 +654,7 @@ impl CoverageLedger {
             code: code.clone(),
             issuer: issuer.clone(),
             listed_at: env.ledger().timestamp(),
+            display_name,
         };
         write_persistent(&env, &key, &record);
         let mut index = assets(&env);

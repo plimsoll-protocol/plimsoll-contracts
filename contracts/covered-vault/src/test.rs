@@ -47,7 +47,7 @@ fn setup() -> Fixture {
     let handle = env.register_stellar_asset_contract_v2(sac_admin);
     let sac = handle.address();
     let issuer = handle.issuer().address();
-    ledger.list_asset(&sac);
+    ledger.list_asset(&sac, &None);
 
     let poster = Address::generate(&env);
     registry.set_reporter(

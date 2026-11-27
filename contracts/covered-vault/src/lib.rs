@@ -4,12 +4,13 @@
 #![no_std]
 
 use plimsoll_types::{
+    CoverageLedgerClient, Tier, WithdrawalRequest, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
     CoverageLedgerClient, CoverageStatus, Tier, INSTANCE_EXTEND_TO, INSTANCE_THRESHOLD,
     PERSISTENT_EXTEND_TO, PERSISTENT_THRESHOLD,
 };
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
-    Address, Env,
+    Address, BytesN, Env, String, Symbol, Vec,
 };
 
 #[contracttype]
@@ -29,6 +30,7 @@ enum DataKey {
     Admin,
     Config,
     Balance(Address),
+    WithdrawalQueue,
     Admin,
     PendingAdmin,
     PendingAdmin,
@@ -143,7 +145,54 @@ fn config(env: &Env) -> VaultConfig {
     env.storage()
         .instance()
         .get(&DataKey::Config)
-        .expect("config is set in the constructor")
+        .unwrap_or_else(|| unreachable!("config is set in the constructor"))
+}
+
+fn read_withdrawal_queue(env: &Env) -> Vec<WithdrawalRequest> {
+    env.storage()
+        .persistent()
+        .get::<_, Vec<WithdrawalRequest>>(&DataKey::WithdrawalQueue)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+fn write_withdrawal_queue(env: &Env, queue: &Vec<WithdrawalRequest>) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::WithdrawalQueue, queue);
+    env.storage().persistent().extend_ttl(
+        &DataKey::WithdrawalQueue,
+        PERSISTENT_THRESHOLD,
+        PERSISTENT_EXTEND_TO,
+    );
+}
+
+/// Admin-gated: add a pending delayed withdrawal request.
+fn add_withdrawal_request(env: &Env, requester: Address, amount: i128, unlock_ledger: u32) {
+    let mut queue = read_withdrawal_queue(env);
+    queue.push_back(WithdrawalRequest {
+        requester,
+        amount,
+        unlock_ledger,
+    });
+    write_withdrawal_queue(env, &queue);
+}
+
+/// Return all pending withdrawal requests (paginated via cursor/limit).
+fn get_withdrawal_queue(env: &Env, cursor: Option<u32>, limit: u32) -> Vec<(Address, i128, u32)> {
+    let queue = read_withdrawal_queue(env);
+    let start = cursor.unwrap_or(0);
+    let page = limit.min(50u32); // max 50 per call
+    let mut out: Vec<(Address, i128, u32)> = Vec::new(env);
+    for (i, req) in queue.iter().enumerate() {
+        if (i as u32) < start {
+            continue;
+        }
+        if out.len() >= page {
+            break;
+        }
+        out.push_back((req.requester.clone(), req.amount, req.unlock_ledger));
+    }
+    out
 }
 
 fn pending_admin(env: &Env) -> Option<Address> {
@@ -428,6 +477,21 @@ impl CoveredVault {
         is_open(&env, &config(&env))
     }
 
+    /// Add a pending delayed withdrawal request.
+    /// The caller must authorise this action.
+    pub fn add_withdrawal_request(env: Env, requester: Address, amount: i128, unlock_ledger: u32) {
+        requester.require_auth();
+        add_withdrawal_request(&env, requester, amount, unlock_ledger);
+    }
+
+    /// Return all pending withdrawal requests (paginated via cursor/limit).
+    /// Returns empty vec when no requests pending.
+    pub fn get_withdrawal_queue(
+        env: Env,
+        cursor: Option<u32>,
+        limit: u32,
+    ) -> Vec<(Address, i128, u32)> {
+        get_withdrawal_queue(&env, cursor, limit)
     pub fn admin(env: Env) -> Address {
         admin(&env)
     }
