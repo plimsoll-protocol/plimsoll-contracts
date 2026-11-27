@@ -157,6 +157,8 @@ pub struct ReporterExpirySet {
     InvalidConfirmWindow = 6,
     PendingRegistrationNotFound = 7,
     RegistrationExpired = 8,
+    TooManyTags = 8,
+    UntrustedLedger = 9,
 }
 
 #[contractevent]
