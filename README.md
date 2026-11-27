@@ -342,6 +342,27 @@ Issues labelled [`good first issue`](https://github.com/plimsoll-protocol/plimso
 are scoped for a first pull request. Read [CONTRIBUTING.md](CONTRIBUTING.md) before you start,
 and comment on an issue to have it assigned.
 
+### Error codes are append-only
+
+The indexer, the web app and third-party front ends decode a contract error by
+its number, so a variant's number is fixed for good once it ships. **New errors
+are appended with the next free number**, and no existing variant is
+renumbered, given another variant's number or removed: an error that is no
+longer raised stays in the enum, so the numbers above and below it keep their
+meaning.
+
+The compiler cannot catch this: `#[repr(u32)]` accepts any numbering. So the
+rule is checked in CI. `scripts/check_error_codes.py` parses every
+`#[contracterror]` enum in the branch and in the base branch and fails on a
+renumbering, a removal or a new variant numbered below the last existing one:
+
+```bash
+python3 scripts/check_error_codes.py --base origin/main
+```
+
+What each number means, and why it can never move, is in
+[docs/ERRORS.md](docs/ERRORS.md#numbers-are-never-reused-or-renumbered).
+
 Security reports: see [SECURITY.md](SECURITY.md). Do not open public issues for vulnerabilities.
 Trust assumptions per actor: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 

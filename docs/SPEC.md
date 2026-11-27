@@ -138,13 +138,13 @@ All three contracts use the same TTL policy, defined in `plimsoll-types`:
 | Entry | Extended by |
 | --- | --- |
 | `Admin`, `Registry`, `Paused` (instance) | `__constructor`, `transfer_admin`, `list_asset`, `post_supply`, `post_reserve`, `pause`, `unpause`, `propose_upgrade`, `execute_upgrade`, `cancel_upgrade` |
-| `Asset(Address)` (persistent) | `list_asset` (write), `get_asset` (read) |
+| `Asset(Address)` (persistent) | `list_asset` (write), `get_asset`, `last_updated` (existence read) |
 | `Supply(Address)` (persistent) | `post_supply` (write), `get_supply`, `coverage`, `is_covered`, `is_covered_at`, `coverage_status` (read) |
-| `SupplyPostedLedger(Address)` (persistent) | `post_supply` (write), `is_covered_at` (read) |
+| `SupplyPostedLedger(Address)` (persistent) | `post_supply` (write), `is_covered_at`, `historical_coverage_bps` (read) |
 | `NativeSupply(Address)` (persistent) | `enable_native_supply` (write), `native_supply_token`, `coverage`, `is_covered`, `coverage_status` (read) |
-| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `coverage`, `is_covered`, `is_covered_at`, `coverage_status` (read) |
-| `ReportPostedLedger(Address, Tier, Address)` (persistent) | `post_reserve` (write), `is_covered_at` (read) |
-| `Assets` (persistent) | `list_asset` (write), `asset_reporter_pairs` (read) |
+| `Report(Address, Tier)` (persistent) | `post_reserve` (write), `get_report`, `get_reports`, `get_all_reports`, `last_updated`, `get_all_latest_reports`, `coverage`, `is_covered`, `is_covered_at`, `coverage_status` (read) |
+| `ReportPostedLedger(Address, Tier, Address)` (persistent) | `post_reserve` (write), `is_covered_at`, `historical_coverage_bps` (read) |
+| `Assets` (persistent) | `list_asset` (write), `asset_reporter_pairs`, `get_all_latest_reports` (read) |
 
 **covered-vault**
 
@@ -318,6 +318,10 @@ data layouts, with real testnet examples, are in [EVENTS.md](EVENTS.md).
 | `get_report(sac, tier: Tier)` | — | `Option<ReserveReport>` (the freshest report at that tier that counts) | — | — |
 | `get_reports(sac)` | — | `Vec<ReserveReport>` (every stored report that counts: strongest tier first, then first-post order within a tier) | — | — |
 | `can_post_report(reporter: Address, asset: Address)` | — | `Result<(), LedgerError>` | `Paused`, `AssetNotListed`, `NotReporter`, `TooManyReporters` | — |
+| `get_all_reports(sac)` | — | `Vec<ReserveReport>` (live, non-expired counting reports, strongest tier first, capped at `MAX_ALL_REPORTS = 20`) | — | — |
+| `last_updated(asset: Address)` | — | `Option<u64>` (the ledger timestamp of the asset's most recent reserve post; `None` when unlisted or never reported) | — | — |
+| `get_all_latest_reports(cursor: Option<u32>, limit: u32)` | — | `Vec<ReserveReport>` (one figure per (asset, reporter) pair, up to `MAX_PAIRS_PER_CALL = 50`) | — | — |
+| `historical_coverage_bps(asset: Address, max_age: u32, as_of_ledger: u32)` | — | `Option<u128>` (coverage as the figures posted by `as_of_ledger` gave it; `None` outside the `max_age`-ledger window) | — | — |
 | `reporter_last_post(reporter: Address, asset: Address)` | — | `Option<u64>` (the ledger timestamp of that reporter's most recent post for the asset) | — | — |
 | `asset_reporter_pairs(cursor: Option<u32>, limit: u32)` | — | `Vec<(Address, Address)>` (up to `MAX_PAIRS_PER_CALL = 50` (asset, reporter) pairs) | — | — |
 | `coverage(sac, min_tier: Tier)` | — | `Option<Coverage>` | — | — |
@@ -417,6 +421,36 @@ Rules:
   stored version was posted after `as_of_ledger`. Entries written before this
   query was introduced have no posting-ledger metadata and are eligible only
   for a query at the current ledger.
+- `last_updated(asset)` answers when the asset was last reported on: the latest
+  `posted_at` across every tier, including a not-yet-migrated v0.1 entry. The
+  registry is not consulted, so a figure whose reporter was later revoked still
+  counts as a post, and a stale figure answers with when it was posted;
+  `get_reports` answers which figures count now. `None` means the asset is
+  unlisted or has never been reported on, which is not the same answer as a very
+  old post. Like `coverage`, a registered alias is followed.
+- `asset_reporter_pairs` and `get_all_latest_reports` walk the pair index the
+  same way: assets in listing order, tiers strongest first within an asset,
+  first-post order within a tier, one entry per reporter per asset.
+  `get_all_latest_reports` carries that reporter's freshest figure (latest
+  `as_of`, ties to the stronger tier). Both page with `cursor` (the index of the
+  first pair, `0` when absent) and `limit`, capped at `MAX_PAIRS_PER_CALL = 50`;
+  an empty page means the cursor is at or past the last pair. Neither consults
+  the registry, so a revoked reporter's figure is still listed. A figure that
+  exists only as a not-yet-migrated v0.1 entry is listed by neither: the pair
+  index is the per-tier reporter index.
+- `historical_coverage_bps(asset, max_age, as_of_ledger)` reads the figures
+  posted no later than `as_of_ledger` and returns
+  `coverage_bps(reserves, supply)` widened to `u128`. The supply snapshot and
+  the chosen report (the freshest at `Transcribed` or stronger posted by then)
+  must both have been posted at most `max_age` **ledgers** before
+  `as_of_ledger`, inclusive — the ledger equivalent of `is_covered`'s seconds.
+  It returns `None` when `as_of_ledger` is in the future (the view cannot fail,
+  so it answers `None` rather than raising `FutureLedger`), when either side has
+  no figure posted by then, or when either is older than `max_age`. The target
+  is a ledger, not a timestamp, so no cadence is assumed. Like `is_covered_at`
+  it reads the stored figures: replaced and retracted ones are not retained, so
+  a ratio they gave cannot be reconstructed here, and the events are the source
+  for that.
 
 - `alias_asset(old, new)` creates or replaces the alias mapping `old → new`.
   Both `old` and `new` must be listed assets; `old == new` is rejected with

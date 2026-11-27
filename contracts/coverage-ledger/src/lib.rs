@@ -419,6 +419,17 @@ fn posted_supply_at_ledger(env: &Env, sac: &Address, as_of_ledger: u32) -> Optio
     })
 }
 
+/// Whether a reporter at `tier` still counts: issuer-signed reports always
+/// count, while auditor and transcriber reports require the matching role.
+fn counts_for_tier(registry: &RegistryClient, tier: Tier, reporter: &Address) -> bool {
+    let needed = match tier {
+        Tier::IssuerSigned => return true,
+        Tier::AuditorSigned => Role::Auditor,
+        Tier::Transcribed => Role::Transcriber,
+    };
+    registry.role_of(reporter) == Some(needed)
+}
+
 /// Whether a stored report still counts: its reporter must still be entitled
 /// to its tier. Issuer-signed reports always count; the issuer is fixed by the
 /// asset record. A revoked auditor or transcriber, or one whose role changed,
@@ -526,6 +537,64 @@ fn reclaim_slots(
         }
     }
     kept
+}
+
+/// One page of the (asset, reporter) pairs in bootstrap order: assets in
+/// listing order, tiers strongest first within an asset, first-post order
+/// within a tier, each reporter once per asset. `start` is the index of the
+/// first pair and `page` is the number of pairs to return.
+fn pair_page(env: &Env, start: u32, page: u32) -> Vec<(Address, Address)> {
+    let mut out = Vec::new(env);
+    if page == 0 {
+        return out;
+    }
+    let mut index = 0u32;
+    for asset in assets(env).iter() {
+        let mut reported = Vec::new(env);
+        for tier in Tier::ALL_DESC {
+            for reporter in reporters(env, &asset, tier).iter() {
+                if reported.contains(&reporter) {
+                    continue;
+                }
+                reported.push_back(reporter.clone());
+                if index < start {
+                    index += 1;
+                    continue;
+                }
+                out.push_back((asset.clone(), reporter));
+                if out.len() == page {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The freshest figure `reporter` has for `sac` across every tier: latest
+/// `as_of`, ties to the stronger tier — the rule `coverage` uses too.
+fn latest_for(env: &Env, sac: &Address, reporter: &Address) -> Option<ReserveReport> {
+    let mut best: Option<ReserveReport> = None;
+    for tier in Tier::ALL_DESC {
+        for report in reports_at(env, sac, tier).iter() {
+            if &report.reporter != reporter {
+                continue;
+            }
+            best = Some(match best {
+                None => report,
+                Some(current) => {
+                    if report.as_of > current.as_of
+                        || (report.as_of == current.as_of && report.tier > current.tier)
+                    {
+                        report
+                    } else {
+                        current
+                    }
+                }
+            });
+        }
+    }
+    best
 }
 
 #[contractimpl]
@@ -927,6 +996,125 @@ impl CoverageLedger {
         out
     }
 
+    /// When `reporter` most recently posted a reserve figure for `asset`: the
+    /// ledger timestamp of that post (`posted_at`), not the figure's `as_of`.
+    ///
+    /// Every tier is searched, so a reporter whose role changed answers with
+    /// whichever of their posts is later, and a not-yet-migrated v0.1 entry
+    /// counts as one of their posts too. The registry is not consulted: a
+    /// revoked reporter's posts remain history, and `get_reports` already says
+    /// which of them still count. `None` when `reporter` has never posted for
+    /// `asset`.
+    pub fn reporter_last_post(env: Env, reporter: Address, asset: Address) -> Option<u64> {
+        let mut last: Option<u64> = None;
+        let mut note = |posted_at: u64| {
+            if last.is_none_or(|seen| posted_at > seen) {
+                last = Some(posted_at);
+            }
+        };
+        for tier in Tier::ALL_DESC {
+            if let Some(legacy) =
+                read_persistent::<ReserveReport>(&env, &DataKey::Report(asset.clone(), tier))
+            {
+                if legacy.reporter == reporter {
+                    note(legacy.posted_at);
+                }
+            }
+            if let Some(report) = read_persistent::<ReserveReport>(
+                &env,
+                &DataKey::ReportBy(asset.clone(), tier, reporter.clone()),
+            ) {
+                note(report.posted_at);
+            }
+        }
+        last
+    }
+
+    /// A page of the (asset, reporter) pairs a bootstrap walks: at most
+    /// [`MAX_PAIRS_PER_CALL`] pairs per call.
+    ///
+    /// Pairs come from the stored per-tier reporter indexes, so no registry
+    /// call is made: a reporter whose figure no longer counts still appears,
+    /// and `get_reports` / `reporter_last_post` say what they posted. A
+    /// reporter with an entry at more than one tier appears once per asset.
+    ///
+    /// Order: assets in listing order, and within an asset the tiers strongest
+    /// first (`AuditorSigned`, `IssuerSigned`, `Transcribed`), first-post
+    /// order within a tier. `cursor` is the index of the first pair to return
+    /// and defaults to `0`; `limit` is capped at `MAX_PAIRS_PER_CALL = 50`.
+    /// An empty page means the cursor is at or past the last pair. Listings
+    /// and first posts only ever grow the sequence, so a bootstrap that must
+    /// be exact should re-read from `0` or dedupe by pair.
+    pub fn asset_reporter_pairs(
+        env: Env,
+        cursor: Option<u32>,
+        limit: u32,
+    ) -> Vec<(Address, Address)> {
+        pair_page(&env, cursor.unwrap_or(0), limit.min(MAX_PAIRS_PER_CALL))
+    }
+
+    /// The ledger timestamp of the asset's most recent reserve post: the
+    /// post's `posted_at`, not the figure's `as_of`.
+    ///
+    /// Every tier is searched, including a not-yet-migrated v0.1 entry, and the
+    /// registry is not consulted: a figure whose reporter was later revoked
+    /// still counts as a post. `get_reports` answers which figures count now.
+    /// `None` for an unlisted asset and for a listed asset that has never been
+    /// reported on — "never reported" and "reported long ago" are different
+    /// answers and must not collapse into each other. If `asset` has a
+    /// registered alias its successor is used, as `coverage` does.
+    pub fn last_updated(env: Env, asset: Address) -> Option<u64> {
+        let resolved = read_persistent::<Address>(&env, &DataKey::Alias(asset.clone()))
+            .unwrap_or_else(|| asset.clone());
+        let key = DataKey::Asset(resolved.clone());
+        // Existence only: the answer does not depend on the asset record, so
+        // the record is not deserialised.
+        if !env.storage().persistent().has(&key) {
+            return None;
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_THRESHOLD, PERSISTENT_EXTEND_TO);
+        let mut latest: Option<u64> = None;
+        for tier in Tier::ALL_DESC {
+            for report in reports_at(&env, &resolved, tier).iter() {
+                latest = Some(match latest {
+                    None => report.posted_at,
+                    Some(seen) => seen.max(report.posted_at),
+                });
+            }
+        }
+        latest
+    }
+
+    /// One figure per (asset, reporter) pair across every listed asset, for an
+    /// indexer bootstrap: at most [`MAX_PAIRS_PER_CALL`] pairs per call.
+    ///
+    /// `cursor` is the index of the first pair and defaults to `0`, so a
+    /// bootstrap walks the ledger with `cursor = Some(seen)` until a page comes
+    /// back empty. Order mirrors the pair listing: assets in listing order,
+    /// tiers strongest first (`AuditorSigned`, `IssuerSigned`, `Transcribed`),
+    /// first-post order within a tier.
+    ///
+    /// A reporter with figures at more than one tier appears once, carrying the
+    /// freshest of them: latest `as_of`, ties to the stronger tier. The registry
+    /// is not consulted, so a figure whose reporter was since revoked is still
+    /// listed and the walk costs one read per pair; `get_reports` answers which
+    /// figures count now. A reporter whose figure exists only as a
+    /// not-yet-migrated v0.1 entry is listed by neither this function nor
+    /// `asset_reporter_pairs`: the pair index is the per-tier reporter index.
+    pub fn get_all_latest_reports(env: Env, cursor: Option<u32>, limit: u32) -> Vec<ReserveReport> {
+        let mut out = Vec::new(&env);
+        for (asset, reporter) in
+            pair_page(&env, cursor.unwrap_or(0), limit.min(MAX_PAIRS_PER_CALL)).iter()
+        {
+            if let Some(report) = latest_for(&env, &asset, &reporter) {
+                out.push_back(report);
+            }
+        }
+        out
+    }
+
     /// Latest supply against the freshest report at `min_tier` or stronger.
     /// If `sac` has a registered alias its successor is used transparently
     /// (at most one hop — the successor's own alias, if any, is not followed).
@@ -1000,6 +1188,53 @@ impl CoverageLedger {
             .saturating_sub(supply.timestamp)
             .max(as_of_timestamp.saturating_sub(report.as_of));
         age <= max_age && coverage_bps(report.amount, supply.amount) >= min_bps
+    }
+
+    /// Coverage in basis points as the figures posted no later than
+    /// `as_of_ledger` gave it, for backtesting and reports.
+    ///
+    /// `max_age` counts **ledgers**: both the supply snapshot and the chosen
+    /// report must have been posted at most `max_age` ledgers before
+    /// `as_of_ledger` (inclusive), the ledger equivalent of `is_covered`'s
+    /// seconds. `None` when `as_of_ledger` is in the future, when nothing is
+    /// stored for both sides as of that ledger, or when either figure is older
+    /// than that.
+    ///
+    /// Like `is_covered_at`, this reads the figures that were posted no later
+    /// than `as_of_ledger`: the ledger does not retain figures that have since
+    /// been replaced or retracted, so a ratio those superseded figures gave
+    /// cannot be reconstructed here. The events are the exact source for that.
+    pub fn historical_coverage_bps(
+        env: Env,
+        asset: Address,
+        max_age: u32,
+        as_of_ledger: u32,
+    ) -> Option<u128> {
+        let current_ledger = env.ledger().sequence();
+        if as_of_ledger > current_ledger {
+            return None;
+        }
+        let resolved = read_persistent::<Address>(&env, &DataKey::Alias(asset.clone()))
+            .unwrap_or_else(|| asset.clone());
+        let supply = posted_supply_at_ledger(&env, &resolved, as_of_ledger)?;
+        let report = best_report_at_ledger(&env, &resolved, Tier::Transcribed, as_of_ledger)?;
+        let supply_posted =
+            read_persistent::<u32>(&env, &DataKey::SupplyPostedLedger(resolved.clone()))
+                .unwrap_or(current_ledger);
+        let report_posted = read_persistent::<u32>(
+            &env,
+            &DataKey::ReportPostedLedger(resolved.clone(), report.tier, report.reporter.clone()),
+        )
+        .unwrap_or(current_ledger);
+        // Both figures are read at the same ledger, so the age of each is the
+        // distance from that ledger to when it was posted. A figure posted
+        // after `as_of_ledger` was already excluded above.
+        if as_of_ledger.saturating_sub(supply_posted) > max_age
+            || as_of_ledger.saturating_sub(report_posted) > max_age
+        {
+            return None;
+        }
+        Some(u128::from(coverage_bps(report.amount, supply.amount)))
     }
 
     /// `coverage` with the reason attached, in one call. Precedence: paused,

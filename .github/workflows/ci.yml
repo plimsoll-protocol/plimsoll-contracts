@@ -44,6 +44,29 @@ jobs:
       - name: End-to-end scenario against the built wasm
         run: cargo test -p plimsoll-e2e
 
+  error-codes:
+    name: error codes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The check reads the enums at the base revision, so it needs the
+          # other branch's commits as well as this one's.
+          fetch-depth: 0
+      - name: Fetch the base branch
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          git fetch --no-tags origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+      # The indexer, the app and third-party front ends decode errors by number,
+      # so a shipped variant keeps its number forever: new codes are appended
+      # and nothing is renumbered or removed (docs/ERRORS.md).
+      - name: Errors are append-only
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: python3 scripts/check_error_codes.py --base "origin/${BASE_REF}"
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest

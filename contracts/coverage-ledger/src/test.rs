@@ -2358,6 +2358,49 @@ fn pause_sets_the_flag_and_emits_the_admin() {
     );
 }
 
+// ---- resource budget ceilings (#103) --------------------------------------
+// Mirrors resource-budgets.json, which carries the prose for why each number
+// exists. A failure here names the call that grew; raise the ceiling in the
+// commit that needs the room, never to make a red run green.
+
+const IS_COVERED_MAX_CPU_INSTRUCTIONS: u64 = 300_000;
+const IS_COVERED_MAX_MEMORY_BYTES: u64 = 134_000;
+const POST_SUPPLY_MAX_CPU_INSTRUCTIONS: u64 = 230_000;
+const POST_SUPPLY_MAX_MEMORY_BYTES: u64 = 116_000;
+const POST_RESERVE_MAX_CPU_INSTRUCTIONS: u64 = 372_000;
+const POST_RESERVE_MAX_MEMORY_BYTES: u64 = 179_000;
+
+/// Run `call` and fail when it costs more than the ceiling documented for it.
+fn assert_within_budget(
+    f: &Fixture,
+    label: &str,
+    max_cpu: u64,
+    max_memory: u64,
+    call: impl FnOnce(),
+) {
+    let cpu_before = f.env.cost_estimate().budget().cpu_instruction_cost();
+    let memory_before = f.env.cost_estimate().budget().memory_bytes_cost();
+    call();
+    let cpu = f
+        .env
+        .cost_estimate()
+        .budget()
+        .cpu_instruction_cost()
+        .saturating_sub(cpu_before);
+    let memory = f
+        .env
+        .cost_estimate()
+        .budget()
+        .memory_bytes_cost()
+        .saturating_sub(memory_before);
+    std::println!("budget {label}: {cpu} CPU / {memory} bytes");
+    assert!(cpu <= max_cpu, "{label} used {cpu} CPU, ceiling {max_cpu}");
+    assert!(
+        memory <= max_memory,
+        "{label} used {memory} bytes, ceiling {max_memory}"
+    );
+}
+
 #[test]
 fn is_covered_stays_within_its_resource_budget() {
     let f = listed();
@@ -2922,4 +2965,355 @@ fn can_post_report_writes_no_storage() {
     // get_asset, by contrast, extends it.
     f.ledger.get_asset(&f.sac);
     assert!(ttl(&f) > before);
+}
+
+// ---- last_updated (#123) --------------------------------------------------
+
+#[test]
+fn last_updated_is_none_for_an_asset_that_is_not_listed() {
+    let f = listed();
+    let other = another_asset(&f);
+    post(&f, &f.auditor, UNIT, T0 - 10);
+
+    assert_eq!(f.ledger.last_updated(&f.sac), Some(T0));
+    // Unlisted, so not the asset the report was posted for, and not askable.
+    assert_eq!(f.ledger.last_updated(&other), None);
+}
+
+#[test]
+fn last_updated_is_none_while_only_a_supply_figure_exists() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    // Never reported on is a different answer from reported long ago.
+    assert_eq!(f.ledger.last_updated(&f.sac), None);
+}
+
+#[test]
+fn last_updated_is_the_post_timestamp_not_the_as_of() {
+    let f = listed();
+    post(&f, &f.auditor, UNIT, T0 - 500);
+    assert_eq!(f.ledger.last_updated(&f.sac), Some(T0));
+
+    f.env.ledger().set_timestamp(T0 + 60);
+    post(&f, &f.auditor, UNIT, T0 - 400);
+    assert_eq!(f.ledger.last_updated(&f.sac), Some(T0 + 60));
+}
+
+#[test]
+fn last_updated_spans_every_tier() {
+    let f = listed();
+    post(&f, &f.transcriber, UNIT, T0 - 300);
+    f.env.ledger().set_timestamp(T0 + 10);
+    post(&f, &f.issuer, UNIT, T0 - 200);
+    f.env.ledger().set_timestamp(T0 + 20);
+    post(&f, &f.auditor, UNIT, T0 - 100);
+
+    assert_eq!(f.ledger.last_updated(&f.sac), Some(T0 + 20));
+}
+
+#[test]
+fn last_updated_includes_a_report_that_stopped_counting() {
+    let f = listed();
+    post(&f, &f.auditor, UNIT, T0 - 10);
+    f.env.ledger().set_timestamp(T0 + 30);
+    post(&f, &f.transcriber, UNIT, T0 - 5);
+    f.registry.revoke(&f.transcriber);
+
+    // Only the auditor's figure still counts, but the revoked transcriber's
+    // later post is still the most recent one.
+    assert_eq!(f.ledger.get_reports(&f.sac).len(), 1);
+    assert_eq!(f.ledger.last_updated(&f.sac), Some(T0 + 30));
+}
+
+#[test]
+fn last_updated_reads_a_legacy_report() {
+    let f = listed();
+    let legacy = legacy_report(&f, &f.auditor, Tier::AuditorSigned, UNIT, T0 - 50);
+    write_legacy(&f, &legacy);
+
+    assert_eq!(f.ledger.last_updated(&f.sac), Some(T0 - 50));
+}
+
+// ---- get_all_latest_reports (#166) ----------------------------------------
+
+#[test]
+fn get_all_latest_reports_is_empty_before_anything_is_posted() {
+    let f = listed();
+    assert!(f.ledger.get_all_latest_reports(&None, &10).is_empty());
+}
+
+#[test]
+fn get_all_latest_reports_returns_only_the_latest_figure_per_pair() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 50 * UNIT, T0 - 300);
+    f.env.ledger().set_timestamp(T0 + 10);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 200);
+
+    let reports = f.ledger.get_all_latest_reports(&None, &10);
+    assert_eq!(reports.len(), 1);
+    let report = reports.get(0).unwrap();
+    assert_eq!(report.amount, 100 * UNIT);
+    assert_eq!(report.as_of, T0 - 200);
+    assert_eq!(report.posted_at, T0 + 10);
+}
+
+#[test]
+fn get_all_latest_reports_orders_like_asset_reporter_pairs() {
+    let f = listed();
+    one_report_per_tier(&f);
+
+    let pairs = f.ledger.asset_reporter_pairs(&None, &10);
+    let reports = f.ledger.get_all_latest_reports(&None, &10);
+    assert_eq!(reports.len(), pairs.len());
+    for i in 0..pairs.len() {
+        let (asset, reporter) = pairs.get(i).unwrap();
+        let report = reports.get(i).unwrap();
+        assert_eq!(asset, f.sac);
+        assert_eq!(report.reporter, reporter);
+    }
+    assert_eq!(reports.get(0).unwrap().tier, Tier::AuditorSigned);
+    assert_eq!(reports.get(1).unwrap().tier, Tier::IssuerSigned);
+    assert_eq!(reports.get(2).unwrap().tier, Tier::Transcribed);
+}
+
+#[test]
+fn get_all_latest_reports_picks_a_reporters_freshest_tier() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.transcriber, 100 * UNIT, T0 - 300);
+    f.registry.set_reporter(
+        &f.transcriber,
+        &Role::Auditor,
+        &String::from_str(&f.env, "promoted"),
+    );
+    f.env.ledger().set_timestamp(T0 + 10);
+    post(&f, &f.transcriber, 90 * UNIT, T0 - 200);
+
+    let reports = f.ledger.get_all_latest_reports(&None, &10);
+    assert_eq!(reports.len(), 1);
+    // The transcriber has an entry at two tiers; the fresher one wins.
+    let report = reports.get(0).unwrap();
+    assert_eq!(report.tier, Tier::AuditorSigned);
+    assert_eq!(report.as_of, T0 - 200);
+}
+
+#[test]
+fn get_all_latest_reports_keeps_a_report_whose_reporter_no_longer_counts() {
+    let f = listed();
+    post(&f, &f.auditor, UNIT, T0 - 10);
+    f.registry.revoke(&f.auditor);
+
+    assert!(f.ledger.get_reports(&f.sac).is_empty());
+    let reports = f.ledger.get_all_latest_reports(&None, &10);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports.get(0).unwrap().reporter, f.auditor);
+}
+
+#[test]
+fn get_all_latest_reports_pages_with_a_cursor() {
+    let f = listed();
+    let other = another_asset(&f);
+    f.ledger.list_asset(&other);
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 300);
+    post(&f, &f.issuer, 100 * UNIT, T0 - 200);
+    f.ledger.post_reserve(
+        &f.transcriber,
+        &other,
+        &UNIT,
+        &(T0 - 100),
+        &hash(&f.env, 4),
+        &uri(&f.env),
+    );
+    f.ledger.post_reserve(
+        &f.auditor,
+        &other,
+        &UNIT,
+        &(T0 - 50),
+        &hash(&f.env, 4),
+        &uri(&f.env),
+    );
+
+    let all = f.ledger.get_all_latest_reports(&None, &10);
+    assert_eq!(all.len(), 4);
+
+    let first = f.ledger.get_all_latest_reports(&None, &3);
+    let second = f.ledger.get_all_latest_reports(&Some(3), &3);
+    assert_eq!(first.len(), 3);
+    assert_eq!(second.len(), 1);
+    for i in 0..3 {
+        assert_eq!(first.get(i).unwrap(), all.get(i).unwrap());
+    }
+    assert_eq!(second.get(0).unwrap(), all.get(3).unwrap());
+
+    // The explicit zero cursor is the default, and a zero limit is empty.
+    assert_eq!(f.ledger.get_all_latest_reports(&Some(0), &3), first);
+    assert!(f.ledger.get_all_latest_reports(&None, &0).is_empty());
+    assert!(f.ledger.get_all_latest_reports(&Some(4), &3).is_empty());
+    assert!(f.ledger.get_all_latest_reports(&Some(99), &3).is_empty());
+}
+
+#[test]
+fn get_all_latest_reports_caps_a_page_at_fifty() {
+    let f = setup();
+    let auditors: std::vec::Vec<Address> =
+        (0..4).map(|_| add_reporter(&f, Role::Auditor)).collect();
+    let transcribers: std::vec::Vec<Address> = (0..4)
+        .map(|_| add_reporter(&f, Role::Transcriber))
+        .collect();
+
+    // Six assets, each with four auditors, the issuer and four transcribers:
+    // 54 pairs, more than one page may carry.
+    for _ in 0..6 {
+        let handle = f
+            .env
+            .register_stellar_asset_contract_v2(Address::generate(&f.env));
+        let sac = handle.address();
+        let issuer = handle.issuer().address();
+        f.ledger.list_asset(&sac);
+        for (i, who) in auditors.iter().enumerate() {
+            f.ledger.post_reserve(
+                who,
+                &sac,
+                &UNIT,
+                &(T0 - 1_000 + i as u64),
+                &hash(&f.env, 4),
+                &uri(&f.env),
+            );
+        }
+        f.ledger.post_reserve(
+            &issuer,
+            &sac,
+            &UNIT,
+            &(T0 - 900),
+            &hash(&f.env, 4),
+            &uri(&f.env),
+        );
+        for (i, who) in transcribers.iter().enumerate() {
+            f.ledger.post_reserve(
+                who,
+                &sac,
+                &UNIT,
+                &(T0 - 800 + i as u64),
+                &hash(&f.env, 4),
+                &uri(&f.env),
+            );
+        }
+    }
+
+    let first = f.ledger.get_all_latest_reports(&None, &1_000);
+    assert_eq!(first.len(), MAX_PAIRS_PER_CALL);
+
+    let mut total = 0u32;
+    let mut cursor: Option<u32> = None;
+    loop {
+        let page = f.ledger.get_all_latest_reports(&cursor, &1_000);
+        assert!(page.len() <= MAX_PAIRS_PER_CALL);
+        if page.is_empty() {
+            break;
+        }
+        total += page.len();
+        cursor = Some(total);
+    }
+    assert_eq!(total, 54);
+}
+
+// ---- historical_coverage_bps (#164) ---------------------------------------
+
+/// The ratio the ledger reports for `f.sac` at `as_of_ledger`.
+fn hist(f: &Fixture, max_age: u32, as_of_ledger: u32) -> Option<u128> {
+    f.ledger
+        .historical_coverage_bps(&f.sac, &max_age, &as_of_ledger)
+}
+
+#[test]
+fn historical_coverage_bps_is_none_until_both_sides_are_posted() {
+    let f = listed();
+    assert_eq!(hist(&f, u32::MAX, 1_000), None);
+    supply(&f, 100 * UNIT);
+    // A supply figure on its own is not coverage.
+    assert_eq!(hist(&f, u32::MAX, 1_000), None);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 100);
+    assert_eq!(hist(&f, u32::MAX, 1_000), Some(10_000));
+}
+
+#[test]
+fn historical_coverage_bps_answers_a_past_ledger() {
+    let f = listed();
+    supply(&f, 400 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 300);
+    assert_eq!(hist(&f, u32::MAX, 1_000), Some(2_500));
+
+    f.env.ledger().set_sequence_number(1_050);
+    f.env.ledger().set_timestamp(T0 + 50);
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &1_040, &hash(&f.env, 1));
+
+    // The 400 * UNIT snapshot was replaced, and the ledger keeps only the
+    // latest, so a ledger between the two posts has no supply figure to read.
+    assert_eq!(hist(&f, u32::MAX, 1_049), None);
+    assert_eq!(hist(&f, u32::MAX, 1_050), Some(10_000));
+    // At the newest figures the replay agrees with the live answer.
+    assert_eq!(
+        f.ledger.coverage(&f.sac, &Tier::Transcribed).unwrap().bps,
+        10_000
+    );
+}
+
+#[test]
+fn historical_coverage_bps_counts_age_in_ledgers_inclusively() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 100);
+    f.env.ledger().set_sequence_number(1_010);
+
+    // Both figures were posted at 1_000: ten ledgers old at 1_010 is accepted,
+    // nine is not, so the comparison is inclusive as in `is_covered`.
+    assert_eq!(hist(&f, 10, 1_010), Some(10_000));
+    assert_eq!(hist(&f, 9, 1_010), None);
+    assert_eq!(hist(&f, 0, 1_000), Some(10_000));
+    assert_eq!(hist(&f, 0, 1_001), None);
+}
+
+#[test]
+fn historical_coverage_bps_is_none_for_a_future_ledger() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 100);
+
+    // Answering about a ledger that has not happened would be a guess.
+    assert_eq!(hist(&f, u32::MAX, 1_001), None);
+}
+
+#[test]
+fn historical_coverage_bps_cannot_reconstruct_a_replaced_report() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 100);
+    assert_eq!(hist(&f, u32::MAX, 1_000), Some(10_000));
+
+    f.env.ledger().set_sequence_number(1_010);
+    f.env.ledger().set_timestamp(T0 + 50);
+    post(&f, &f.auditor, 90 * UNIT, T0 + 50);
+
+    // The figure posted at 1_000 was replaced, so a query at 1_005 has no
+    // report posted by then; the events carry the ratio it gave.
+    assert_eq!(hist(&f, u32::MAX, 1_005), None);
+    assert_eq!(hist(&f, u32::MAX, 1_010), Some(9_000));
+}
+
+#[test]
+fn historical_coverage_bps_is_per_asset() {
+    let f = listed();
+    let other = another_asset(&f);
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 100);
+
+    assert_eq!(hist(&f, u32::MAX, 1_000), Some(10_000));
+    // `other` is not listed, so it has no figures to replay.
+    assert_eq!(
+        f.ledger.historical_coverage_bps(&other, &u32::MAX, &1_000),
+        None
+    );
 }
