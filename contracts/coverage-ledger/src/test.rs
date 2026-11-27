@@ -3778,6 +3778,94 @@ fn post_report_stays_within_its_resource_budget() {
 }
 
 #[test]
+fn non_watcher_cannot_dispute() {
+    let f = listed();
+    post(&f, &f.auditor, UNIT, T0);
+    // f.auditor has Role::Auditor, not Watcher.
+    let res = f.ledger.try_dispute_report(&f.auditor, &f.sac, &T0);
+    assert_eq!(res, Err(Ok(LedgerError::NotAWatcher.into())));
+}
+
+#[test]
+fn duplicate_dispute_fails() {
+    let f = listed();
+    post(&f, &f.auditor, UNIT, T0);
+    let watcher = register_watcher(&f);
+    f.ledger.dispute_report(&watcher, &f.sac, &T0);
+    let res = f.ledger.try_dispute_report(&watcher, &f.sac, &T0);
+    assert_eq!(res, Err(Ok(LedgerError::AlreadyDisputed.into())));
+}
+
+#[test]
+fn admin_resolve_clears_the_dispute() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0 - 60);
+    let watcher = register_watcher(&f);
+    f.ledger.dispute_report(&watcher, &f.sac, &(T0 - 60));
+
+    // Frozen.
+    assert_eq!(f.ledger.coverage(&f.sac, &Tier::AuditorSigned), None);
+
+    // Admin resolves early.
+    f.ledger.resolve_dispute(&f.sac, &(T0 - 60));
+    assert_eq!(f.ledger.get_dispute_status(&f.sac, &(T0 - 60)), None);
+    // Report counts again.
+    assert!(f.ledger.coverage(&f.sac, &Tier::AuditorSigned).is_some());
+}
+
+#[test]
+fn resolve_nonexistent_dispute_fails() {
+    let f = listed();
+    let res = f.ledger.try_resolve_dispute(&f.sac, &T0);
+    assert_eq!(res, Err(Ok(LedgerError::DisputeNotFound.into())));
+}
+
+#[test]
+fn dispute_on_unlisted_asset_fails() {
+    let f = setup();
+    let watcher = register_watcher(&f);
+    let res = f.ledger.try_dispute_report(&watcher, &f.sac, &T0);
+    assert_eq!(res, Err(Ok(LedgerError::AssetNotListed.into())));
+}
+
+#[test]
+fn set_and_get_dispute_hold() {
+    let f = setup();
+    assert_eq!(f.ledger.get_dispute_hold(), DEFAULT_DISPUTE_HOLD_LEDGERS);
+    f.ledger.set_dispute_hold(&500);
+    assert_eq!(f.ledger.get_dispute_hold(), 500);
+}
+
+#[test]
+fn custom_dispute_hold_is_applied() {
+    let f = listed();
+    supply(&f, 100 * UNIT);
+    post(&f, &f.auditor, 100 * UNIT, T0);
+    let watcher = register_watcher(&f);
+    f.ledger.set_dispute_hold(&100);
+    f.ledger.dispute_report(&watcher, &f.sac, &T0);
+    let record = f.ledger.get_dispute_status(&f.sac, &T0).unwrap();
+    assert_eq!(record.hold_until_ledger, 1_000 + 100);
+}
+
+#[test]
+fn dispute_emits_event() {
+    let f = listed();
+    post(&f, &f.auditor, UNIT, T0);
+    let watcher = register_watcher(&f);
+    f.ledger.dispute_report(&watcher, &f.sac, &T0);
+    assert!(f.env.events().all().events().len() > 0);
+}
+
+#[test]
+fn resolve_emits_event() {
+    let f = listed();
+    post(&f, &f.auditor, UNIT, T0);
+    let watcher = register_watcher(&f);
+    f.ledger.dispute_report(&watcher, &f.sac, &T0);
+    f.ledger.resolve_dispute(&f.sac, &T0);
+    assert!(f.env.events().all().events().len() > 0);
 fn enable_native_supply_requires_the_admin() {
     let f = listed();
     let stranger = Address::generate(&f.env);
