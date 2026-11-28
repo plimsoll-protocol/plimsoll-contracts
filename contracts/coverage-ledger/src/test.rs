@@ -5230,3 +5230,64 @@ fn setting_the_minimum_requires_admin_auth() {
     assert!(f.ledger.try_set_min_doc_uri_len(&5).is_err());
     assert_eq!(f.ledger.min_doc_uri_len(), 10);
 }
+
+// ---- all-zero hash rejection (#23) ----------------------------------------
+
+#[test]
+fn post_supply_rejects_all_zero_breakdown_hash() {
+    let f = listed();
+    let zero_hash = BytesN::from_array(&f.env, &[0u8; 32]);
+    let res = f
+        .ledger
+        .try_post_supply(&f.poster, &f.sac, &(100 * UNIT), &1_000, &zero_hash);
+    assert_eq!(res, Err(Ok(LedgerError::InvalidHash.into())));
+    assert_eq!(f.ledger.get_supply(&f.sac), None);
+}
+
+#[test]
+fn post_reserve_rejects_all_zero_doc_hash() {
+    let f = listed();
+    let zero_hash = BytesN::from_array(&f.env, &[0u8; 32]);
+    let res = f.ledger.try_post_reserve(
+        &f.auditor,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &zero_hash,
+        &uri(&f.env),
+    );
+    assert_eq!(res, Err(Ok(LedgerError::InvalidHash.into())));
+    assert_eq!(f.ledger.get_report(&f.sac, &Tier::AuditorSigned), None);
+}
+
+#[test]
+fn non_zero_hashes_with_single_set_byte_are_accepted() {
+    let f = listed();
+    let mut bytes = [0u8; 32];
+    bytes[31] = 1;
+    let non_zero = BytesN::from_array(&f.env, &bytes);
+
+    f.ledger
+        .post_supply(&f.poster, &f.sac, &(100 * UNIT), &1_000, &non_zero);
+    assert_eq!(
+        f.ledger.get_supply(&f.sac).unwrap().breakdown_hash,
+        non_zero
+    );
+
+    let tier = f.ledger.post_reserve(
+        &f.auditor,
+        &f.sac,
+        &(100 * UNIT),
+        &T0,
+        &non_zero,
+        &uri(&f.env),
+    );
+    assert_eq!(tier, Tier::AuditorSigned);
+    assert_eq!(
+        f.ledger
+            .get_report(&f.sac, &Tier::AuditorSigned)
+            .unwrap()
+            .doc_hash,
+        non_zero
+    );
+}

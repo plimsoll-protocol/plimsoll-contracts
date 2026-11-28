@@ -131,6 +131,7 @@ entries today: every code below is covered.
 | 19 | | [`NoReportToRetract`](#19-noreporttoretract) | |
 | 20 | | [`TooManyReportersPerAsset`](#20-toomanyreportersperasset) | |
 | 20 | | [`UriTooShort`](#20-uritoshort) | |
+| 21 | | [`InvalidHash`](#21-invalidhash) | |
 
 ## RegistryError
 
@@ -278,11 +279,11 @@ when several apply the caller sees the first:
 | `post_reserve` | auth, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
 
 | `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `StaleLedger` |
-| `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `FutureLedger`, `LedgerTooOld`, `StaleLedger` |
-| `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters`, `TooManyReportersPerAsset` |
+| `post_supply` | auth, `Paused`, `NotSupplyPoster`, `AssetNotListed`, `InvalidAmount`, `InvalidHash`, `FutureLedger`, `LedgerTooOld`, `StaleLedger` |
+| `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidHash`, `InvalidUri`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters`, `TooManyReportersPerAsset` |
 | `is_covered_at` | `FutureLedger`, `Paused` |
 | `get_coverage_snapshot` | `FutureLedger` |
-| `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidUri`, `UriTooShort`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
+| `post_reserve` | auth, `Paused`, `AssetNotListed`, `NotReporter`, `InvalidAmount`, `InvalidHash`, `InvalidUri`, `UriTooShort`, `FutureTimestamp`, `ImplausibleAmount`, `StaleReport`, `TooManyReporters` |
 | `set_min_doc_uri_len` | auth, `InvalidUri` (above `MAX_URI_LEN`) |
 | `retract_reserve` | auth, `AssetNotListed`, `NotReporter`, `NoReportToRetract` |
 | `enable_native_supply` | auth, `AssetNotListed` |
@@ -508,6 +509,14 @@ when several apply the caller sees the first:
   `set_min_doc_uri_len` (`0` disables it, and an empty URI is then still
   `InvalidUri`). `doc_hash` is what proves the content, so a stable, short
   link is fine.
+
+### 21 `InvalidHash`
+
+- **Raised by:** `post_supply`, `post_reserve`.
+- **Cause:** `breakdown_hash` or `doc_hash` is all zeros (`[0u8; 32]`), which
+  indicates an uncomputed hash and produces an unverifiable record.
+- **Remedy:** Compute the SHA-256 digest of the off-chain breakdown or
+  attestation document and pass the non-zero 32-byte hash.
 
 ## VaultError
 
