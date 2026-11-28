@@ -222,6 +222,7 @@ pub enum LedgerError {
     NoReportToRetract = 19,
     TooManyReportersPerAsset = 20,
     UriTooShort = 20,
+    InvalidHash = 21,
 }
 
 #[contractevent]
@@ -432,6 +433,11 @@ fn require_not_paused(env: &Env) {
     if paused_flag(env) {
         panic_with_error!(env, LedgerError::Paused);
     }
+}
+
+/// Returns `true` when every byte of `hash` is zero (an uncomputed hash).
+fn is_zero_hash(hash: &BytesN<32>) -> bool {
+    hash.to_array() == [0u8; 32]
 }
 
 fn read_persistent<V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
@@ -982,6 +988,7 @@ fn validate_post_reserve(
     sac: &Address,
     amount: i128,
     as_of: u64,
+    doc_hash: &BytesN<32>,
     doc_uri: &String,
 ) -> Result<Tier, LedgerError> {
     if paused_flag(env) {
@@ -1002,6 +1009,9 @@ fn validate_post_reserve(
     };
     if amount < 0 {
         return Err(LedgerError::InvalidAmount);
+    }
+    if is_zero_hash(doc_hash) {
+        return Err(LedgerError::InvalidHash);
     }
     if doc_uri.is_empty() || doc_uri.len() > MAX_URI_LEN {
         return Err(LedgerError::InvalidUri);
@@ -1261,6 +1271,7 @@ impl CoverageLedger {
     /// * [`LedgerError::NotSupplyPoster`] when `poster` is not a registered supply-poster
     /// * [`LedgerError::AssetNotListed`] when `sac` has not been listed
     /// * [`LedgerError::InvalidAmount`] when `amount` is negative
+    /// * [`LedgerError::InvalidHash`] when `breakdown_hash` is all zeros
     /// * [`LedgerError::FutureLedger`] when `ledger` is ahead of the current sequence
     /// * [`LedgerError::StaleLedger`] when `ledger` is not strictly after the previous snapshot
     ///
@@ -1287,6 +1298,9 @@ impl CoverageLedger {
         ensure_listed(&env, &sac);
         if amount < 0 {
             panic_with_error!(&env, LedgerError::InvalidAmount);
+        }
+        if is_zero_hash(&breakdown_hash) {
+            panic_with_error!(&env, LedgerError::InvalidHash);
         }
         let current_ledger = env.ledger().sequence();
         if ledger > current_ledger {
@@ -1350,8 +1364,7 @@ impl CoverageLedger {
         doc_hash: BytesN<32>,
         doc_uri: String,
     ) -> Result<(), LedgerError> {
-        let _ = doc_hash;
-        validate_post_reserve(&env, &reporter, &sac, amount, as_of, &doc_uri).map(|_| ())
+        validate_post_reserve(&env, &reporter, &sac, amount, as_of, &doc_hash, &doc_uri).map(|_| ())
     }
 
     /// Check whether the reporter's complete reserve post would pass validation.
@@ -1364,8 +1377,7 @@ impl CoverageLedger {
         doc_hash: BytesN<32>,
         doc_uri: String,
     ) -> Result<(), LedgerError> {
-        let _ = doc_hash;
-        validate_post_reserve(&env, &reporter, &sac, amount, as_of, &doc_uri).map(|_| ())
+        validate_post_reserve(&env, &reporter, &sac, amount, as_of, &doc_hash, &doc_uri).map(|_| ())
     }
 
     /// Record a reserve figure for `sac`. The reporter's identity sets the
@@ -1386,6 +1398,7 @@ impl CoverageLedger {
     /// * [`LedgerError::AssetNotListed`] when `sac` has not been listed
     /// * [`LedgerError::NotReporter`] when `reporter` has no applicable role
     /// * [`LedgerError::InvalidAmount`] when `amount` is negative
+    /// * [`LedgerError::InvalidHash`] when `doc_hash` is all zeros
     /// * [`LedgerError::InvalidUri`] when `doc_uri` is empty or longer than 256 bytes
     /// * [`LedgerError::FutureTimestamp`] when `as_of` is ahead of the current ledger timestamp
     /// * [`LedgerError::ImplausibleAmount`] when the reserve-to-supply ratio is outside the plausible range
@@ -1414,12 +1427,15 @@ impl CoverageLedger {
                 Some(Role::Transcriber) => Tier::Transcribed,
                 _ => panic_with_error!(&env, LedgerError::NotReporter),
             }
-        let tier = match validate_post_reserve(&env, &reporter, &sac, amount, as_of, &doc_uri) {
+        let tier = match validate_post_reserve(&env, &reporter, &sac, amount, as_of, &doc_hash, &doc_uri) {
             Ok(tier) => tier,
             Err(error) => panic_with_error!(&env, error),
         };
         if amount < 0 {
             panic_with_error!(&env, LedgerError::InvalidAmount);
+        }
+        if is_zero_hash(&doc_hash) {
+            panic_with_error!(&env, LedgerError::InvalidHash);
         }
         if doc_uri.is_empty() || doc_uri.len() > MAX_URI_LEN {
             panic_with_error!(&env, LedgerError::InvalidUri);
